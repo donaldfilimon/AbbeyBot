@@ -13,13 +13,13 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 
 ## Run desktop
 
+Bare `swift run` fails (three executables). Name a product or use a wrapper.
+
 ```bash
-bash Scripts/run.sh
-# or:
-unset TOOLCHAINS
-cd ~/Desktop/AbbeyBot
-/usr/bin/xcrun --toolchain default swift run AbbeyBot --build-path "${TMPDIR}/AbbeyBot.build"
+bash Scripts/run.sh          # Xcode only — required for SwiftData
 ```
+
+Swiftly / DEVELOPMENT-SNAPSHOT **cannot** build the desktop app (`@Query` / `\.modelContext` break).
 
 ## Run server
 
@@ -27,18 +27,17 @@ cd ~/Desktop/AbbeyBot
 cp .env.example .env   # fill DISCORD_BOT_TOKEN, etc.
 docker compose up -d db   # optional if using Postgres
 bash Scripts/run-server.sh
+# optional global swiftly:
+ABBEY_SWIFT=swiftly bash Scripts/run-server.sh
 ```
 
-Or full stack: `docker compose up --build`.
+Or full stack: `docker compose up --build`. Unset `DATABASE_URL` falls back to sqlite under `$TMPDIR` when Postgres is down.
 
 ## Run abbey CLI
 
 ```bash
 bash Scripts/run-abbey.sh
-# or:
-unset TOOLCHAINS
-cd ~/Desktop/AbbeyBot
-/usr/bin/xcrun --toolchain default swift run --build-path "${TMPDIR}/AbbeyBot.cli.build" abbey
+ABBEY_SWIFT=swiftly bash Scripts/run-abbey.sh   # optional
 ```
 
 Local SQLite state lives at `~/.abbey/abbey.sqlite` (directory auto-created); override with `DATABASE_URL` same as the server (`postgres://…`, `sqlite://memory`, `sqlite://<path>`). Set `DISCORD_BOT_TOKEN` (and optional `DISCORD_DEV_GUILD_ID`) to connect live to Discord, otherwise it runs local-only with a warning logged.
