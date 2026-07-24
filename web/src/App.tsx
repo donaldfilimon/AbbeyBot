@@ -1,6 +1,5 @@
 import { useCallback, useState } from "react";
 import "./App.css";
-import { formatCommandName } from "./formatCommandName";
 import {
   type ChannelRow,
   type EquityRow,
@@ -21,6 +20,7 @@ import {
 import { HealthStrip } from "./components/HealthStrip";
 import { ListView } from "./components/ListView";
 import { StatTiles } from "./components/StatTiles";
+import { formatCommandName } from "./formatCommandName";
 import { usePolling } from "./usePolling";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -63,7 +63,10 @@ function App() {
   const channelsFetcher = useCallback((limit: number) => fetchChannels(limit), []);
   const messagesFetcher = useCallback((limit: number) => fetchMessages(limit), []);
   const reputationFetcher = useCallback((limit: number) => fetchReputation(limit), []);
-  const interactionsFetcher = useCallback((limit: number) => fetchInteractions(limit), []);
+  const interactionsFetcher = useCallback(
+    (limit: number) => fetchInteractions(limit),
+    [],
+  );
   const equityFetcher = useCallback((limit: number) => fetchEquity(limit), []);
 
   return (

@@ -17,7 +17,13 @@ export interface ListViewProps<T> {
 /** One table view backed by a `GET /api/<x>?limit=` endpoint with a manual
  * "load more" control that bumps the limit and refetches (no real
  * pagination on the server). */
-export function ListView<T>({ title, columns, keyFor, fetcher, emptyLabel }: ListViewProps<T>) {
+export function ListView<T>({
+  title,
+  columns,
+  keyFor,
+  fetcher,
+  emptyLabel,
+}: ListViewProps<T>) {
   const [limit, setLimit] = useState(INITIAL_LIMIT);
   const [rows, setRows] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
@@ -56,7 +62,9 @@ export function ListView<T>({ title, columns, keyFor, fetcher, emptyLabel }: Lis
       <div className="list-header">
         <h2>{title}</h2>
         <span className="muted">
-          {loading ? "Loading…" : `${rows.length} row(s), limit ${limit}${atCap ? " (max)" : ""}`}
+          {loading
+            ? "Loading…"
+            : `${rows.length} row(s), limit ${limit}${atCap ? " (max)" : ""}`}
         </span>
       </div>
       <DataTable
@@ -76,7 +84,9 @@ export function ListView<T>({ title, columns, keyFor, fetcher, emptyLabel }: Lis
         {atCap ? "Limit reached (500)" : "Load more"}
       </button>
       {atCap && (
-        <p className="muted limit-note">Server list endpoints cap at 500 rows per request.</p>
+        <p className="muted limit-note">
+          Server list endpoints cap at 500 rows per request.
+        </p>
       )}
     </section>
   );
