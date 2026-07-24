@@ -37,6 +37,7 @@
     <dt>Inference failures</dt><dd>#(inferenceFailures)</dd>
   </dl>
   <nav>
+    <a href="/dashboard">/dashboard</a> ·
     <a href="/health">/health</a> ·
     <a href="/api/status">/api/status</a> ·
     <a href="/api/metrics">/api/metrics</a> ·

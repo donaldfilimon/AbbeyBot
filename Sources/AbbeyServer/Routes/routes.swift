@@ -1,5 +1,6 @@
 import AbbeyCore
 import AbbeyServerKit
+import Foundation
 import Vapor
 
 struct HealthDTO: Content {
@@ -61,6 +62,17 @@ func routes(_ app: Application) throws {
         let runtime = req.application.botRuntime
         let state = await runtime.discordState
         return HealthDTO(status: "ok", discord: state.rawValue)
+    }
+
+    app.get("dashboard") { req async throws -> Response in
+        let publicDir = (Bundle.module.resourceURL ?? Bundle.module.bundleURL)
+            .appendingPathComponent("Resources")
+            .appendingPathComponent("Public")
+        let indexPath = publicDir.appendingPathComponent("index.html").path
+        guard FileManager.default.fileExists(atPath: indexPath) else {
+            throw Abort(.notFound, reason: "Dashboard not built — run `bun run build` (or npm) in web/ first")
+        }
+        return try await req.fileio.asyncStreamFile(at: indexPath)
     }
 
     app.get("api", "metrics") { req async -> MetricsDTO in
