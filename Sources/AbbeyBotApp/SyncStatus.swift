@@ -41,8 +41,12 @@ final class SyncStatus {
         lastError = message
     }
 
-    func beginPull() {
+    /// Starts a pull if none is in flight. Returns `false` when a pull is already running.
+    @discardableResult
+    func beginPull() -> Bool {
+        if isPulling { return false }
         isPulling = true
+        return true
     }
 
     func recordPullSuccess(
