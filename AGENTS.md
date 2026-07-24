@@ -7,7 +7,7 @@ Unified Abbey bot at `~/Desktop/AbbeyBot` — **two products** in one package. *
 | Product | Target | Store | UI |
 |---------|--------|-------|-----|
 | Desktop | `AbbeyBot` (`AbbeyBotApp`) | SwiftData | SwiftUI |
-| Server | `AbbeyServer` | Fluent + Postgres (SQLite smoke fallback) | Leaf status + `/api/*` |
+| Server | `AbbeyServer` | Fluent + Postgres (SQLite smoke fallback) | Leaf status + `/api/*` + `/dashboard` SPA |
 | CLI | `abbey` (`AbbeyCLI`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
 
 Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServerKit` (Fluent-backed engine used by `AbbeyServer` + `abbey`). Swift 6.4 language mode; Xcode toolchain only (`xcrun --toolchain default` — swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros).
@@ -53,11 +53,13 @@ docker compose up -d db          # Postgres 16
 # without Docker: DATABASE_URL=sqlite://${TMPDIR}/abbey.sqlite …
 ```
 
-Routes: `GET /health`, `GET /api/metrics`, `GET /api/status`, `POST /api/ingest` (optional `ABBEY_API_TOKEN`), `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
+Routes: `GET /health`, `GET /dashboard` (React SPA when `web/` is built into `Sources/AbbeyServer/Resources/Public/`), `GET /api/metrics`, `GET /api/status`, `POST /api/ingest` (optional `ABBEY_API_TOKEN`), `GET|POST /api/state/*`, `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
 
-Deploy: `Dockerfile` (`swift:6.0-bookworm`, copies `AbbeyServer_*.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`.
+Deploy: `Dockerfile` (Node SPA stage → `swift:6.4-bookworm`, copies `AbbeyServer_*.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`.
 
-Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, `/api/status`, `POST /api/ingest`, and `/api/messages`.
+Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, `/dashboard` (200 if built, 404 skip if not), `/api/status`, `POST /api/ingest`, and `/api/messages`.
+
+Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) best-effort mirrors ingest/remember/forget to AbbeyServer.
 
 ## CLI ops
 
@@ -73,4 +75,4 @@ Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user,
 
 ## Deferred
 
-React dashboard SPA, Discord Voice, SwiftData↔Postgres sync.
+Discord Voice. Full bidirectional SwiftData↔Postgres sync (desktop currently offers best-effort one-way HTTP mirror via `AbbeyServerClient`).
