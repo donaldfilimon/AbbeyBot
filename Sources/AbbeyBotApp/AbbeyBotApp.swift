@@ -10,6 +10,11 @@ struct AbbeyBotApp: App {
     @State private var didActivate = false
 
     init() {
+        do {
+            try AppConfig.shared.validateForStartup()
+        } catch {
+            fatalError("AbbeyBot startup validation failed: \(error.localizedDescription)")
+        }
         let boot = Self.makeModelContainer()
         _engine = State(initialValue: AbbeyEngine(modelContainer: boot.container, storeDegraded: boot.degraded))
     }

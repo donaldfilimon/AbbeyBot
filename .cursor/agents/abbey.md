@@ -48,7 +48,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 
 **Learning & Safety Policy (binding summary):**
 
-Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 will add config validate-before-boot, Discord dry-run, and durable DQN checkpoints; do not claim those APIs exist until code + tests land. Verification gate = `Scripts/verify-all.sh` (or matching smoke). Deferred roadmap only: Twitch, generated-code validator, rollback FS beyond checkpoint `*.bak`. Full policy: `AGENTS.md` → Learning & Safety Policy.
+Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 **shipped**: `AppConfig.validateForStartup()`, `ABBEY_DRY_RUN` / `DiscordBridge` dry-run connect, durable DQN checkpoints at `~/.abbey/dqn-checkpoint.json` (with `*.bak`). Experience journal remains in-memory (Phase 2). Verification gate = `Scripts/verify-all.sh` (or matching smoke). Deferred roadmap: Twitch, generated-code validator, rollback FS beyond checkpoint `*.bak`. Full policy: `AGENTS.md` → Learning & Safety Policy.
 
 **Quality Standards:**
 - Claim-honest: cite real targets, scripts, env vars, and routes from `AGENTS.md` / code — no speculative APIs.

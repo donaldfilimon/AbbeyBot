@@ -86,26 +86,30 @@ Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user,
 
 ## Learning & Safety Policy
 
-Binds the Abbey self-learning system prompt for operators, agents, and implementers. **Policy and intent below** — not a claim that every runtime guard is shipped yet. Phase 1 (validate-before-boot, Discord dry-run, durable DQN checkpoints) is planned work on this branch; do not describe those APIs as live until Tasks 3–4 land.
+Binds the Abbey self-learning system prompt for operators, agents, and implementers. Prioritize **care, clarity, and competence**. Never treat RL rewards as permission to ignore safety.
 
 ### Mission
 
-Operate as a safe, useful, continuously improving community assistant. Learn from explicit user feedback, moderation outcomes, retrieval success, and testable system signals. Never silently execute generated code, never bypass platform rules, and never treat reinforcement learning rewards as permission to ignore safety constraints. Prioritize **care, clarity, and competence**.
+Operate as a safe, useful, continuously improving community assistant. Learn from explicit user feedback, moderation outcomes, retrieval success, and testable system signals. Never silently execute generated code, never bypass platform rules, and never treat reinforcement learning rewards as permission to ignore safety constraints.
 
 ### Reinforcement learning (strategy only)
 
 `DQNAgent` in AbbeyCore drives strategy selection among allowed actions (answer, clarify, retrieve, refuse, etc.). RL improves routing among those actions; it does **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
 
-### Phase 1 runtime principles (planned)
+### Phase 1 runtime (shipped)
 
-| Principle | Intent | Today |
-|-----------|--------|-------|
-| Config validate before startup | Fail loud before Discord connect / serve when mode/env is invalid | `AppConfig` loads defaults/env only — no `validateForStartup()` yet |
-| Dry-run | `ABBEY_DRY_RUN=1` (and AppConfig mirror) skips live gateway connect; logs `dry-run: would connect` for verification smokes | Connect always attempts live gateway when token present |
-| Durable checkpoints | Reloadable DQN checkpoint blob; copy existing file to `*.bak` before overwrite | In-memory `DQNAgent` only — no save/load |
-| Experience append-only default | Replay/experience is append-only by default; backup before risky changes | In-memory replay buffer only; durable append-only file store is Phase 2 |
+| Principle | Behavior |
+|-----------|----------|
+| Config validate before startup | `AppConfig.validateForStartup()` — liveDiscord needs token (unless dry-run); remoteCompatible needs URL; sync URL shape; cooldown/decay ranges. Called from desktop `AbbeyBotApp` init and `configureRuntime` (server/CLI). |
+| Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge.connect` skips gateway, logs `dry-run: would connect`, sets state connected with `botUserId=dry-run`. |
+| Durable checkpoints | `DQNAgent.save/load` + `DQNCheckpointStore` default `~/.abbey/dqn-checkpoint.json`; `*.bak` before overwrite; load on engine start; save every 100 learn steps with target sync. |
+| Experience append-only default | Replay buffer remains **in-memory** for Phase 1; durable append-only experience journal is Phase 2 — do not claim it. |
 
-Wire shared logic in AbbeyCore; call from both `AbbeyEngine` and `BotRuntime` when Phase 1 lands.
+### Toolchain / run UX
+
+- Bare `swift run` fails (three products) — use `Scripts/run.sh` / `run-server.sh` / `run-abbey.sh` or name `AbbeyBot` \| `AbbeyServer` \| `abbey`.
+- Desktop **requires Xcode** (`Scripts/run.sh`). Swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData `@Query`.
+- Server/CLI may use global swiftly: `ABBEY_SWIFT=swiftly bash Scripts/run-server.sh` (builds under `${TMPDIR}/AbbeyBot.swiftly.*.build`).
 
 ### Verification gate = release authority
 

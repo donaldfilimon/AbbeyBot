@@ -41,8 +41,18 @@ public actor DiscordBridge {
     public func connect(
         token: String,
         hooks: DiscordEventHooks,
-        presenceActivityName: String = "AbbeyBot"
+        presenceActivityName: String = "AbbeyBot",
+        dryRun: Bool = AppConfig.shared.dryRun
     ) async {
+        if dryRun {
+            await disconnect()
+            state = .connected
+            lastError = nil
+            botUserId = "dry-run"
+            logger.info("dry-run: would connect (presenceActivity=\(presenceActivityName)); gateway skipped")
+            await hooks.onReady("dry-run")
+            return
+        }
         guard !token.isEmpty else {
             state = .failed
             lastError = "DISCORD_BOT_TOKEN is empty"

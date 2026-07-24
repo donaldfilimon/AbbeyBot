@@ -19,18 +19,90 @@ public actor DQNAgent {
     private(set) var target: NeuralNetwork
     private var buffer: ReplayBuffer
     private var rng: SplitMix64
+    private let seed: UInt64
+    private let checkpointURL: URL?
 
     public let gamma: Float
-    public let epsilon: Float
+    public private(set) var epsilon: Float
     private(set) var stepCount = 0
 
-    public init(topology: [Int], gamma: Float = 0.99, epsilon: Float = 0.1, bufferCapacity: Int = 10_000, seed: UInt64 = 42) {
+    public init(
+        topology: [Int],
+        gamma: Float = 0.99,
+        epsilon: Float = 0.1,
+        bufferCapacity: Int = 10_000,
+        seed: UInt64 = 42,
+        checkpointURL: URL? = nil
+    ) {
         self.online = NeuralNetwork(topology: topology, seed: seed)
         self.target = online
         self.buffer = ReplayBuffer(capacity: bufferCapacity)
         self.rng = SplitMix64(seed: seed &+ 1)
+        self.seed = seed
         self.gamma = gamma
         self.epsilon = epsilon
+        self.checkpointURL = checkpointURL
+    }
+
+    /// Load checkpoint from disk when present. No-op if URL missing or file absent.
+    public func loadCheckpointIfPresent() async throws {
+        guard let url = checkpointURL else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try load(from: url)
+    }
+
+    public func save(to url: URL) throws {
+        let blob = DQNCheckpointBlob(
+            topology: online.topology,
+            gamma: gamma,
+            epsilon: epsilon,
+            stepCount: stepCount,
+            seed: seed,
+            onlineWeights: online.encodeWeights(),
+            onlineBiases: online.biases,
+            targetWeights: target.encodeWeights(),
+            targetBiases: target.biases
+        )
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(blob)
+        } catch {
+            throw DQNCheckpointError.corrupt(error.localizedDescription)
+        }
+        do {
+            try DQNCheckpointStore.writeReplacing(data, to: url)
+        } catch let error as DQNCheckpointError {
+            throw error
+        } catch {
+            throw DQNCheckpointError.io(error.localizedDescription)
+        }
+    }
+
+    public func load(from url: URL) throws {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw DQNCheckpointError.io(error.localizedDescription)
+        }
+        let blob: DQNCheckpointBlob
+        do {
+            blob = try JSONDecoder().decode(DQNCheckpointBlob.self, from: data)
+        } catch {
+            throw DQNCheckpointError.corrupt(error.localizedDescription)
+        }
+        guard blob.topology == online.topology else {
+            throw DQNCheckpointError.topologyMismatch(expected: online.topology, found: blob.topology)
+        }
+        try online.applyCheckpoint(weights: blob.onlineWeights, biases: blob.onlineBiases, topology: blob.topology)
+        try target.applyCheckpoint(weights: blob.targetWeights, biases: blob.targetBiases, topology: blob.topology)
+        stepCount = blob.stepCount
+        epsilon = blob.epsilon
+    }
+
+    /// Test helper: force ε for deterministic `selectAction` checks.
+    public func setEpsilonForTesting(_ value: Float) {
+        epsilon = value
     }
 
     /// ε-greedy action selection over raw Q-values.
@@ -69,6 +141,9 @@ public actor DQNAgent {
         stepCount += 1
         if stepCount % 100 == 0 {
             target = online   // periodic target-network sync
+            if let url = checkpointURL {
+                try? save(to: url)
+            }
         }
     }
 }

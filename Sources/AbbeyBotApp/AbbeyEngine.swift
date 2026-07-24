@@ -40,8 +40,14 @@ final class AbbeyEngine {
         self.eventBus = bus
 
         let config = AppConfig.shared
+        do {
+            try config.validateForStartup()
+        } catch {
+            print("[config] validateForStartup: \(OperatorFacingError.message(error))")
+        }
         self.socialBrain = SocialBrain(modelContainer: modelContainer, eventBus: bus, decay: { config.reputationDecay })
-        self.dqnAgent = DQNAgent(topology: [8, 32, 16, 3])
+        let checkpointURL = try? DQNCheckpointStore.defaultURL()
+        self.dqnAgent = DQNAgent(topology: [8, 32, 16, 3], checkpointURL: checkpointURL)
         self.scheduler = AbbeyScheduler(
             modelContainer: modelContainer,
             eventBus: bus,
@@ -63,7 +69,8 @@ final class AbbeyEngine {
         }
 
         startEventListener()
-        Task { [socialBrain, scheduler] in
+        Task { [socialBrain, scheduler, dqnAgent] in
+            try? await dqnAgent.loadCheckpointIfPresent()
             await socialBrain.warmCache()
             await scheduler.start()
         }
@@ -73,7 +80,8 @@ final class AbbeyEngine {
             Task { await self.pullFromServer() }
         }
 
-        if config.operatingMode == .liveDiscord, config.autoConnectOnLaunch, !config.discordBotToken.isEmpty {
+        if config.operatingMode == .liveDiscord, config.autoConnectOnLaunch,
+           config.dryRun || !config.discordBotToken.isEmpty {
             Task { await self.connectDiscord() }
         }
     }
@@ -298,7 +306,12 @@ final class AbbeyEngine {
             }
         )
 
-        await bridge.connect(token: token, hooks: hooks, presenceActivityName: "AbbeyBot desktop")
+        await bridge.connect(
+            token: token,
+            hooks: hooks,
+            presenceActivityName: "AbbeyBot desktop",
+            dryRun: config.dryRun
+        )
         await refreshDiscordStatus()
     }
 
