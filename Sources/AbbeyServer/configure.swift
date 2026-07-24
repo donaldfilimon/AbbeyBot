@@ -5,20 +5,13 @@ import Leaf
 import Vapor
 
 public func configure(_ app: Application) async throws {
-    // Bundle.module.bundleURL is the bundle *package* root. On Apple platforms that's a
-    // `.bundle` with a `Contents/Resources/` layer inside it; on Linux (flat `.resources`
-    // dirs, e.g. this repo's Docker build) there's no such nesting. `.resourceURL` accounts
-    // for that difference on both platforms — `.bundleURL` does not, and silently resolves
-    // to a path that doesn't exist on macOS (this went unnoticed here because nothing
-    // previously exercised the Leaf-rendered `GET /` route in the server smoke test).
-    let resourcesRoot = (Bundle.module.resourceURL ?? Bundle.module.bundleURL)
-        .appendingPathComponent("Resources")
+    let resourcesRoot = resourcesRootURL()
 
     let viewsPath = resourcesRoot.appendingPathComponent("Views").path
     app.directory.viewsDirectory = viewsPath.hasSuffix("/") ? viewsPath : viewsPath + "/"
     app.views.use(.leaf)
 
-    let publicPath = resourcesRoot.appendingPathComponent("Public").path
+    let publicPath = resourcesPublicDirectory().path
     // FileMiddleware requires the directory to exist at registration time.
     try FileManager.default.createDirectory(atPath: publicPath, withIntermediateDirectories: true)
     app.middleware.use(FileMiddleware(publicDirectory: publicPath))

@@ -67,8 +67,12 @@ Package name is `AbbeyBot`, so the SPM bundle is `AbbeyBot_AbbeyServer.resources
 
 `Scripts/run-server-smoke.sh` step 5/8: Leaf `GET /` must 200; `/dashboard` → `dashboard_ok` (200) or `dashboard_skipped` (404 if Public not built). Prefer `bun run build` in `web/`.
 
+## Follow-up (2026-07-24 closeout)
+
+- [x] Wiring `web/` build into Linux CI — `.github/workflows/ci.yml` runs Node 22 + `npm install`/`npm run build` in `web/` before Swift docker build, asserts `Sources/AbbeyServer/Resources/Public/index.html`
+- Docker execute-verify (`docker build` + curl `/dashboard`) still unverified locally (Docker CLI unavailable)
+
 ## Out of scope (still)
 
-- Wiring `web/` build into Linux CI (404 skip is intentional)
 - SPA-internal React changes
 - Discord Voice; full bidirectional SwiftData↔Postgres sync

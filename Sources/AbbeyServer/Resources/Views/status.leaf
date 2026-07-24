@@ -5,23 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AbbeyServer</title>
   <style>
-    :root { color-scheme: light dark; --ink: #1a1a1a; --muted: #5a5a5a; --line: #ccc; }
+    :root { color-scheme: light dark; --ink: #1a1a1a; --muted: #5a5a5a; --line: #ccc; --accent: #0f6e56; }
     @media (prefers-color-scheme: dark) {
-      :root { --ink: #f2f2f2; --muted: #a8a8a8; --line: #444; }
+      :root { --ink: #f2f2f2; --muted: #a8a8a8; --line: #444; --accent: #3dba94; }
     }
-    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem; color: var(--ink); }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem; color: var(--ink); max-width: 44rem; }
     h1 { font-size: 1.75rem; margin: 0 0 0.25rem; }
-    p { color: var(--muted); margin: 0 0 1.5rem; }
-    dl { display: grid; grid-template-columns: 12rem 1fr; gap: 0.5rem 1rem; max-width: 40rem; }
+    .lede { color: var(--muted); margin: 0 0 1.5rem; }
+    dl { display: grid; grid-template-columns: 12rem 1fr; gap: 0.5rem 1rem; }
     dt { color: var(--muted); }
     dd { margin: 0; font-variant-numeric: tabular-nums; }
-    a { color: inherit; }
-    nav { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); line-height: 1.8; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    nav { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+    nav h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 1rem 0 0.4rem; font-weight: 600; }
+    nav ul { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; }
+    .note { margin-top: 1.5rem; font-size: 0.9rem; color: var(--muted); }
+    .dash-missing { color: var(--muted); font-size: 0.9rem; }
+    code { font-size: 0.9em; }
   </style>
 </head>
 <body>
   <h1>AbbeyServer</h1>
-  <p>Linux/Docker headless bot (Fluent Postgres or sqlite). Desktop companion is a separate macOS app.</p>
+  <p class="lede">Linux/Docker headless bot (Fluent Postgres or sqlite). Desktop companion is a separate macOS app.</p>
   <dl>
     <dt>Database</dt><dd>#(databaseDialect)</dd>
     <dt>Discord</dt><dd>#(discordState)</dd>
@@ -37,17 +43,27 @@
     <dt>Inference failures</dt><dd>#(inferenceFailures)</dd>
   </dl>
   <nav>
-    <a href="/dashboard">/dashboard</a> ·
-    <a href="/health">/health</a> ·
-    <a href="/api/status">/api/status</a> ·
-    <a href="/api/metrics">/api/metrics</a> ·
-    <a href="/api/users">/api/users</a> ·
-    <a href="/api/channels">/api/channels</a> ·
-    <a href="/api/messages">/api/messages</a> ·
-    <a href="/api/reputation">/api/reputation</a> ·
-    <a href="/api/interactions">/api/interactions</a> ·
-    <a href="/api/equity">/api/equity</a>
+    <h2>Operator UI</h2>
+    <ul>
+      #if(dashboardAvailable):
+      <li><a href="/dashboard">Dashboard SPA</a></li>
+      #else:
+      <li class="dash-missing">Dashboard SPA not built — run <code>bun run build</code> in <code>web/</code></li>
+      #endif
+      <li><a href="/health">Health</a></li>
+    </ul>
+    <h2>JSON API</h2>
+    <ul>
+      <li><a href="/api/status">/api/status</a></li>
+      <li><a href="/api/metrics">/api/metrics</a></li>
+      <li><a href="/api/users">/api/users</a></li>
+      <li><a href="/api/channels">/api/channels</a></li>
+      <li><a href="/api/messages">/api/messages</a></li>
+      <li><a href="/api/reputation">/api/reputation</a></li>
+      <li><a href="/api/interactions">/api/interactions</a></li>
+      <li><a href="/api/equity">/api/equity</a></li>
+    </ul>
   </nav>
-  <p style="margin-top:1.5rem;font-size:0.9rem;">POST /api/ingest accepts JSON; set <code>ABBEY_API_TOKEN</code> in production.</p>
+  <p class="note">POST /api/ingest accepts JSON; set <code>ABBEY_API_TOKEN</code> in production.</p>
 </body>
 </html>

@@ -21,6 +21,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build dashboard SPA
+        working-directory: web
+        run: |
+          npm install
+          npm run build
+
+      - name: Assert SPA assets present for SPM Resources
+        run: test -f Sources/AbbeyServer/Resources/Public/index.html
+
       - name: Pull Swift toolchain image
         run: docker pull "$SWIFT_IMAGE"
 
