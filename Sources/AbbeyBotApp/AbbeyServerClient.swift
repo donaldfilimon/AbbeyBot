@@ -72,6 +72,33 @@ struct AbbeyServerClient: Sendable {
         await post(path: "/api/state/forget", body: body)
     }
 
+    /// Reports the desktop's current sync outcome so the operator dashboard's Sync tab
+    /// can show it. Best-effort like every other push — benefits from the same durable
+    /// outbox retry as ingest/remember/forget.
+    func reportSyncStatus(
+        lastPullAt: Date?,
+        lastPullError: String?,
+        lastPushAt: Date?,
+        lastPushError: String?,
+        pendingPushCount: Int
+    ) async {
+        // Matches Vapor's default Content date strategy (ISO 8601), so the server decoding
+        // SyncStatusReportDTO's Date? fields with the default JSONDecoder round-trips cleanly.
+        let iso8601 = ISO8601DateFormatter()
+        var body: [String: JSONValue] = ["pendingPushCount": .int(pendingPushCount)]
+        if let lastPullAt { body["lastPullAt"] = .string(iso8601.string(from: lastPullAt)) }
+        if let lastPullError { body["lastPullError"] = .string(lastPullError) }
+        if let lastPushAt { body["lastPushAt"] = .string(iso8601.string(from: lastPushAt)) }
+        if let lastPushError { body["lastPushError"] = .string(lastPushError) }
+        await post(path: "/api/state/sync-status", body: body)
+    }
+
+    /// Number of pushes currently queued for retry in the durable outbox.
+    func pendingPushCount() -> Int {
+        guard let outbox else { return 0 }
+        return (try? outbox.pendingCount()) ?? 0
+    }
+
     // MARK: - Public API (pull)
 
     func fetchUsers(limit: Int = 500) async throws -> [SyncDTO.User] {

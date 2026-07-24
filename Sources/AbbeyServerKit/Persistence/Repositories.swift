@@ -199,6 +199,35 @@ public enum EquityRepository {
     }
 }
 
+public enum SyncStatusRepository {
+    /// Upserts the single sync-status row (there is exactly one per server).
+    public static func report(
+        lastPullAt: Date?,
+        lastPullError: String?,
+        lastPushAt: Date?,
+        lastPushError: String?,
+        pendingPushCount: Int,
+        on db: any Database
+    ) async throws {
+        let record = try await SyncStatusRecord.query(on: db).first() ?? SyncStatusRecord()
+        record.lastPullAt = lastPullAt
+        record.lastPullError = lastPullError
+        record.lastPushAt = lastPushAt
+        record.lastPushError = lastPushError
+        record.pendingPushCount = pendingPushCount
+        if record.id == nil {
+            try await record.create(on: db)
+        } else {
+            try await record.save(on: db)
+        }
+    }
+
+    /// The current sync status, or an empty (never-reported) default if no report has landed yet.
+    public static func current(on db: any Database) async throws -> SyncStatusRecord {
+        try await SyncStatusRecord.query(on: db).first() ?? SyncStatusRecord(pendingPushCount: 0)
+    }
+}
+
 public struct StatusCounts: Content {
     public var users: Int
     public var channels: Int

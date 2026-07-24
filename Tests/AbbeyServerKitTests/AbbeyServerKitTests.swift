@@ -180,6 +180,44 @@ struct AbbeyServerKitTests {
         }
     }
 
+    @Test func syncStatusRepositoryReportThenCurrentReflectsLatestReport() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            let empty = try await SyncStatusRepository.current(on: db)
+            #expect(empty.lastPullAt == nil)
+            #expect(empty.pendingPushCount == 0)
+
+            try await SyncStatusRepository.report(
+                lastPullAt: Date(timeIntervalSince1970: 1000),
+                lastPullError: nil,
+                lastPushAt: Date(timeIntervalSince1970: 900),
+                lastPushError: "HTTP 500",
+                pendingPushCount: 2,
+                on: db
+            )
+
+            let first = try await SyncStatusRepository.current(on: db)
+            #expect(first.lastPullAt == Date(timeIntervalSince1970: 1000))
+            #expect(first.lastPushError == "HTTP 500")
+            #expect(first.pendingPushCount == 2)
+
+            // A second report upserts the single record rather than accumulating rows.
+            try await SyncStatusRepository.report(
+                lastPullAt: Date(timeIntervalSince1970: 2000),
+                lastPullError: "timeout",
+                lastPushAt: Date(timeIntervalSince1970: 900),
+                lastPushError: "HTTP 500",
+                pendingPushCount: 0,
+                on: db
+            )
+
+            let second = try await SyncStatusRepository.current(on: db)
+            #expect(second.lastPullAt == Date(timeIntervalSince1970: 2000))
+            #expect(second.lastPullError == "timeout")
+            #expect(second.pendingPushCount == 0)
+        }
+    }
+
     @Test func statusCountsReflectWrites() async throws {
         try await withRuntime { app, _ in
             let db = app.db

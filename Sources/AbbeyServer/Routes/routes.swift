@@ -48,6 +48,14 @@ struct ForgetRequestDTO: Content {
     var index: Int
 }
 
+struct SyncStatusReportDTO: Content {
+    var lastPullAt: Date?
+    var lastPullError: String?
+    var lastPushAt: Date?
+    var lastPushError: String?
+    var pendingPushCount: Int
+}
+
 struct OkDTO: Content {
     var ok: Bool
 }
@@ -165,6 +173,25 @@ func routes(_ app: Application) throws {
         } catch MemoryForgetError.invalidIndex {
             throw Abort(.badRequest, reason: "invalid fact index")
         }
+    }
+
+    app.post("api", "state", "sync-status") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(SyncStatusReportDTO.self)
+        try await SyncStatusRepository.report(
+            lastPullAt: body.lastPullAt,
+            lastPullError: body.lastPullError,
+            lastPushAt: body.lastPushAt,
+            lastPushError: body.lastPushError,
+            pendingPushCount: body.pendingPushCount,
+            on: req.db
+        )
+        return OkDTO(ok: true)
+    }
+
+    app.get("api", "sync-status") { req async throws -> SyncStatusRecord in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await SyncStatusRepository.current(on: req.db)
     }
 
     app.get("api", "users") { req async throws -> [UserMemory] in

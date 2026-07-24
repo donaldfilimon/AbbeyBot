@@ -66,9 +66,20 @@ public struct CreateAll: AsyncMigration {
             .field("generated_at", .datetime)
             .unique(on: "symbol")
             .create()
+
+        try await database.schema(SyncStatusRecord.schema)
+            .id()
+            .field("last_pull_at", .datetime)
+            .field("last_pull_error", .string)
+            .field("last_push_at", .datetime)
+            .field("last_push_error", .string)
+            .field("pending_push_count", .int, .required)
+            .field("reported_at", .datetime)
+            .create()
     }
 
     public func revert(on database: Database) async throws {
+        try await database.schema(SyncStatusRecord.schema).delete()
         try await database.schema(EquityIdea.schema).delete()
         try await database.schema(InteractionLog.schema).delete()
         try await database.schema(ReputationEvent.schema).delete()

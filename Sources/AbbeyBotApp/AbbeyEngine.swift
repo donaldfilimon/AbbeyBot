@@ -174,6 +174,21 @@ final class AbbeyEngine {
             print("[sync] pull failed: \(error)")
             SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
         }
+
+        await reportSyncStatusToServer()
+    }
+
+    /// Best-effort report of this session's sync outcome for the operator dashboard's
+    /// Sync tab. Never throws; failures just don't update the dashboard's view of us.
+    private func reportSyncStatusToServer() async {
+        let status = SyncStatus.shared
+        await AbbeyServerClient.shared.reportSyncStatus(
+            lastPullAt: status.lastPullSuccessAt,
+            lastPullError: status.lastPullError,
+            lastPushAt: status.lastSuccessAt,
+            lastPushError: status.lastError,
+            pendingPushCount: AbbeyServerClient.shared.pendingPushCount()
+        )
     }
 
     private func startEventListener() {
