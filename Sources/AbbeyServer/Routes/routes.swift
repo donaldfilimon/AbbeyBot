@@ -57,6 +57,12 @@ private func clampedLimit(_ req: Request, default defaultLimit: Int = 100, max m
     return min(max(raw, 1), maxLimit)
 }
 
+/// Incremental-sync cursor: `?since=<unix epoch seconds>`. Absent/unparseable → nil (full scan, existing behavior).
+private func sinceParam(_ req: Request) -> Date? {
+    guard let raw = req.query[Double.self, at: "since"] else { return nil }
+    return Date(timeIntervalSince1970: raw)
+}
+
 func routes(_ app: Application) throws {
     TwitchEventSubRoutes.register(on: app)
 
@@ -163,32 +169,32 @@ func routes(_ app: Application) throws {
 
     app.get("api", "users") { req async throws -> [UserMemory] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await MemoryRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await MemoryRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "channels") { req async throws -> [ChannelContext] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await ChannelRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await ChannelRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "messages") { req async throws -> [GuildMessage] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await MessageRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await MessageRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "reputation") { req async throws -> [ReputationEvent] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await ReputationRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await ReputationRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "interactions") { req async throws -> [InteractionLog] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await InteractionRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await InteractionRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "equity") { req async throws -> [EquityIdea] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await EquityRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await EquityRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get { req async throws -> View in
