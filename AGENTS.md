@@ -68,7 +68,7 @@ Deploy: `Dockerfile` (Node SPA stage → `swiftlang/swift:nightly-6.4.x-bookworm
 
 Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, Leaf `GET /`, `/dashboard` (200 if built, 404 skip if not), `/api/status`, `POST /api/ingest`, list endpoints, and `/api/state` remember/user/channel.
 
-Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) best-effort mirrors ingest/remember/forget to AbbeyServer; Settings shows last sync success/failure for the session.
+Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — best-effort **push** (ingest/remember/forget) plus **pull** on launch and Settings “Pull now” (server-wins users/channels; messages insert-if-missing). Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session.
 
 ## CLI ops
 
@@ -84,4 +84,6 @@ Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user,
 
 ## Deferred
 
-Discord Voice. Full bidirectional SwiftData↔Postgres sync (desktop currently offers best-effort one-way HTTP mirror via `AbbeyServerClient`).
+Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
+
+Full CRDT / equity-interaction merge — desktop ships **push + pull** (launch + Settings “Pull now”; server-wins users/channels; messages insert-if-missing).

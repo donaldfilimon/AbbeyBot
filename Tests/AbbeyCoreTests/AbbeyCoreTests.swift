@@ -47,6 +47,23 @@ struct AbbeyCoreTests {
         #expect(InteractionCommandLabel.format("/voice") == "/voice")
     }
 
+    @Test func discordVoiceCopyNeverClaimsAudio() {
+        let joined = DiscordCopy.voiceJoined(channelId: "c1")
+        let left = DiscordCopy.voiceLeft(guildId: "g1")
+        let idle = DiscordCopy.voiceStatus(guildId: nil, channelId: nil)
+        let active = DiscordCopy.voiceStatus(guildId: "g1", channelId: "c1")
+        for sample in [joined, left, idle, active, DiscordCopy.voicePresenceOnly, DiscordCopy.voiceUnknownSubcommand] {
+            #expect(sample.localizedCaseInsensitiveContains("no audio") || sample.localizedCaseInsensitiveContains("presence only"))
+            #expect(!sample.localizedCaseInsensitiveContains("listening to you"))
+            #expect(!sample.localizedCaseInsensitiveContains("playing audio"))
+        }
+        #expect(joined.contains("c1"))
+        #expect(left.contains("g1"))
+        #expect(active.contains("c1") && active.contains("g1"))
+        #expect(VoiceAction.join(channelId: "x") == .join(channelId: "x"))
+        #expect(VoiceAction.leave == .leave)
+    }
+
     @Test func intentQualityAndSuggestions() {
         #expect(IntentClassifier.Intent.question.quality == 0.8)
         #expect(IntentClassifier.Intent.unknown.quality == 0.2)
@@ -109,7 +126,8 @@ struct AbbeyCoreTests {
     }
 
     @Test func commandRegistryNonEmpty() {
-        #expect(CommandRegistry.all.count == 6)
+        #expect(CommandRegistry.all.count == 7)
+        #expect(CommandRegistry.all.contains(where: { $0.name == "voice" }))
     }
 
     @Test func reputationMathBlendAndPenalty() {

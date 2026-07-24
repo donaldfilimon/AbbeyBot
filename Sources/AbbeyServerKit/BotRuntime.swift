@@ -395,8 +395,31 @@ public actor BotRuntime {
                 let mapped = PersonaName.resolve(name)
                 await self.personaRouter.setPersona(named: mapped)
                 return DiscordCopy.switchedPersona(mapped)
+            },
+            voice: { [weak self] action, guildId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                return await self.performVoice(action, guildId: guildId)
             }
         )
+    }
+
+    private func performVoice(_ action: VoiceAction, guildId: String) async -> String {
+        let state = await discordBridge.state
+        guard state == .connected else { return DiscordCopy.voiceNotConnected }
+        let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedGuild.isEmpty, trimmedGuild != "DM" else {
+            return DiscordCopy.voiceMissingGuild
+        }
+        switch action {
+        case .join(let channelId):
+            let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedChannel.isEmpty else { return DiscordCopy.voiceMissingChannel }
+            let ok = await discordBridge.joinVoice(guildId: trimmedGuild, channelId: trimmedChannel)
+            return ok ? DiscordCopy.voiceJoined(channelId: trimmedChannel) : DiscordCopy.voiceNotConnected
+        case .leave:
+            let ok = await discordBridge.leaveVoice(guildId: trimmedGuild)
+            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceMissingGuild
+        }
     }
 }
 

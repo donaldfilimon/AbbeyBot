@@ -9,7 +9,7 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 | Shared engine | `AbbeyServerKit` — Fluent-backed `BotRuntime` used by server + CLI |
 | CLI | `abbey` — terminal chat sharing the same brain, local SQLite |
 | Core | `AbbeyCore` — brain, personas, inference, DiscordBM |
-| Discord | DiscordBM gateway + REST (Voice deferred) |
+| Discord | DiscordBM gateway + REST (voice presence join/leave; audio deferred) |
 
 ## Run desktop
 
@@ -93,8 +93,8 @@ Dockerfile / docker-compose.yml
 - `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`, max 500)
 - `GET /` — Leaf status; Operator UI + JSON API nav; Dashboard SPA link when `Public/index.html` exists, else build hint
 
-Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) best-effort mirrors ingest/remember/forget (failures never block local SwiftData writes).
+Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” (server-wins users/channels; messages insert-if-missing). Failures never block local SwiftData writes.
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, one-way desktop→server HTTP sync. Still deferred: Discord Voice; full bidirectional SwiftData↔Postgres sync.
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, one-way desktop→server HTTP sync. Voice presence and push+pull sync shipped. Still deferred: Discord Voice audio; CRDT/full-history sync.

@@ -2,13 +2,15 @@ import Foundation
 import AbbeyCore
 
 /// Best-effort HTTP client that mirrors desktop SwiftData writes to the running
-/// AbbeyServer, so the CLI/server share state with this app.
+/// AbbeyServer, and pulls list endpoints for sync MVP.
 ///
-/// This client is deliberately non-throwing to callers: every method swallows
+/// POST methods are deliberately non-throwing to callers: every method swallows
 /// its own errors and logs them, and every call is expected to be fired from a
 /// detached/unstructured `Task` at the call site so it never blocks the caller
 /// or the main actor. Sync is "off" (a silent no-op) whenever
 /// `AppConfig.shared.syncServerURL` is empty.
+///
+/// GET fetch helpers throw so pull can surface failures into `SyncStatus`.
 struct AbbeyServerClient: Sendable {
     static let shared = AbbeyServerClient()
 
@@ -18,7 +20,40 @@ struct AbbeyServerClient: Sendable {
         self.session = session
     }
 
-    // MARK: - Public API
+    // MARK: - DTO shapes (Fluent Model Content / camelCase)
+
+    struct SyncUserDTO: Decodable, Sendable {
+        var id: UUID?
+        var compositeKey: String
+        var discordUserId: String
+        var guildId: String
+        var facts: [String]
+        var reputation: Double
+        var interactionCount: Int
+        var updatedAt: Date?
+    }
+
+    struct SyncChannelDTO: Decodable, Sendable {
+        var id: UUID?
+        var compositeKey: String
+        var channelId: String
+        var guildId: String
+        var summary: String
+        var messageCount: Int
+        var updatedAt: Date?
+    }
+
+    struct SyncMessageDTO: Decodable, Sendable {
+        var id: UUID?
+        var discordMessageId: String
+        var channelId: String
+        var guildId: String
+        var authorId: String
+        var content: String
+        var createdAt: Date?
+    }
+
+    // MARK: - Public API (push)
 
     func ingest(
         content: String,
@@ -57,6 +92,20 @@ struct AbbeyServerClient: Sendable {
         await post(path: "/api/state/forget", body: body)
     }
 
+    // MARK: - Public API (pull)
+
+    func fetchUsers(limit: Int = 500) async throws -> [SyncUserDTO] {
+        try await get(path: "/api/users", limit: limit)
+    }
+
+    func fetchChannels(limit: Int = 500) async throws -> [SyncChannelDTO] {
+        try await get(path: "/api/channels", limit: limit)
+    }
+
+    func fetchMessages(limit: Int = 500) async throws -> [SyncMessageDTO] {
+        try await get(path: "/api/messages", limit: limit)
+    }
+
     // MARK: - Internals
 
     /// Minimal JSON value so we can mix strings and an int in one request body
@@ -73,6 +122,23 @@ struct AbbeyServerClient: Sendable {
         }
     }
 
+    enum SyncClientError: Error, LocalizedError, Sendable {
+        case notConfigured
+        case invalidURL(String)
+        case httpStatus(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .notConfigured:
+                return "syncServerURL is empty"
+            case .invalidURL(let path):
+                return "invalid syncServerURL for \(path)"
+            case .httpStatus(let code):
+                return "HTTP \(code)"
+            }
+        }
+    }
+
     private func post(path: String, body: [String: String]) async {
         let objectBody = body.mapValues { $0 as Any }
         await post(path: path, jsonObjectBody: objectBody)
@@ -84,36 +150,17 @@ struct AbbeyServerClient: Sendable {
     }
 
     private func post(path: String, jsonObjectBody: [String: Any]) async {
-        let rawBase = AppConfig.shared.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rawBase.isEmpty else {
-            // Sync is unconfigured — silently no-op.
-            return
-        }
-        let base = rawBase.hasSuffix("/") ? String(rawBase.dropLast()) : rawBase
-        let suffix = path.hasPrefix("/") ? path : "/\(path)"
-        guard let url = URL(string: base + suffix) else {
-            print("[sync] invalid syncServerURL, skipping \(path)")
-            await recordFailure(path: path, message: "invalid syncServerURL")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let token = AppConfig.shared.syncAPIToken
-        if !token.isEmpty {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
         do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: jsonObjectBody)
-        } catch {
-            print("[sync] failed to encode body for \(path): \(error)")
-            await recordFailure(path: path, message: "encode failed")
-            return
-        }
+            var request = try makeRequest(path: path, method: "POST")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            do {
+                request.httpBody = try JSONSerialization.data(withJSONObject: jsonObjectBody)
+            } catch {
+                print("[sync] failed to encode body for \(path): \(error)")
+                await recordFailure(path: path, message: "encode failed")
+                return
+            }
 
-        do {
             let (_, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 print("[sync] \(path) returned status \(http.statusCode)")
@@ -121,10 +168,63 @@ struct AbbeyServerClient: Sendable {
             } else {
                 await recordSuccess(path: path)
             }
+        } catch SyncClientError.notConfigured {
+            // Sync is unconfigured — silently no-op.
+            return
         } catch {
             print("[sync] \(path) failed: \(error)")
             await recordFailure(path: path, message: OperatorFacingError.message(error))
         }
+    }
+
+    private func get<T: Decodable>(path: String, limit: Int) async throws -> T {
+        let clamped = min(max(limit, 1), 500)
+        var request = try makeRequest(
+            path: path,
+            method: "GET",
+            queryItems: [URLQueryItem(name: "limit", value: String(clamped))]
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw SyncClientError.httpStatus(http.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(T.self, from: data)
+    }
+
+    /// Shared base URL + optional Bearer token for POST and GET.
+    private func makeRequest(
+        path: String,
+        method: String,
+        queryItems: [URLQueryItem] = []
+    ) throws -> URLRequest {
+        let rawBase = AppConfig.shared.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawBase.isEmpty else {
+            throw SyncClientError.notConfigured
+        }
+        let base = rawBase.hasSuffix("/") ? String(rawBase.dropLast()) : rawBase
+        let suffix = path.hasPrefix("/") ? path : "/\(path)"
+        guard var components = URLComponents(string: base + suffix) else {
+            throw SyncClientError.invalidURL(path)
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw SyncClientError.invalidURL(path)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        let token = AppConfig.shared.syncAPIToken
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     private func recordSuccess(path: String) async {

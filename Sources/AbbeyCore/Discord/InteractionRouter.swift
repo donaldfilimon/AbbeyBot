@@ -1,6 +1,12 @@
 import Foundation
 import DiscordBM
 
+/// Slash /voice subcommand actions (gateway presence only — no audio).
+public enum VoiceAction: Sendable, Equatable {
+    case join(channelId: String)
+    case leave
+}
+
 /// Slash / component / autocomplete routing for AbbeyBot.
 public struct InteractionRouter: Sendable {
     public typealias AskHandler = @Sendable (_ question: String, _ userId: String, _ guildId: String, _ channelId: String) async -> String
@@ -9,6 +15,7 @@ public struct InteractionRouter: Sendable {
     public typealias ForgetHandler = @Sendable (_ userId: String, _ guildId: String, _ index: Int) async -> String
     public typealias ContextHandler = @Sendable (_ channelId: String, _ guildId: String) async -> String
     public typealias PersonaHandler = @Sendable (_ name: String) async -> String
+    public typealias VoiceHandler = @Sendable (_ action: VoiceAction, _ guildId: String) async -> String
 
     private let ask: AskHandler
     private let rep: RepHandler
@@ -16,6 +23,7 @@ public struct InteractionRouter: Sendable {
     private let forget: ForgetHandler
     private let context: ContextHandler
     private let persona: PersonaHandler
+    private let voice: VoiceHandler
 
     public init(
         ask: @escaping AskHandler,
@@ -23,7 +31,8 @@ public struct InteractionRouter: Sendable {
         remember: @escaping RememberHandler,
         forget: @escaping ForgetHandler,
         context: @escaping ContextHandler,
-        persona: @escaping PersonaHandler
+        persona: @escaping PersonaHandler,
+        voice: @escaping VoiceHandler
     ) {
         self.ask = ask
         self.rep = rep
@@ -31,6 +40,7 @@ public struct InteractionRouter: Sendable {
         self.forget = forget
         self.context = context
         self.persona = persona
+        self.voice = voice
     }
 
     public func handle(_ interaction: Interaction, client: any DiscordClient) async {
@@ -87,6 +97,8 @@ public struct InteractionRouter: Sendable {
         case "persona":
             let name = (try? data.option(named: "name")?.requireString()) ?? "abbey"
             result = await persona(name)
+        case "voice":
+            result = await handleVoice(data: data, guildId: guildId)
         default:
             result = "Unknown command."
         }
@@ -95,6 +107,24 @@ public struct InteractionRouter: Sendable {
             token: interaction.token,
             payload: .init(content: result)
         ).guardSuccess()
+    }
+
+    private func handleVoice(
+        data: Interaction.ApplicationCommand,
+        guildId: String
+    ) async -> String {
+        guard let sub = data.options?.first else {
+            return DiscordCopy.voiceUnknownSubcommand
+        }
+        switch sub.name {
+        case "join":
+            let channel = (try? sub.option(named: "channel")?.requireString()) ?? ""
+            return await voice(.join(channelId: channel), guildId)
+        case "leave":
+            return await voice(.leave, guildId)
+        default:
+            return DiscordCopy.voiceUnknownSubcommand
+        }
     }
 
     private func handleAutocomplete(

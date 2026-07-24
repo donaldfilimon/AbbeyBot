@@ -6,6 +6,8 @@ struct DiscordView: View {
     @Bindable private var config = AppConfig.shared
     @State private var isBusy = false
     @State private var statusMessage: String?
+    @State private var voiceGuildId = ""
+    @State private var voiceChannelId = ""
 
     var body: some View {
         Form {
@@ -68,13 +70,54 @@ struct DiscordView: View {
                     }
                 }
                 .disabled(engine.discordState != .connected || isBusy)
-                Text("Commands: ask, rep, remember, forget, context, persona")
+                Text("Commands: ask, rep, remember, forget, context, persona, voice")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
+            Section("Voice presence") {
+                Text(DiscordCopy.voiceStatus(
+                    guildId: engine.discordVoiceGuildId,
+                    channelId: engine.discordVoiceChannelId
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Text(DiscordCopy.voicePresenceOnly)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                TextField("Guild ID", text: $voiceGuildId)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Voice channel ID", text: $voiceChannelId)
+                    .textFieldStyle(.roundedBorder)
+
+                HStack {
+                    Button("Join") {
+                        Task {
+                            isBusy = true
+                            let guild = voiceGuildId.isEmpty ? config.discordDevGuildId : voiceGuildId
+                            statusMessage = await engine.joinVoice(guildId: guild, channelId: voiceChannelId)
+                            isBusy = false
+                        }
+                    }
+                    .disabled(engine.discordState != .connected || voiceChannelId.isEmpty || isBusy)
+
+                    Button("Leave") {
+                        Task {
+                            isBusy = true
+                            let guild = voiceGuildId.isEmpty
+                                ? (engine.discordVoiceGuildId ?? config.discordDevGuildId)
+                                : voiceGuildId
+                            statusMessage = await engine.leaveVoice(guildId: guild.isEmpty ? nil : guild)
+                            isBusy = false
+                        }
+                    }
+                    .disabled(engine.discordState != .connected || isBusy)
+                }
+            }
+
             Section("Intents") {
-                Text("guildMessages · messageContent · guildMembers · directMessages · guildMessageReactions")
+                Text("guildMessages · messageContent · guildMembers · directMessages · guildMessageReactions · guildVoiceStates")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Auto-connect on launch (liveDiscord mode)", isOn: $config.autoConnectOnLaunch)
@@ -91,6 +134,9 @@ struct DiscordView: View {
         .navigationTitle("Discord")
         .task {
             await engine.refreshDiscordStatus()
+            if voiceGuildId.isEmpty, !config.discordDevGuildId.isEmpty {
+                voiceGuildId = config.discordDevGuildId
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 await engine.refreshDiscordStatus()
