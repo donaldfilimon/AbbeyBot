@@ -106,6 +106,16 @@ if !serverOnlyPackage {
         ),
         at: 1
     )
+    packageTargets.append(
+        .testTarget(
+            name: "AbbeyBotAppTests",
+            dependencies: ["AbbeyBotApp"],
+            path: "Tests/AbbeyBotAppTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        )
+    )
     entryDependencies.insert("AbbeyBotApp", at: 0)
 }
 
