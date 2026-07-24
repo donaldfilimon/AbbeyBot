@@ -38,6 +38,7 @@ Run wrappers (load `.env` where relevant):
 bash Scripts/run.sh          # desktop
 bash Scripts/run-server.sh   # server
 bash Scripts/run-abbey.sh    # abbey CLI
+bash Scripts/swift-run.sh [serve|cli|…]   # raw SPM-style launch, Desktop-safe build path (prefer over bare `swift run` under Desktop/iCloud)
 ```
 
 Dashboard SPA (`web/`, bun + Vite + React 19 + Biome + Vitest):
@@ -79,5 +80,6 @@ web/                    React 19 + Vite dashboard SPA, built into Sources/AbbeyS
 ## Guardrails specific to this repo
 
 - Don't port claims from `research_mlai.md` (Python/TensorFlow stack, WDBX throughput numbers, blockchain, HIPAA/GDPR, industry pilots) into product docs or code comments as if shipped — see AGENTS.md's "Not shipped" list.
-- Twitch support is IRC presence only (no EventSub, no chat→ingest loop); don't assume incoming Twitch messages reach the classifier.
+- `IndustryProfile`, `WDBXMemoryFacade`, and `DecentralizationPolicy` (`Sources/AbbeyCore/{Industry,WDBX,Decentralization}/`) are deliberate **claim-honest shells** — a prompt-suffix flag, a local journal facade, and a policy stub that must stay disabled. Don't extend them to imply HIPAA/GDPR certification, real Zig-abi WDBX throughput, or an actual blockchain node; that's exactly the drift AGENTS.md's "Not shipped" list exists to prevent.
+- Twitch: IRC PRIVMSG→ingest and persona reply (with cooldown) are shipped, plus an EventSub webhook stub (`POST /api/twitch/eventsub`, challenge + log only). **Not shipped:** EventSub subscribe/HMAC verification, PubSub — don't assume a subscribed EventSub event actually reaches the classifier.
 - No CRDT merge or `?since=` cursor pagination for desktop↔server sync — it's push + pull with server-wins conflict resolution and a 500-row cap.
