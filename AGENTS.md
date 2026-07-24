@@ -8,7 +8,7 @@ Unified Abbey bot at `~/Desktop/AbbeyBot` — **two products** in one package. *
 |---------|--------|-------|-----|
 | Desktop | `AbbeyBot` (`AbbeyBotApp`) | SwiftData | SwiftUI |
 | Server | `AbbeyServer` | Fluent + Postgres (SQLite smoke fallback) | Leaf status + `/api/*` + `/dashboard` SPA |
-| CLI | `abbey` (`AbbeyCLI` via `swift run -- cli`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
+| CLI | `abbey` (`AbbeyCLI` via `swift run AbbeyBot cli`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
 
 Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServerKit` (Fluent-backed engine used by `AbbeyServer` + `abbey`). One executable product `AbbeyBot` (`AbbeyEntry`). Swift 6.4 language mode; desktop requires Xcode toolchain (`xcrun --toolchain default` — swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros).
 
@@ -18,7 +18,8 @@ Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServe
 unset TOOLCHAINS
 bash Scripts/run-smoke.sh          # desktop build/test/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
-bash Scripts/verify-all.sh         # both gates
+bash Scripts/run-cli-smoke.sh      # abbey CLI boot + DATABASE_URL isolation
+bash Scripts/verify-all.sh         # all gates
 ```
 
 Launch wrappers (Xcode toolchain):
@@ -76,9 +77,11 @@ Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBE
 
 ```bash
 bash Scripts/run-abbey.sh
+# share server DATABASE_URL from .env (Postgres/sqlite):
+ABBEY_CLI_USE_SERVER_DATABASE=1 bash Scripts/run-abbey.sh
 ```
 
-Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `DATABASE_URL` overrides using the same convention as the server. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
+Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `Scripts/run-abbey.sh` sources `.env` for Discord/`ABBEY_*` knobs but **clears `DATABASE_URL` unless** `ABBEY_CLI_USE_SERVER_DATABASE=1`. To override without the wrapper, export `DATABASE_URL` (same postgres/sqlite conventions as the server) before `swift run AbbeyBot cli`. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
 
 ## Shared core (finalized)
 

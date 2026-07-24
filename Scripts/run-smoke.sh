@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 unset TOOLCHAINS || true
+# Full package graph (SwiftUI/SwiftData) — never build desktop under server-only role.
+unset ABBEY_PACKAGE_ROLE || true
 # Build off Desktop to avoid iCloud/Finder xattrs breaking ad-hoc codesign.
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)

@@ -3,7 +3,7 @@ import AbbeyServerKit
 import Foundation
 import Vapor
 
-/// Terminal REPL entry (invoked as `swift run -- cli`).
+/// Terminal REPL entry (invoked as `swift run AbbeyBot cli`).
 public enum AbbeyCLIMain {
     public static func main(arguments: [String] = CommandLine.arguments) async throws {
         var env = try Environment.detect(arguments: arguments)
