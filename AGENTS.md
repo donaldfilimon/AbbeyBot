@@ -95,7 +95,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 |---------|----------------|------------------|
 | **Abbey** | Ethical, professional community interaction | Default persona; direct community register (`AbbeyPersona.systemPrompt`) |
 | **Aviva** | Analytical, research, architecture | Structured system-builder register — server architecture, permissions, moderation policy, code (`AvivaPersona`) |
-| **Abi** | Moderation / compliance oversight tone | Warm rapport, welcomes, tone-setting, de-escalation (`AbiPersona`) |
+| **Abi** | Moderation / compliance oversight tone | Platform rules, proportionate responses, escalation (`AbiPersona`) |
 
 **Switch paths (shipped):**
 
@@ -103,7 +103,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 - Natural-language persona switch on ingest (`IntentClassifier.personaSwitch` → `PersonaName.resolve`)
 - Desktop **Personas** tab (`PersonaSwitcherView`)
 
-**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Aviva; `.greeting` / `.smallTalk` → Abi; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
+**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
 
 **Not shipped (do not claim as product features):** Python persona framework, TensorFlow/PyTorch stack, blockchain decentralization, industry healthcare/finance pilots, GDPR certification, or HIPAA compliance modules.
 
