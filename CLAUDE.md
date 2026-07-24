@@ -44,7 +44,7 @@ bun run test path/to/file.test.tsx   # single test file
 bun run build      # tsc -b && vite build → packed into Sources/AbbeyServer/Resources/Public/ for SPM
 ```
 
-**`bash Scripts/verify-all.sh` is the gate of record**, not GitHub Actions — hosted workflows on this private repo currently fail at startup (0 jobs) pending Actions billing/quota. Re-run `abbey-ci` once that's unblocked.
+**Gate of record:** see [`AGENTS.md` → Verify](./AGENTS.md#verify) — `verify-all.sh`, narrow smokes, CI secondary until billing unblocked.
 
 ## Architecture
 

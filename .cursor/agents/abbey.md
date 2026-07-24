@@ -34,22 +34,23 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 1. Read `AGENTS.md` (and relevant nearby sources only as needed).
 2. Locate the owning layer: AbbeyCore shared pure logic vs AbbeyEngine / BotRuntime adapters vs AbbeyServer routes / AbbeyCLI / SwiftUI.
 3. Implement the minimal change; do not expand into deferred Voice **audio**, CRDT merge, or full CLI↔desktop sync.
-4. Verify with the narrowest honest gate:
+4. When an attached plan already has to-dos, execute them in order, update statuses, and do not edit the plan or recreate tasks.
+5. Verify with the narrowest honest gate:
    - Full: `unset TOOLCHAINS && bash Scripts/verify-all.sh`
    - Desktop: `bash Scripts/run-smoke.sh`
    - Server: `bash Scripts/run-server-smoke.sh`
    - Launch wrappers: `Scripts/run.sh`, `Scripts/run-server.sh`, `Scripts/run-abbey.sh` (load `.env` when present)
-5. Summarize what changed, what you verified, and what remains out of scope.
+6. Summarize what changed, what you verified, and what remains out of scope.
 
 **Git and branches:**
 - Prefer `cursor/` branches from `origin/main`.
 - Use Conventional Commits when the user asks you to commit.
 - Do not push, force-push, or open remotes unless the user explicitly asks.
-- Never commit secrets (`.env`, tokens, Keychain material).
+- Never commit secrets (`.env`, tokens, Keychain material), local scratch (`.cursor/hooks/`, `functions/`), or `node_modules` (`web/node_modules`, `functions/node_modules`).
 
 **Learning & Safety Policy (binding summary):**
 
-Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 **shipped**: `AppConfig.validateForStartup()`, `ABBEY_DRY_RUN` / Discord+Twitch dry-run connect, durable DQN checkpoints at `~/.abbey/dqn-checkpoint.json` (with `*.bak`). Phase 2 **shipped**: experience JSONL journal, `CodeProposalValidator` (static), `RollbackStore`, optional `TwitchBridge` IRC (no EventSub/ingest). Verification gate = `Scripts/verify-all.sh` (or matching smoke). Still deferred: Twitch EventSub/chat→ingest, codegen sandbox. Full policy: `AGENTS.md` → Learning & Safety Policy.
+Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 **shipped**: `AppConfig.validateForStartup()`, `ABBEY_DRY_RUN` / Discord+Twitch dry-run connect, durable DQN checkpoints at `~/.abbey/dqn-checkpoint.json` (with `*.bak`). Phase 2 **shipped**: experience JSONL journal, `CodeProposalValidator` (static), `RollbackStore`, optional `TwitchBridge` IRC (no EventSub/ingest). Verification gate: `AGENTS.md` → **Verify**. Still deferred: Twitch EventSub/chat→ingest, codegen sandbox. Full policy: `AGENTS.md` → Learning & Safety Policy.
 
 **Quality Standards:**
 - Claim-honest: cite real targets, scripts, env vars, and routes from `AGENTS.md` / code — no speculative APIs.
