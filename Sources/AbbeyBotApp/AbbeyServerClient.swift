@@ -53,6 +53,34 @@ struct AbbeyServerClient: Sendable {
         var createdAt: Date?
     }
 
+    struct SyncReputationDTO: Decodable, Sendable {
+        var id: UUID?
+        var userId: String
+        var guildId: String
+        var delta: Double
+        var reason: String
+        var createdAt: Date?
+    }
+
+    struct SyncInteractionDTO: Decodable, Sendable {
+        var id: UUID?
+        var commandName: String
+        var userId: String
+        var guildId: String
+        var succeeded: Bool
+        var latencyMs: Double
+        var createdAt: Date?
+    }
+
+    struct SyncEquityDTO: Decodable, Sendable {
+        var id: UUID?
+        var symbol: String
+        var thesisSummary: String
+        var syntheticScore: Double
+        var factorBreakdown: [String: Double]
+        var generatedAt: Date?
+    }
+
     // MARK: - Public API (push)
 
     func ingest(
@@ -104,6 +132,18 @@ struct AbbeyServerClient: Sendable {
 
     func fetchMessages(limit: Int = 500) async throws -> [SyncMessageDTO] {
         try await get(path: "/api/messages", limit: limit)
+    }
+
+    func fetchReputation(limit: Int = 500) async throws -> [SyncReputationDTO] {
+        try await get(path: "/api/reputation", limit: limit)
+    }
+
+    func fetchInteractions(limit: Int = 500) async throws -> [SyncInteractionDTO] {
+        try await get(path: "/api/interactions", limit: limit)
+    }
+
+    func fetchEquity(limit: Int = 500) async throws -> [SyncEquityDTO] {
+        try await get(path: "/api/equity", limit: limit)
     }
 
     // MARK: - Internals

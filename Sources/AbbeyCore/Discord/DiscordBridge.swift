@@ -131,8 +131,11 @@ public actor DiscordBridge {
                 selfDeaf: true
             )
         )
-        voiceGuildId = nil
-        voiceChannelId = nil
+        // Only clear tracked presence when leaving the guild we are tracking.
+        if voiceGuildId == trimmed {
+            voiceGuildId = nil
+            voiceChannelId = nil
+        }
         return true
     }
 

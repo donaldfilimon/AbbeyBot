@@ -18,11 +18,11 @@ public enum AbbeyEvent: Sendable {
     public var displayDescription: String {
         switch self {
         case .messageIngested(let channelId, let guildId, let authorId):
-            return "Ingested message from \(authorId) in #\(channelId) (\(guildId))"
+            return "Ingested message from \(authorId) in channel \(channelId) (\(guildId))"
         case .reputationChanged(let userId, _, let newValue, let reason):
             return "Reputation \(userId) → \(String(format: "%.2f", newValue)) (\(reason))"
         case .channelContextConsolidated(let channelId, let messageCount):
-            return "Consolidated #\(channelId) (\(messageCount) msgs)"
+            return "Consolidated channel \(channelId) (\(messageCount) msgs)"
         case .personaSwitched(let name):
             return "Persona → \(name)"
         case .destructiveActionRequested(let kind, let targetUserId, _):

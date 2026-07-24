@@ -7,7 +7,7 @@ struct AbbeyEventDisplayDescriptionTests {
         let cases: [(AbbeyEvent, String)] = [
             (
                 .messageIngested(channelId: "c1", guildId: "g1", authorId: "a1"),
-                "Ingested message from a1 in #c1 (g1)"
+                "Ingested message from a1 in channel c1 (g1)"
             ),
             (
                 .reputationChanged(userId: "u1", guildId: "g1", newValue: 0.5, reason: "upvote"),
@@ -15,7 +15,7 @@ struct AbbeyEventDisplayDescriptionTests {
             ),
             (
                 .channelContextConsolidated(channelId: "c1", messageCount: 12),
-                "Consolidated #c1 (12 msgs)"
+                "Consolidated channel c1 (12 msgs)"
             ),
             (.personaSwitched(to: "Aviva"), "Persona → Aviva"),
             (

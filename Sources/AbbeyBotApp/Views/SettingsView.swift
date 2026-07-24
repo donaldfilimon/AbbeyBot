@@ -112,18 +112,37 @@ struct SettingsView: View {
                         Task { await engine.pullFromServer() }
                     }
                     .disabled(syncStatus.isPulling)
-                    Text(syncStatus.pullSummary)
-                        .font(.caption)
-                        .foregroundStyle(syncStatus.lastPullError == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
-                    Text(syncStatus.summary)
-                        .font(.caption)
-                        .foregroundStyle(syncStatus.lastError == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                    syncStatusSummaryLines
                 }
             }
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 520)
         .navigationTitle("Settings")
+    }
+
+    @ViewBuilder
+    private var syncStatusSummaryLines: some View {
+        TimelineView(.periodic(from: .now, by: 15)) { _ in
+            if syncStatus.lastPullError == nil {
+                Text(syncStatus.pullSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(syncStatus.pullSummary)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            if syncStatus.lastError == nil {
+                Text(syncStatus.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(syncStatus.summary)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
     }
 
     private func label(for mode: InferenceMode) -> String {
