@@ -8,8 +8,9 @@ Unified Abbey bot at `~/Desktop/AbbeyBot` — **two products** in one package. *
 |---------|--------|-------|-----|
 | Desktop | `AbbeyBot` (`AbbeyBotApp`) | SwiftData | SwiftUI |
 | Server | `AbbeyServer` | Fluent + Postgres (SQLite smoke fallback) | Leaf status + `/api/*` |
+| CLI | `abbey` (`AbbeyCLI`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
 
-Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN). Swift 6.4 language mode; Xcode toolchain only (`xcrun --toolchain default` — swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros).
+Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServerKit` (Fluent-backed engine used by `AbbeyServer` + `abbey`). Swift 6.4 language mode; Xcode toolchain only (`xcrun --toolchain default` — swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros).
 
 ## Verify
 
@@ -25,6 +26,7 @@ Launch wrappers (Xcode toolchain):
 ```bash
 bash Scripts/run.sh          # desktop
 bash Scripts/run-server.sh   # server (loads .env if present)
+bash Scripts/run-abbey.sh    # abbey CLI (loads .env if present)
 ```
 
 Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
@@ -54,6 +56,14 @@ Routes: `GET /health`, `GET /api/metrics`, `GET /api/status`, `POST /api/ingest`
 Deploy: `Dockerfile` (`swift:6.0-bookworm`, copies `AbbeyServer_*.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`.
 
 Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, `/api/status`, `POST /api/ingest`, and `/api/messages`.
+
+## CLI ops
+
+```bash
+bash Scripts/run-abbey.sh
+```
+
+Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `DATABASE_URL` overrides using the same convention as the server. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
 
 ## Shared core (finalized)
 

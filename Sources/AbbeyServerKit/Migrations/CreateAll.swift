@@ -1,7 +1,9 @@
 import Fluent
 
-struct CreateAll: AsyncMigration {
-    func prepare(on database: Database) async throws {
+public struct CreateAll: AsyncMigration {
+    public init() {}
+
+    public func prepare(on database: Database) async throws {
         try await database.schema(GuildMessage.schema)
             .id()
             .field("discord_message_id", .string, .required)
@@ -66,7 +68,7 @@ struct CreateAll: AsyncMigration {
             .create()
     }
 
-    func revert(on database: Database) async throws {
+    public func revert(on database: Database) async throws {
         try await database.schema(EquityIdea.schema).delete()
         try await database.schema(InteractionLog.schema).delete()
         try await database.schema(ReputationEvent.schema).delete()

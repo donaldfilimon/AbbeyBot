@@ -6,6 +6,7 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 |-------|------|
 | Desktop | `AbbeyBot` — macOS 27 SwiftUI + SwiftData |
 | Server | `AbbeyServer` — Vapor + Fluent/Postgres + Leaf |
+| CLI | `abbey` — terminal chat sharing the same brain, local SQLite |
 | Core | `AbbeyCore` — brain, personas, inference, DiscordBM |
 | Discord | DiscordBM gateway + REST (Voice deferred) |
 
@@ -29,6 +30,25 @@ bash Scripts/run-server.sh
 
 Or full stack: `docker compose up --build`.
 
+## Run abbey CLI
+
+```bash
+bash Scripts/run-abbey.sh
+# or:
+unset TOOLCHAINS
+cd ~/Desktop/AbbeyBot
+/usr/bin/xcrun --toolchain default swift run --build-path "${TMPDIR}/AbbeyBot.cli.build" abbey
+```
+
+Local SQLite state lives at `~/.abbey/abbey.sqlite` (directory auto-created); override with `DATABASE_URL` same as the server (`postgres://…`, `sqlite://memory`, `sqlite://<path>`). Set `DISCORD_BOT_TOKEN` (and optional `DISCORD_DEV_GUILD_ID`) to connect live to Discord, otherwise it runs local-only with a warning logged.
+
+Commands:
+
+- `/help` — list commands
+- `/clear` — start a fresh conversation thread (non-destructive, keeps history)
+- `/model` — show current inference mode; `/model <mode>` — switch (`deterministicFloor`, `onDevice`, `remoteCompatible`)
+- `/exit` — quit (Ctrl-D / EOF also exits cleanly)
+
 ## Verify
 
 ```bash
@@ -51,6 +71,8 @@ Slash commands: `ask`, `rep`, `remember`, `forget`, `context`, `persona`.
 Sources/AbbeyCore/      # shared library (no SwiftData)
 Sources/AbbeyBotApp/    # @main SwiftUI + SwiftData models
 Sources/AbbeyServer/    # Vapor executable + Fluent models
+Sources/AbbeyServerKit/ # shared Fluent-backed engine (BotRuntime, Models, Persistence) used by AbbeyServer + abbey CLI
+Sources/AbbeyCLI/       # abbey terminal chat executable
 Scripts/                # run-smoke.sh, run-server-smoke.sh
 deploy/abbeybot.service
 Dockerfile / docker-compose.yml

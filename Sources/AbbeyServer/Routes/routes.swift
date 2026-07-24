@@ -1,17 +1,6 @@
 import AbbeyCore
+import AbbeyServerKit
 import Vapor
-
-struct MetricsDTO: Content {
-    var messagesIngested: Int
-    var reputationEvents: Int
-    var consolidations: String
-    var inferenceCalls: Int
-    var inferenceFailures: Int
-    var liveIngestCount: Int
-    var discordState: String
-    var discordBotUserId: String
-    var lastInferenceError: String
-}
 
 struct HealthDTO: Content {
     var status: String

@@ -2,33 +2,33 @@ import Fluent
 import Foundation
 import Vapor
 
-final class EquityIdea: Model, Content, @unchecked Sendable {
-    static let schema = "equity_ideas"
+public final class EquityIdea: Model, Content, @unchecked Sendable {
+    public static let schema = "equity_ideas"
 
     @ID(key: .id)
-    var id: UUID?
+    public var id: UUID?
 
     @Field(key: "symbol")
-    var symbol: String
+    public var symbol: String
 
     @Field(key: "thesis_summary")
-    var thesisSummary: String
+    public var thesisSummary: String
 
     @Field(key: "synthetic_score")
-    var syntheticScore: Double
+    public var syntheticScore: Double
 
     @Field(key: "factor_breakdown")
-    var factorBreakdown: [String: Double]
+    public var factorBreakdown: [String: Double]
 
     @Timestamp(key: "generated_at", on: .create)
-    var generatedAt: Date?
+    public var generatedAt: Date?
 
-    static let disclaimer =
+    public static let disclaimer =
         "Synthetic instrument, synthetic data. Not investment advice, not a real security."
 
-    init() {}
+    public init() {}
 
-    init(
+    public init(
         id: UUID? = nil,
         symbol: String,
         thesisSummary: String,

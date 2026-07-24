@@ -4,12 +4,46 @@ import Fluent
 import Foundation
 import Vapor
 
+public struct MetricsDTO: Content {
+    public var messagesIngested: Int
+    public var reputationEvents: Int
+    public var consolidations: String
+    public var inferenceCalls: Int
+    public var inferenceFailures: Int
+    public var liveIngestCount: Int
+    public var discordState: String
+    public var discordBotUserId: String
+    public var lastInferenceError: String
+
+    public init(
+        messagesIngested: Int,
+        reputationEvents: Int,
+        consolidations: String,
+        inferenceCalls: Int,
+        inferenceFailures: Int,
+        liveIngestCount: Int,
+        discordState: String,
+        discordBotUserId: String,
+        lastInferenceError: String
+    ) {
+        self.messagesIngested = messagesIngested
+        self.reputationEvents = reputationEvents
+        self.consolidations = consolidations
+        self.inferenceCalls = inferenceCalls
+        self.inferenceFailures = inferenceFailures
+        self.liveIngestCount = liveIngestCount
+        self.discordState = discordState
+        self.discordBotUserId = discordBotUserId
+        self.lastInferenceError = lastInferenceError
+    }
+}
+
 /// Headless engine: Fluent persistence + DiscordBM gateway + AbbeyCore brain.
-actor BotRuntime {
+public actor BotRuntime {
     let app: Application
     let config: AppConfig
     let metrics: EngineMetrics
-    let eventBus: EventBus
+    public let eventBus: EventBus
     let socialBrain: FluentSocialBrain
     let dqnAgent: DQNAgent
     let scheduler: FluentScheduler
@@ -17,7 +51,7 @@ actor BotRuntime {
     let inferenceRouter: InferenceRouter
     let discordBridge = DiscordBridge()
 
-    private(set) var discordState: DiscordConnectionState = .disconnected
+    public private(set) var discordState: DiscordConnectionState = .disconnected
     private(set) var discordLastError: String?
     private(set) var discordBotUserId: String?
     private(set) var liveIngestCount: Int = 0
@@ -50,7 +84,7 @@ actor BotRuntime {
         )
     }
 
-    func start() async {
+    public func start() async {
         await socialBrain.warmCache()
         await scheduler.start()
         metricsListener = Task { [weak self] in
@@ -70,7 +104,7 @@ actor BotRuntime {
         await connectDiscord(token: token)
     }
 
-    func stop() async {
+    public func stop() async {
         metricsListener?.cancel()
         metricsListener = nil
         await scheduler.stop()
@@ -135,7 +169,7 @@ actor BotRuntime {
         discordState = .connected
     }
 
-    func ingestMessage(
+    public func ingestMessage(
         content: String,
         channelId: String,
         guildId: String,
@@ -208,7 +242,15 @@ actor BotRuntime {
         return PersonaContext(channelSummary: summary, userFacts: facts, reputation: reputation)
     }
 
-    func metricsSnapshot() -> MetricsDTO {
+    /// Persona reply to free text, outside the Discord message/interaction flow — used by
+    /// the CLI's conversation loop, mirroring `makeInteractionRouter`'s `ask` closure.
+    public func reply(to text: String, userId: String, guildId: String, channelId: String) async -> String {
+        let persona = await personaRouter.currentPersona()
+        let context = await personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+        return await persona.respond(to: text, context: context, inference: inferenceRouter).text
+    }
+
+    public func metricsSnapshot() -> MetricsDTO {
         MetricsDTO(
             messagesIngested: metrics.messagesIngestedThisSession,
             reputationEvents: metrics.reputationEventsThisSession,
@@ -319,7 +361,7 @@ extension Application {
         typealias Value = BotRuntime
     }
 
-    var botRuntime: BotRuntime {
+    public var botRuntime: BotRuntime {
         get {
             guard let runtime = storage[BotRuntimeKey.self] else {
                 fatalError("BotRuntime not configured")
