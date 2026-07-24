@@ -84,12 +84,14 @@ struct AbbeyServerClient: Sendable {
     }
 
     private func post(path: String, jsonObjectBody: [String: Any]) async {
-        let baseURLString = AppConfig.shared.syncServerURL
-        guard !baseURLString.isEmpty else {
+        let rawBase = AppConfig.shared.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawBase.isEmpty else {
             // Sync is unconfigured — silently no-op.
             return
         }
-        guard let url = URL(string: baseURLString)?.appendingPathComponent(path) else {
+        let base = rawBase.hasSuffix("/") ? String(rawBase.dropLast()) : rawBase
+        let suffix = path.hasPrefix("/") ? path : "/\(path)"
+        guard let url = URL(string: base + suffix) else {
             print("[sync] invalid syncServerURL, skipping \(path)")
             return
         }

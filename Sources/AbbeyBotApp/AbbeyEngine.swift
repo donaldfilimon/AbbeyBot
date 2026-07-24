@@ -131,6 +131,16 @@ final class AbbeyEngine {
         }
         try? context.save()
 
+        Task.detached(priority: .utility) {
+            await AbbeyServerClient.shared.ingest(
+                content: content,
+                channelId: channelId,
+                guildId: guildId,
+                authorId: authorId,
+                discordMessageId: discordMessageId
+            )
+        }
+
         await eventBus.publish(.messageIngested(channelId: channelId, guildId: guildId, authorId: authorId))
 
         let reputationBefore = await socialBrain.reputation(userId: authorId, guildId: guildId)
@@ -223,6 +233,9 @@ final class AbbeyEngine {
             }
         } else {
             context.insert(UserMemory(discordUserId: authorId, guildId: guildId, facts: [fact]))
+        }
+        Task.detached(priority: .utility) {
+            await AbbeyServerClient.shared.remember(guildId: guildId, userId: authorId, fact: fact)
         }
     }
 
@@ -384,6 +397,9 @@ final class AbbeyEngine {
                 guard memory.facts.indices.contains(idx) else { return DiscordCopy.invalidFactIndex }
                 memory.facts.remove(at: idx)
                 try? context.save()
+                Task.detached(priority: .utility) {
+                    await AbbeyServerClient.shared.forget(guildId: guildId, userId: userId, index: index)
+                }
                 return DiscordCopy.forgot(index: index)
             },
             context: { [weak self] channelId, guildId in
