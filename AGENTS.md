@@ -162,7 +162,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 ### Still deferred
 
-- **Twitch EventSub / PubSub** — IRC PRIVMSG ingest ships; no EventSub client yet.
+- **Twitch EventSub / PubSub** — IRC PRIVMSG ingest ships; `POST /api/twitch/eventsub` stub (challenge echo + log-only); full subscribe + HMAC verify deferred.
 - **Codegen sandbox** — static `CodeProposalValidator` only; no isolated execution sandbox.
 - **Real WDBX / blockchain** — facade + policy stubs only; Zig abi WDBX and chain nodes are out of this package.
 - Full CRDT / cursor pagination / CLI↔desktop sync — see Deferred below.

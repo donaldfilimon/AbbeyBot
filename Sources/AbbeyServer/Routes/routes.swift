@@ -58,6 +58,8 @@ private func clampedLimit(_ req: Request, default defaultLimit: Int = 100, max m
 }
 
 func routes(_ app: Application) throws {
+    TwitchEventSubRoutes.register(on: app)
+
     app.get("health") { req async -> HealthDTO in
         let runtime = req.application.botRuntime
         let state = await runtime.discordState
