@@ -1,69 +1,28 @@
+import AbbeyServerKit
 import Fluent
-import FluentPostgresDriver
-import FluentSQLiteDriver
 import Foundation
 import Leaf
 import Vapor
 
 public func configure(_ app: Application) async throws {
-    let viewsPath = Bundle.module.bundleURL
+    // Bundle.module.bundleURL is the bundle *package* root. On Apple platforms that's a
+    // `.bundle` with a `Contents/Resources/` layer inside it; on Linux (flat `.resources`
+    // dirs, e.g. this repo's Docker build) there's no such nesting. `.resourceURL` accounts
+    // for that difference on both platforms — `.bundleURL` does not, and silently resolves
+    // to a path that doesn't exist on macOS (this went unnoticed here because nothing
+    // previously exercised the Leaf-rendered `GET /` route in the server smoke test).
+    let resourcesRoot = (Bundle.module.resourceURL ?? Bundle.module.bundleURL)
         .appendingPathComponent("Resources")
-        .appendingPathComponent("Views")
-        .path
+
+    let viewsPath = resourcesRoot.appendingPathComponent("Views").path
     app.directory.viewsDirectory = viewsPath.hasSuffix("/") ? viewsPath : viewsPath + "/"
     app.views.use(.leaf)
 
-    let databaseURL = Environment.get("DATABASE_URL")
-        ?? "postgres://abbey:abbey@localhost:5432/abbeybot"
+    let publicPath = resourcesRoot.appendingPathComponent("Public").path
+    app.middleware.use(FileMiddleware(publicDirectory: publicPath))
 
-    let dialect: String
-    if databaseURL.hasPrefix("postgres://") || databaseURL.hasPrefix("postgresql://") {
-        try app.databases.use(.postgres(url: databaseURL), as: .psql)
-        dialect = "postgres"
-    } else if databaseURL == "sqlite://memory" || databaseURL == "sqlite::memory:" {
-        app.databases.use(.sqlite(.memory), as: .sqlite)
-        dialect = "sqlite-memory"
-    } else if databaseURL.hasPrefix("sqlite://") {
-        let path = String(databaseURL.dropFirst("sqlite://".count))
-        app.databases.use(.sqlite(.file(path)), as: .sqlite)
-        dialect = "sqlite-file"
-    } else {
-        throw Abort(
-            .internalServerError,
-            reason: "DATABASE_URL must be postgres://… or sqlite://… (sqlite://memory for in-memory smoke)"
-        )
-    }
-    app.databaseDialect = dialect
-    app.logger.info("Database dialect: \(dialect)")
-
-    app.migrations.add(CreateAll())
-    try await app.autoMigrate()
-
-    let runtime = BotRuntime(app: app)
-    app.botRuntime = runtime
-
+    _ = try await configureRuntime(app, defaultDatabaseURL: "postgres://abbey:abbey@localhost:5432/abbeybot")
     app.lifecycle.use(BotLifecycleHandler())
 
     try routes(app)
-}
-
-struct BotLifecycleHandler: LifecycleHandler {
-    func didBootAsync(_ app: Application) async throws {
-        await app.botRuntime.start()
-    }
-
-    func shutdownAsync(_ app: Application) async {
-        await app.botRuntime.stop()
-    }
-}
-
-extension Application {
-    private struct DatabaseDialectKey: StorageKey {
-        typealias Value = String
-    }
-
-    var databaseDialect: String {
-        get { storage[DatabaseDialectKey.self] ?? "unknown" }
-        set { storage[DatabaseDialectKey.self] = newValue }
-    }
 }

@@ -2,33 +2,33 @@ import Fluent
 import Foundation
 import Vapor
 
-final class ChannelContext: Model, Content, @unchecked Sendable {
-    static let schema = "channel_contexts"
+public final class ChannelContext: Model, Content, @unchecked Sendable {
+    public static let schema = "channel_contexts"
 
     @ID(key: .id)
-    var id: UUID?
+    public var id: UUID?
 
     @Field(key: "composite_key")
-    var compositeKey: String
+    public var compositeKey: String
 
     @Field(key: "channel_id")
-    var channelId: String
+    public var channelId: String
 
     @Field(key: "guild_id")
-    var guildId: String
+    public var guildId: String
 
     @Field(key: "summary")
-    var summary: String
+    public var summary: String
 
     @Field(key: "message_count")
-    var messageCount: Int
+    public var messageCount: Int
 
     @Timestamp(key: "updated_at", on: .update)
-    var updatedAt: Date?
+    public var updatedAt: Date?
 
-    init() {}
+    public init() {}
 
-    init(
+    public init(
         id: UUID? = nil,
         channelId: String,
         guildId: String,

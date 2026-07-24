@@ -2,33 +2,33 @@ import Fluent
 import Foundation
 import Vapor
 
-final class InteractionLog: Model, Content, @unchecked Sendable {
-    static let schema = "interaction_logs"
+public final class InteractionLog: Model, Content, @unchecked Sendable {
+    public static let schema = "interaction_logs"
 
     @ID(key: .id)
-    var id: UUID?
+    public var id: UUID?
 
     @Field(key: "command_name")
-    var commandName: String
+    public var commandName: String
 
     @Field(key: "user_id")
-    var userId: String
+    public var userId: String
 
     @Field(key: "guild_id")
-    var guildId: String
+    public var guildId: String
 
     @Field(key: "succeeded")
-    var succeeded: Bool
+    public var succeeded: Bool
 
     @Field(key: "latency_ms")
-    var latencyMs: Double
+    public var latencyMs: Double
 
     @Timestamp(key: "created_at", on: .create)
-    var createdAt: Date?
+    public var createdAt: Date?
 
-    init() {}
+    public init() {}
 
-    init(
+    public init(
         id: UUID? = nil,
         commandName: String,
         userId: String,

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux:
+    # Covers AbbeyCore, AbbeyServerKit, AbbeyServer, AbbeyCLI — none of these import
+    # AppKit/SwiftUI/SwiftData, so they build on Linux (same toolchain as Dockerfile).
+    # AbbeyBotApp (desktop) is excluded: it hard-requires macOS 27 + AppKit/SwiftUI, which
+    # no GitHub-hosted runner currently satisfies. See "macos-desktop" job below.
+    runs-on: ubuntu-latest
+    container: swift:6.4-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build (server + CLI + core)
+        run: >
+          swift build
+          --target AbbeyCore
+          --target AbbeyServerKit
+          --target AbbeyServer
+          --target AbbeyCLI
+
+      - name: Test AbbeyCoreTests
+        run: swift test --filter AbbeyCoreTests
+
+      - name: Test AbbeyCLITests
+        run: swift test --filter AbbeyCLITests
+
+  macos-desktop:
+    # AbbeyBotApp needs a macOS 27 + Xcode host, which GitHub-hosted macos-* runners do
+    # not currently provide (they lag the newest macOS release by months). This job is a
+    # placeholder for a self-hosted runner registered against this repo — see AGENTS.md.
+    # Until one is confirmed, this job is disabled rather than failing CI on every push.
+    if: false
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desktop smoke
+        run: |
+          unset TOOLCHAINS
+          bash Scripts/run-smoke.sh

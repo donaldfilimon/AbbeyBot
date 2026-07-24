@@ -9,7 +9,8 @@ let package = Package(
     products: [
         .library(name: "AbbeyCore", targets: ["AbbeyCore"]),
         .executable(name: "AbbeyBot", targets: ["AbbeyBotApp"]),
-        .executable(name: "AbbeyServer", targets: ["AbbeyServer"])
+        .executable(name: "AbbeyServer", targets: ["AbbeyServer"]),
+        .executable(name: "abbey", targets: ["AbbeyCLI"])
     ],
     dependencies: [
         .package(url: "https://github.com/DiscordBM/DiscordBM", from: "1.16.0"),
@@ -38,14 +39,28 @@ let package = Package(
                 .swiftLanguageMode(.v6)
             ]
         ),
-        .executableTarget(
-            name: "AbbeyServer",
+        .target(
+            name: "AbbeyServerKit",
             dependencies: [
                 "AbbeyCore",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "Fluent", package: "fluent"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "FluentSQLiteDriver", package: "fluent-sqlite-driver"),
+                .product(name: "DiscordBM", package: "DiscordBM")
+            ],
+            path: "Sources/AbbeyServerKit",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
+        .executableTarget(
+            name: "AbbeyServer",
+            dependencies: [
+                "AbbeyCore",
+                "AbbeyServerKit",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "Fluent", package: "fluent"),
                 .product(name: "Leaf", package: "leaf"),
                 .product(name: "DiscordBM", package: "DiscordBM")
             ],
@@ -57,10 +72,30 @@ let package = Package(
                 .swiftLanguageMode(.v6)
             ]
         ),
+        .executableTarget(
+            name: "AbbeyCLI",
+            dependencies: [
+                "AbbeyCore",
+                "AbbeyServerKit",
+                .product(name: "Vapor", package: "vapor")
+            ],
+            path: "Sources/AbbeyCLI",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
         .testTarget(
             name: "AbbeyCoreTests",
             dependencies: ["AbbeyCore"],
             path: "Tests/AbbeyCoreTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
+        .testTarget(
+            name: "AbbeyCLITests",
+            dependencies: ["AbbeyCLI"],
+            path: "Tests/AbbeyCLITests",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
             ]

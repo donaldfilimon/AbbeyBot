@@ -77,6 +77,17 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Server sync") {
+                TextField("ABBEY_SYNC_SERVER_URL", text: $config.syncServerURL, prompt: Text("https://your-abbeyserver-host"))
+                    .textFieldStyle(.roundedBorder)
+                SecureField("ABBEY_SYNC_API_TOKEN", text: $config.syncAPIToken)
+                Text(config.syncServerURL.isEmpty
+                     ? "Sync is off — local SwiftData stays the only source of truth."
+                     : "Best-effort mirrors ingests, remembers, and forgets to AbbeyServer at \(config.syncServerURL). Failures are logged, never block the local write.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 520)

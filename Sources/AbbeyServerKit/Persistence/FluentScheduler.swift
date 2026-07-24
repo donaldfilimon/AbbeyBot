@@ -4,7 +4,7 @@ import Foundation
 import Vapor
 
 /// Reply cooldown + channel consolidation for the headless server.
-actor FluentScheduler {
+public actor FluentScheduler {
     private var cooldown = ReplyCooldownTracker()
     private var consolidationTask: Task<Void, Never>?
     private let db: any Database
@@ -14,7 +14,7 @@ actor FluentScheduler {
     private let cooldownSeconds: @Sendable () -> Double
     private let consolidationIntervalMinutes: @Sendable () -> Double
 
-    init(
+    public init(
         db: any Database,
         logger: Logger,
         eventBus: EventBus,
@@ -30,15 +30,15 @@ actor FluentScheduler {
         self.consolidationIntervalMinutes = consolidationIntervalMinutes
     }
 
-    func isCoolingDown(userId: String, guildId: String) -> Bool {
+    public func isCoolingDown(userId: String, guildId: String) -> Bool {
         cooldown.isCoolingDown(userId: userId, guildId: guildId, cooldownSeconds: cooldownSeconds())
     }
 
-    func markReplied(userId: String, guildId: String) {
+    public func markReplied(userId: String, guildId: String) {
         cooldown.markReplied(userId: userId, guildId: guildId)
     }
 
-    func start() {
+    public func start() {
         consolidationTask?.cancel()
         consolidationTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -52,12 +52,12 @@ actor FluentScheduler {
         }
     }
 
-    func stop() {
+    public func stop() {
         consolidationTask?.cancel()
         consolidationTask = nil
     }
 
-    func consolidateAllChannels() async {
+    public func consolidateAllChannels() async {
         do {
             let channels = try await ChannelContext.query(on: db).all()
             for channel in channels {

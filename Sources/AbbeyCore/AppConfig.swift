@@ -59,6 +59,13 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(autoConnectOnLaunch, forKey: Keys.autoConnectOnLaunch) }
     }
 
+    public var syncServerURL: String {
+        didSet { defaults.set(syncServerURL, forKey: Keys.syncServerURL) }
+    }
+    public var syncAPIToken: String {
+        didSet { TokenStore.set(syncAPIToken, account: Keys.syncAPIToken) }
+    }
+
     private enum Keys {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
@@ -71,6 +78,8 @@ public final class AppConfig: @unchecked Sendable {
         static let discordBotToken = "DISCORD_BOT_TOKEN"
         static let discordDevGuildId = "DISCORD_DEV_GUILD_ID"
         static let autoConnectOnLaunch = "ABBEY_DISCORD_AUTO_CONNECT"
+        static let syncServerURL = "ABBEY_SYNC_SERVER_URL"
+        static let syncAPIToken = "ABBEY_SYNC_API_TOKEN"
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -98,6 +107,12 @@ public final class AppConfig: @unchecked Sendable {
             ?? ProcessInfo.processInfo.environment["DISCORD_DEV_GUILD_ID"]
             ?? ""
         self.autoConnectOnLaunch = defaults.object(forKey: Keys.autoConnectOnLaunch) as? Bool ?? false
+        self.syncServerURL = defaults.string(forKey: Keys.syncServerURL)
+            ?? ProcessInfo.processInfo.environment["ABBEY_SYNC_SERVER_URL"]
+            ?? ""
+        self.syncAPIToken = TokenStore.get(account: Keys.syncAPIToken)
+            ?? ProcessInfo.processInfo.environment["ABBEY_SYNC_API_TOKEN"]
+            ?? ""
     }
 }
 

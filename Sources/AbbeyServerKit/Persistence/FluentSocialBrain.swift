@@ -4,24 +4,24 @@ import Foundation
 import Vapor
 
 /// Fluent-backed reputation engine. Algorithm lives in `ReputationMath`.
-actor FluentSocialBrain {
+public actor FluentSocialBrain {
     private let db: any Database
     private let eventBus: EventBus
     private let decay: @Sendable () -> Double
     private var scores: [String: Double] = [:]
     private(set) var lastPersistenceError: (any Error)?
 
-    init(db: any Database, eventBus: EventBus, decay: @escaping @Sendable () -> Double) {
+    public init(db: any Database, eventBus: EventBus, decay: @escaping @Sendable () -> Double) {
         self.db = db
         self.eventBus = eventBus
         self.decay = decay
     }
 
-    func reputation(userId: String, guildId: String) -> Double {
+    public func reputation(userId: String, guildId: String) -> Double {
         scores[ReputationMath.cacheKey(userId: userId, guildId: guildId)] ?? ReputationMath.defaultScore
     }
 
-    func warmCache() async {
+    public func warmCache() async {
         do {
             let records = try await UserMemory.query(on: db).all()
             for record in records {
@@ -33,7 +33,7 @@ actor FluentSocialBrain {
         }
     }
 
-    func recordInteraction(userId: String, guildId: String, quality: Double, reason: String = "interaction") async {
+    public func recordInteraction(userId: String, guildId: String, quality: Double, reason: String = "interaction") async {
         let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         let current = scores[k] ?? ReputationMath.defaultScore
         let updated = ReputationMath.blend(current: current, quality: quality, decay: decay())
@@ -42,7 +42,7 @@ actor FluentSocialBrain {
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
-    func penalize(userId: String, guildId: String, reason: String) async {
+    public func penalize(userId: String, guildId: String, reason: String) async {
         let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         let current = scores[k] ?? ReputationMath.defaultScore
         let updated = ReputationMath.penalize(current: current)

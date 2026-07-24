@@ -3,13 +3,13 @@ import Fluent
 import Foundation
 import Vapor
 
-enum MemoryForgetError: Error, Equatable {
+public enum MemoryForgetError: Error, Equatable {
     case noMemory
     case invalidIndex
 }
 
-enum MemoryRepository {
-    static func appendFact(userId: String, guildId: String, fact: String, on db: any Database) async throws {
+public enum MemoryRepository {
+    public static func appendFact(userId: String, guildId: String, fact: String, on db: any Database) async throws {
         let trimmed = fact.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
@@ -24,7 +24,7 @@ enum MemoryRepository {
         }
     }
 
-    static func forgetFact(userId: String, guildId: String, index: Int, on db: any Database) async throws {
+    public static func forgetFact(userId: String, guildId: String, index: Int, on db: any Database) async throws {
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         guard let memory = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() else {
             throw MemoryForgetError.noMemory
@@ -37,22 +37,22 @@ enum MemoryRepository {
         try await memory.save(on: db)
     }
 
-    static func facts(userId: String, guildId: String, on db: any Database) async throws -> [String] {
+    public static func facts(userId: String, guildId: String, on db: any Database) async throws -> [String] {
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         return try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first()?.facts ?? []
     }
 
-    static func recent(limit: Int, on db: any Database) async throws -> [UserMemory] {
+    public static func recent(limit: Int, on db: any Database) async throws -> [UserMemory] {
         try await UserMemory.query(on: db).sort(\.$updatedAt, .descending).limit(limit).all()
     }
 
-    static func count(on db: any Database) async throws -> Int {
+    public static func count(on db: any Database) async throws -> Int {
         try await UserMemory.query(on: db).count()
     }
 }
 
-enum ChannelRepository {
-    static func bump(channelId: String, guildId: String, on db: any Database) async throws {
+public enum ChannelRepository {
+    public static func bump(channelId: String, guildId: String, on db: any Database) async throws {
         let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         if let existing = try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first() {
             existing.messageCount += 1
@@ -63,27 +63,27 @@ enum ChannelRepository {
         }
     }
 
-    static func summary(channelId: String, guildId: String, on db: any Database) async throws -> String {
+    public static func summary(channelId: String, guildId: String, on db: any Database) async throws -> String {
         let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.summary ?? ""
     }
 
-    static func messageCount(channelId: String, guildId: String, on db: any Database) async throws -> Int {
+    public static func messageCount(channelId: String, guildId: String, on db: any Database) async throws -> Int {
         let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.messageCount ?? 0
     }
 
-    static func recent(limit: Int, on db: any Database) async throws -> [ChannelContext] {
+    public static func recent(limit: Int, on db: any Database) async throws -> [ChannelContext] {
         try await ChannelContext.query(on: db).sort(\.$updatedAt, .descending).limit(limit).all()
     }
 
-    static func count(on db: any Database) async throws -> Int {
+    public static func count(on db: any Database) async throws -> Int {
         try await ChannelContext.query(on: db).count()
     }
 }
 
-enum MessageRepository {
-    static func insert(
+public enum MessageRepository {
+    public static func insert(
         discordMessageId: String,
         channelId: String,
         guildId: String,
@@ -101,7 +101,7 @@ enum MessageRepository {
         try await row.create(on: db)
     }
 
-    static func recent(channelId: String, guildId: String, limit: Int, on db: any Database) async throws -> [GuildMessage] {
+    public static func recent(channelId: String, guildId: String, limit: Int, on db: any Database) async throws -> [GuildMessage] {
         try await GuildMessage.query(on: db)
             .filter(\.$channelId == channelId)
             .filter(\.$guildId == guildId)
@@ -110,33 +110,33 @@ enum MessageRepository {
             .all()
     }
 
-    static func recent(limit: Int, on db: any Database) async throws -> [GuildMessage] {
+    public static func recent(limit: Int, on db: any Database) async throws -> [GuildMessage] {
         try await GuildMessage.query(on: db)
             .sort(\.$createdAt, .descending)
             .limit(limit)
             .all()
     }
 
-    static func count(on db: any Database) async throws -> Int {
+    public static func count(on db: any Database) async throws -> Int {
         try await GuildMessage.query(on: db).count()
     }
 }
 
-enum ReputationRepository {
-    static func recent(limit: Int, on db: any Database) async throws -> [ReputationEvent] {
+public enum ReputationRepository {
+    public static func recent(limit: Int, on db: any Database) async throws -> [ReputationEvent] {
         try await ReputationEvent.query(on: db)
             .sort(\.$createdAt, .descending)
             .limit(limit)
             .all()
     }
 
-    static func count(on db: any Database) async throws -> Int {
+    public static func count(on db: any Database) async throws -> Int {
         try await ReputationEvent.query(on: db).count()
     }
 }
 
-enum InteractionRepository {
-    static func log(
+public enum InteractionRepository {
+    public static func log(
         commandName: String,
         userId: String,
         guildId: String,
@@ -154,7 +154,7 @@ enum InteractionRepository {
         try await row.create(on: db)
     }
 
-    static func recent(limit: Int, on db: any Database) async throws -> [InteractionLog] {
+    public static func recent(limit: Int, on db: any Database) async throws -> [InteractionLog] {
         try await InteractionLog.query(on: db)
             .sort(\.$createdAt, .descending)
             .limit(limit)
@@ -162,29 +162,29 @@ enum InteractionRepository {
     }
 }
 
-enum EquityRepository {
-    static func recent(limit: Int, on db: any Database) async throws -> [EquityIdea] {
+public enum EquityRepository {
+    public static func recent(limit: Int, on db: any Database) async throws -> [EquityIdea] {
         try await EquityIdea.query(on: db)
             .sort(\.$generatedAt, .descending)
             .limit(limit)
             .all()
     }
 
-    static func count(on db: any Database) async throws -> Int {
+    public static func count(on db: any Database) async throws -> Int {
         try await EquityIdea.query(on: db).count()
     }
 }
 
-struct StatusCounts: Content {
-    var users: Int
-    var channels: Int
-    var messages: Int
-    var reputationEvents: Int
-    var equityIdeas: Int
+public struct StatusCounts: Content {
+    public var users: Int
+    public var channels: Int
+    public var messages: Int
+    public var reputationEvents: Int
+    public var equityIdeas: Int
 }
 
-enum StatusRepository {
-    static func counts(on db: any Database) async throws -> StatusCounts {
+public enum StatusRepository {
+    public static func counts(on db: any Database) async throws -> StatusCounts {
         async let users = MemoryRepository.count(on: db)
         async let channels = ChannelRepository.count(on: db)
         async let messages = MessageRepository.count(on: db)

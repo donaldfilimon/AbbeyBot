@@ -2,36 +2,36 @@ import Fluent
 import Foundation
 import Vapor
 
-final class UserMemory: Model, Content, @unchecked Sendable {
-    static let schema = "user_memories"
+public final class UserMemory: Model, Content, @unchecked Sendable {
+    public static let schema = "user_memories"
 
     @ID(key: .id)
-    var id: UUID?
+    public var id: UUID?
 
     @Field(key: "composite_key")
-    var compositeKey: String
+    public var compositeKey: String
 
     @Field(key: "discord_user_id")
-    var discordUserId: String
+    public var discordUserId: String
 
     @Field(key: "guild_id")
-    var guildId: String
+    public var guildId: String
 
     @Field(key: "facts")
-    var facts: [String]
+    public var facts: [String]
 
     @Field(key: "reputation")
-    var reputation: Double
+    public var reputation: Double
 
     @Field(key: "interaction_count")
-    var interactionCount: Int
+    public var interactionCount: Int
 
     @Timestamp(key: "updated_at", on: .update)
-    var updatedAt: Date?
+    public var updatedAt: Date?
 
-    init() {}
+    public init() {}
 
-    init(
+    public init(
         id: UUID? = nil,
         discordUserId: String,
         guildId: String,

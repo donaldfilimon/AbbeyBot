@@ -62,12 +62,44 @@ struct AbbeyBotApp: App {
             let container = try ModelContainer(for: schema, configurations: [configuration])
             return (container, false)
         } catch {
-            let fallback = ModelConfiguration(isStoredInMemoryOnly: true)
+            // Lightweight migration cannot rewrite attribute types (e.g. EquityIdea.factorBreakdown
+            // Binary Data → Codable). Move the on-disk store aside (not delete — keeps it available
+            // for manual recovery/inspection) and retry with a fresh store before degrading.
+            NSLog("AbbeyBot: persistent store open failed (%@); backing up %@",
+                  String(describing: error), configuration.url.path)
+            Self.backUpStoreFiles(at: configuration.url)
             do {
-                let container = try ModelContainer(for: schema, configurations: [fallback])
-                return (container, true)
+                let container = try ModelContainer(for: schema, configurations: [configuration])
+                return (container, false)
             } catch {
-                fatalError("AbbeyBot: could not construct any ModelContainer: \(error)")
+                let fallback = ModelConfiguration(isStoredInMemoryOnly: true)
+                do {
+                    let container = try ModelContainer(for: schema, configurations: [fallback])
+                    return (container, true)
+                } catch {
+                    fatalError("AbbeyBot: could not construct any ModelContainer: \(error)")
+                }
+            }
+        }
+    }
+
+    /// Renames the SQLite store and its `-wal`/`-shm` sidecars aside (timestamped `.bak-<epoch>`
+    /// suffix) so SwiftData can recreate a fresh schema, without discarding the old data — it stays
+    /// on disk next to the live store for manual recovery/inspection.
+    private static func backUpStoreFiles(at url: URL) {
+        let fm = FileManager.default
+        let suffix = ".bak-\(Int(Date().timeIntervalSince1970))"
+        let candidates = [
+            url,
+            URL(fileURLWithPath: url.path + "-wal"),
+            URL(fileURLWithPath: url.path + "-shm")
+        ]
+        for file in candidates where fm.fileExists(atPath: file.path) {
+            let backupURL = URL(fileURLWithPath: file.path + suffix)
+            do {
+                try fm.moveItem(at: file, to: backupURL)
+            } catch {
+                NSLog("AbbeyBot: failed to back up store file %@: %@", file.path, String(describing: error))
             }
         }
     }

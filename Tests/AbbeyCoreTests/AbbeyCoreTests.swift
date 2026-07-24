@@ -8,14 +8,39 @@ struct AbbeyCoreTests {
         #expect(IntentClassifier.classify("what is up?") == .question)
         #expect(IntentClassifier.classify("remember tea") == .memoryStore)
         #expect(IntentClassifier.classify("please kick that user") == .modRequest)
+        #expect(IntentClassifier.classify("be aviva please") == .personaSwitch)
+        #expect(IntentClassifier.classify("be abi") == .personaSwitch)
+        #expect(IntentClassifier.classify("switch to abbey") == .personaSwitch)
         #expect(IntentClassifier.classify("🔥") == .unknown)
         #expect(IntentClassifier.classifyLoose("🔥") == .smallTalk)
         #expect(IntentClassifier.classifyStrict("🔥") == .unknown)
     }
 
     @Test func discordCopyStrings() {
+        #expect(DiscordCopy.engineUnavailable == "Engine unavailable.")
+        #expect(DiscordCopy.noMemory == "No memory for that user.")
+        #expect(DiscordCopy.invalidFactIndex == "Invalid fact index.")
+        #expect(DiscordCopy.noChannelSummary == "No channel summary yet.")
+        #expect(DiscordCopy.reputation(userId: "u1", value: 0.5) == "Reputation for u1: 0.500")
+        #expect(DiscordCopy.remembered(userId: "u1") == "Remembered for u1.")
         #expect(DiscordCopy.forgot(index: 2) == "Forgot fact #2.")
         #expect(DiscordCopy.switchedPersona("Abbey") == "Switched to Abbey.")
+        struct SampleError: Error {}
+        #expect(DiscordCopy.forgetFailed(SampleError()).contains("Failed to forget:"))
+        #expect(DiscordCopy.rememberFailed(SampleError()).contains("Failed to remember:"))
+    }
+
+    @Test func intentQualityAndSuggestions() {
+        #expect(IntentClassifier.Intent.question.quality == 0.8)
+        #expect(IntentClassifier.Intent.unknown.quality == 0.2)
+        #expect(IntentClassifier.Intent.greeting.quality == 0.5)
+        #expect(IntentClassifier.Intent.command.quality == 0.6)
+        #expect(IntentClassifier.classify("/help") == .command)
+        #expect(IntentClassifier.suggestCompletions(for: "what") == [
+            "what do you think about",
+            "what is the reputation of"
+        ])
+        #expect(IntentClassifier.suggestCompletions(for: "zzz").isEmpty)
     }
 
     @Test func sentimentProjection() {
@@ -84,12 +109,17 @@ struct AbbeyCoreTests {
         #expect(PersonaName.resolve("AV") == "Aviva")
         #expect(PersonaName.resolve("be aviva please") == "Aviva")
         #expect(PersonaName.resolve("abi") == "Abi")
+        #expect(PersonaName.resolve("be abi") == "Abi")
         #expect(PersonaName.resolve("abbey") == "Abbey")
+        #expect(PersonaName.resolve("average day") == "Abbey")
+        #expect(PersonaName.resolve("capability") == "Abbey")
     }
 
     @Test func memoryFactExtract() {
         #expect(MemoryFactText.extract(from: "remember tea") == "tea")
         #expect(MemoryFactText.extract(from: "Note that likes jazz") == "likes jazz")
+        #expect(MemoryFactText.extract(from: "remember   ") == "")
+        #expect(MemoryFactText.extract(from: "REMEMBER Caps") == "Caps")
     }
 
     @Test func replyCooldownTracker() {
@@ -97,14 +127,27 @@ struct AbbeyCoreTests {
         #expect(tracker.isCoolingDown(userId: "u", guildId: "g", cooldownSeconds: 8) == false)
         tracker.markReplied(userId: "u", guildId: "g")
         #expect(tracker.isCoolingDown(userId: "u", guildId: "g", cooldownSeconds: 8) == true)
+        #expect(tracker.isCoolingDown(userId: "other", guildId: "g", cooldownSeconds: 8) == false)
     }
 
     @Test func channelSummaryBuilderOrder() {
+        #expect(ChannelSummaryBuilder.summarize([]) == "")
         let text = ChannelSummaryBuilder.summarize([
             .init(authorId: "a", content: "one"),
             .init(authorId: "b", content: "two")
         ])
         #expect(text == "a: one\nb: two")
+        let long = String(repeating: "x", count: 200)
+        let truncated = ChannelSummaryBuilder.summarize([
+            .init(authorId: "a", content: long)
+        ], maxContentChars: 10)
+        #expect(truncated == "a: xxxxxxxxxx")
+    }
+
+    @Test func ingestScorerLatencyNonNegative() {
+        let started = ContinuousClock.now
+        let ms = IngestScorer.latencyMilliseconds(since: started)
+        #expect(ms >= 0)
     }
 
     @Test func ingestScorerRunsDQNStep() async {
