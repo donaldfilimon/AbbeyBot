@@ -1,11 +1,8 @@
 import Foundation
 
-/// Intent → persona dispatch. Mirrors the Vapor implementation's `ABIRouter`
-/// (bot-architecture.md) but is an instance here rather than a type with `static var`
-/// state, so it can be constructed per-`AbbeyEngine` instead of being a hidden global —
-/// the reference draft's `static var current` made persona state a process-wide global,
-/// which is fine for a single-process bot but wrong for an app that could (in principle)
-/// host multiple engine instances in the same process (e.g. previews, tests).
+/// Intent → persona dispatch for Abbey / Aviva / Abi (framework roles):
+/// Abbey = ethical/professional default; Aviva = analysis/research; Abi = moderation.
+/// Instance-based (not a process-wide `static var`) so each engine can own its own router.
 public actor ABIRouter {
     private var current: any Persona
     private let eventBus: EventBus
@@ -24,9 +21,11 @@ public actor ABIRouter {
     public func route(intent: IntentClassifier.Intent) -> any Persona {
         switch intent {
         case .modRequest, .command:
+            return AbiPersona()
+        case .question:
             return AvivaPersona()
         case .greeting, .smallTalk:
-            return AbiPersona()
+            return AbbeyPersona()
         default:
             return current
         }

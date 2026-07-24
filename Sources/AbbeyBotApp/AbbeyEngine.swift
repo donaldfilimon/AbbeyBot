@@ -418,7 +418,8 @@ final class AbbeyEngine {
             },
             craftReply: { [weak self] content, channelId, guildId, authorId in
                 guard let self else { return nil }
-                let persona = await self.personaRouter.currentPersona()
+                let intent = IntentClassifier.classify(content)
+                let persona = await self.personaRouter.route(intent: intent)
                 let context = await self.personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
                 let response = await persona.respond(to: content, context: context, inference: self.inferenceRouter)
                 return response.text
@@ -441,7 +442,7 @@ final class AbbeyEngine {
         InteractionRouter(
             ask: { [weak self] question, userId, guildId, channelId in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                let persona = await self.personaRouter.currentPersona()
+                let persona = await self.personaRouter.route(intent: .question)
                 let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
                 return await persona.respond(to: question, context: context, inference: self.inferenceRouter).text
             },

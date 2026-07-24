@@ -280,7 +280,8 @@ public actor BotRuntime {
     /// Persona reply to free text, outside the Discord message/interaction flow — used by
     /// the CLI's conversation loop, mirroring `makeInteractionRouter`'s `ask` closure.
     public func reply(to text: String, userId: String, guildId: String, channelId: String) async -> String {
-        let persona = await personaRouter.currentPersona()
+        let intent = IntentClassifier.classify(text)
+        let persona = await personaRouter.route(intent: intent)
         let context = await personaContext(authorId: userId, guildId: guildId, channelId: channelId)
         return await persona.respond(to: text, context: context, inference: inferenceRouter).text
     }
@@ -339,7 +340,8 @@ public actor BotRuntime {
             },
             craftReply: { [weak self] content, channelId, guildId, authorId in
                 guard let self else { return nil }
-                let persona = await self.personaRouter.currentPersona()
+                let intent = IntentClassifier.classify(content)
+                let persona = await self.personaRouter.route(intent: intent)
                 let context = await self.personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
                 let response = await persona.respond(to: content, context: context, inference: self.inferenceRouter)
                 return response.text
@@ -362,7 +364,7 @@ public actor BotRuntime {
         InteractionRouter(
             ask: { [weak self] question, userId, guildId, channelId in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                let persona = await self.personaRouter.currentPersona()
+                let persona = await self.personaRouter.route(intent: .question)
                 let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
                 return await persona.respond(to: question, context: context, inference: self.inferenceRouter).text
             },

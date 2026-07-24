@@ -224,6 +224,19 @@ struct AbbeyCoreTests {
         #expect(PersonaName.resolve("capability") == "Abbey")
     }
 
+    @Test func abiRouterRoutesByFrameworkRoles() async {
+        let bus = EventBus()
+        let router = ABIRouter(eventBus: bus)
+        #expect(await router.route(intent: .modRequest).name == "Abi")
+        #expect(await router.route(intent: .command).name == "Abi")
+        #expect(await router.route(intent: .question).name == "Aviva")
+        #expect(await router.route(intent: .greeting).name == "Abbey")
+        #expect(await router.route(intent: .smallTalk).name == "Abbey")
+        #expect(await router.route(intent: .unknown).name == "Abbey")
+        await router.setPersona(named: "aviva")
+        #expect(await router.route(intent: .unknown).name == "Aviva")
+    }
+
     @Test func memoryFactExtract() {
         #expect(MemoryFactText.extract(from: "remember tea") == "tea")
         #expect(MemoryFactText.extract(from: "Note that likes jazz") == "likes jazz")

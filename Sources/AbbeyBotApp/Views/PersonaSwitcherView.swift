@@ -13,9 +13,9 @@ struct PersonaSwitcherView: View {
     @State private var isSending = false
 
     private let personas: [(name: String, color: Color, blurb: String)] = [
-        ("Abbey", .green, "Direct, street-smart, reads people fast. Default register."),
-        ("Aviva", .purple, "Analytical, structured, system-builder. Server arch, permissions, code."),
-        ("Abi", .cyan, "Warm, adaptive, rapport-builder. Welcomes, tone-setting, de-escalation.")
+        ("Abbey", .green, "Ethical, professional community register. Default persona."),
+        ("Aviva", .purple, "Analytical, research, architecture. Structured system-builder register."),
+        ("Abi", .cyan, "Moderation and compliance oversight. Platform rules, proportionate responses.")
     ]
 
     var body: some View {
