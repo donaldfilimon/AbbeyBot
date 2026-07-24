@@ -21,6 +21,7 @@ public actor DQNAgent {
     private var rng: SplitMix64
     private let seed: UInt64
     private let checkpointURL: URL?
+    private let experienceJournal: ExperienceJournal?
 
     public let gamma: Float
     public private(set) var epsilon: Float
@@ -32,7 +33,8 @@ public actor DQNAgent {
         epsilon: Float = 0.1,
         bufferCapacity: Int = 10_000,
         seed: UInt64 = 42,
-        checkpointURL: URL? = nil
+        checkpointURL: URL? = nil,
+        experienceJournalURL: URL? = nil
     ) {
         self.online = NeuralNetwork(topology: topology, seed: seed)
         self.target = online
@@ -42,6 +44,11 @@ public actor DQNAgent {
         self.gamma = gamma
         self.epsilon = epsilon
         self.checkpointURL = checkpointURL
+        if let experienceJournalURL {
+            self.experienceJournal = ExperienceJournal(url: experienceJournalURL)
+        } else {
+            self.experienceJournal = nil
+        }
     }
 
     /// Load checkpoint from disk when present. No-op if URL missing or file absent.
@@ -51,7 +58,23 @@ public actor DQNAgent {
         try load(from: url)
     }
 
+    /// Replay recent journal lines into the in-memory buffer (append-only file unchanged).
+    public func loadExperienceJournalIfPresent(limit: Int = 10_000) throws {
+        guard let journal = experienceJournal else { return }
+        let experiences = try journal.loadRecent(limit: limit)
+        for experience in experiences {
+            buffer.add(experience)
+        }
+    }
+
+    /// Snapshot checkpoint then write (RollbackStore + `*.bak` via writeReplacing).
     public func save(to url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path),
+           (try? RollbackStore.isManaged(url)) == true {
+            let stamp = ISO8601DateFormatter().string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+            try? RollbackStore.snapshot(file: url, as: "dqn-checkpoint-\(stamp)")
+        }
         let blob = DQNCheckpointBlob(
             topology: online.topology,
             gamma: gamma,
@@ -100,6 +123,15 @@ public actor DQNAgent {
         epsilon = blob.epsilon
     }
 
+    /// Restore weights from `url.bak` when present, then reload into this agent.
+    public func restoreCheckpointFromBak() throws {
+        guard let url = checkpointURL else {
+            throw DQNCheckpointError.io("no checkpoint URL configured")
+        }
+        try RollbackStore.restoreFromBak(url)
+        try load(from: url)
+    }
+
     /// Test helper: force ε for deterministic `selectAction` checks.
     public func setEpsilonForTesting(_ value: Float) {
         epsilon = value
@@ -118,6 +150,9 @@ public actor DQNAgent {
 
     public func remember(_ experience: Experience) {
         buffer.add(experience)
+        if let journal = experienceJournal {
+            try? journal.append(experience)
+        }
     }
 
     /// One learning step over a random minibatch. No-op until the buffer has at least

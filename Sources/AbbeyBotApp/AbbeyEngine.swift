@@ -30,6 +30,7 @@ final class AbbeyEngine {
     private(set) var liveIngestCount: Int = 0
 
     let discordBridge = DiscordBridge()
+    let twitchBridge = TwitchBridge()
     let moderationClient = ModerationClient()
     private var eventListenerTask: Task<Void, Never>?
 
@@ -47,7 +48,12 @@ final class AbbeyEngine {
         }
         self.socialBrain = SocialBrain(modelContainer: modelContainer, eventBus: bus, decay: { config.reputationDecay })
         let checkpointURL = try? DQNCheckpointStore.defaultURL()
-        self.dqnAgent = DQNAgent(topology: [8, 32, 16, 3], checkpointURL: checkpointURL)
+        let journalURL = try? ExperienceJournalStore.defaultURL()
+        self.dqnAgent = DQNAgent(
+            topology: [8, 32, 16, 3],
+            checkpointURL: checkpointURL,
+            experienceJournalURL: journalURL
+        )
         self.scheduler = AbbeyScheduler(
             modelContainer: modelContainer,
             eventBus: bus,
@@ -69,7 +75,7 @@ final class AbbeyEngine {
         }
 
         startEventListener()
-        Task { [socialBrain, scheduler, dqnAgent] in
+        Task { [socialBrain, scheduler, dqnAgent, twitchBridge] in
             do {
                 try await dqnAgent.loadCheckpointIfPresent()
             } catch {
@@ -77,8 +83,24 @@ final class AbbeyEngine {
                     "[dqn] checkpoint load failed: \(OperatorFacingError.message(error)) — using fresh weights"
                 )
             }
+            do {
+                try await dqnAgent.loadExperienceJournalIfPresent()
+            } catch {
+                print(
+                    "[dqn] experience journal load failed: \(OperatorFacingError.message(error)) — buffer starts empty"
+                )
+            }
             await socialBrain.warmCache()
             await scheduler.start()
+            let token = config.twitchOAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !token.isEmpty {
+                await twitchBridge.connect(
+                    oauthToken: token,
+                    login: config.twitchBotLogin,
+                    channel: config.twitchChannel,
+                    dryRun: config.dryRun
+                )
+            }
         }
 
         if !config.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

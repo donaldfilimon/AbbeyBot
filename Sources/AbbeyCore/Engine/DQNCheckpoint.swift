@@ -1,6 +1,6 @@
 import Foundation
 
-/// On-disk DQN weights (Phase 1). Experience replay stays in-memory; durable journal is Phase 2.
+/// On-disk DQN weights. Experience journal is append-only JSONL (`ExperienceJournal`).
 public struct DQNCheckpointBlob: Codable, Sendable, Equatable {
     public var topology: [Int]
     public var gamma: Float

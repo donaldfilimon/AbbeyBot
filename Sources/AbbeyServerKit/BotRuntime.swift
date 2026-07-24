@@ -68,6 +68,7 @@ public actor BotRuntime {
     let personaRouter: ABIRouter
     let inferenceRouter: InferenceRouter
     let discordBridge = DiscordBridge()
+    let twitchBridge = TwitchBridge()
 
     public private(set) var discordState: DiscordConnectionState = .disconnected
     private(set) var discordLastError: String?
@@ -85,7 +86,12 @@ public actor BotRuntime {
         self.eventBus = bus
         self.socialBrain = FluentSocialBrain(db: app.db, eventBus: bus, decay: { config.reputationDecay })
         let checkpointURL = try? DQNCheckpointStore.defaultURL()
-        self.dqnAgent = DQNAgent(topology: [8, 32, 16, 3], checkpointURL: checkpointURL)
+        let journalURL = try? ExperienceJournalStore.defaultURL()
+        self.dqnAgent = DQNAgent(
+            topology: [8, 32, 16, 3],
+            checkpointURL: checkpointURL,
+            experienceJournalURL: journalURL
+        )
         self.scheduler = FluentScheduler(
             db: app.db,
             logger: app.logger,
@@ -111,8 +117,24 @@ public actor BotRuntime {
                 "DQN checkpoint load failed: \(OperatorFacingError.message(error)) — using fresh weights"
             )
         }
+        do {
+            try await dqnAgent.loadExperienceJournalIfPresent()
+        } catch {
+            app.logger.warning(
+                "DQN experience journal load failed: \(OperatorFacingError.message(error)) — buffer starts empty"
+            )
+        }
         await socialBrain.warmCache()
         await scheduler.start()
+        let twitchToken = config.twitchOAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !twitchToken.isEmpty {
+            await twitchBridge.connect(
+                oauthToken: twitchToken,
+                login: config.twitchBotLogin,
+                channel: config.twitchChannel,
+                dryRun: config.dryRun
+            )
+        }
         metricsListener = Task { [weak self] in
             guard let self else { return }
             let stream = await self.eventBus.subscribe()

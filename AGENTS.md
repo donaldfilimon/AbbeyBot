@@ -128,9 +128,17 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Principle | Behavior |
 |-----------|----------|
 | Config validate before startup | `AppConfig.validateForStartup(scope:)` — `.desktop` (GUI) enforces `liveDiscord` token unless dry-run; `.headless` (server/CLI via `configureRuntime`) skips that UserDefaults gate so HTTP can boot without a token. Also: remoteCompatible URL; sync URL http(s)+host; cooldown/decay ranges. |
-| Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge.connect` skips gateway, logs `dry-run: would connect`, sets state connected with `botUserId=dry-run`. |
+| Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge` / `TwitchBridge` skip sockets, log `dry-run: would connect`. |
 | Durable checkpoints | `DQNAgent.save/load` + `DQNCheckpointStore` default `~/.abbey/dqn-checkpoint.json`; `*.bak` before overwrite; load on engine start; save every 100 learn steps with target sync. |
-| Experience append-only default | Replay buffer remains **in-memory** for Phase 1; durable append-only experience journal is Phase 2 — do not claim it. |
+
+### Phase 2 runtime (shipped)
+
+| Principle | Behavior |
+|-----------|----------|
+| Experience journal | Append-only JSONL `~/.abbey/dqn-experience.jsonl` via `ExperienceJournal`; `DQNAgent.remember` appends; engines call `loadExperienceJournalIfPresent()` on start into the in-memory replay buffer. |
+| Generated-code validator | `CodeProposalValidator.validate` / `acceptOrThrow` — static reject of shell/process/dlopen/network/rm patterns (not a sandbox). |
+| Rollback FS | `RollbackStore` snapshots under `~/.abbey/rollback/<name>/`; `restore` / `restoreFromBak`; checkpoint saves also snapshot when managed. |
+| Twitch IRC | `TwitchBridge` — optional connect when `TWITCH_OAUTH_TOKEN` (+ login/channel) set; dry-run supported. **Not shipped:** EventSub, PubSub, chat reply loop into ingest. |
 
 ### Toolchain / run UX
 
@@ -142,11 +150,11 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 `bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change) is the gate of record. Static and security failures must pass or be documented as accepted exceptions before ship. GitHub Actions (`abbey-ci`) is secondary until billing is unblocked.
 
-### Deferred (roadmap — not Phase 1)
+### Still deferred
 
-- **Twitch** — IRC/EventSub client; no Twitch routes or APIs in this repo yet.
-- **Generated-code safety validator** — proposals must pass validation before acceptance; no sandbox shipped yet.
-- **Rollback FS** — full stateful rollback beyond checkpoint `*.bak` backup-before-overwrite.
+- **Twitch EventSub / chat→ingest** — IRC presence only; no EventSub client and no automatic Twitch message ingest yet.
+- **Codegen sandbox** — static `CodeProposalValidator` only; no isolated execution sandbox.
+- Full CRDT / cursor pagination / CLI↔desktop sync — see Deferred below.
 
 ## Deferred
 
