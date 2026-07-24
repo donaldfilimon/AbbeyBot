@@ -3,9 +3,6 @@ import FluentPostgresDriver
 import FluentSQLiteDriver
 import Foundation
 import Vapor
-#if canImport(Network)
-import Network
-#endif
 
 /// Selects the Fluent driver from `DATABASE_URL` (falling back to `defaultDatabaseURL`),
 /// runs migrations, and constructs the shared `BotRuntime`. Does **not** register
@@ -13,11 +10,12 @@ import Network
 /// `AbbeyServer`, direct `start()`/`stop()` calls for `AbbeyCLI`) so a runtime never gets
 /// stopped twice from two different triggers.
 ///
-/// When `DATABASE_URL` is unset and the default is Postgres but nothing is listening on
-/// that host/port, falls back to a sqlite file under the process temp directory so local
-/// `run-server.sh` / `swift run AbbeyServer` does not trap with `swift_errorInMain`.
+/// Callers that want a local sqlite fallback when Postgres is down must set
+/// `DATABASE_URL` explicitly (see `Scripts/run-server.sh`); this function does not probe
+/// the network or silently change database identity.
 public func configureRuntime(_ app: Application, defaultDatabaseURL: String) async throws -> BotRuntime {
-    let databaseURL = resolveDatabaseURL(default: defaultDatabaseURL, logger: app.logger)
+    let databaseURL = Environment.get("DATABASE_URL").flatMap { $0.isEmpty ? nil : $0 }
+        ?? defaultDatabaseURL
 
     let dialect: String
     if databaseURL.hasPrefix("postgres://") || databaseURL.hasPrefix("postgresql://") {
@@ -49,83 +47,6 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
     let runtime = BotRuntime(app: app)
     app.botRuntime = runtime
     return runtime
-}
-
-/// Prefer an explicit `DATABASE_URL`. Otherwise, if the default is Postgres and that
-/// endpoint is not accepting TCP connections, use a temp sqlite file instead of failing boot.
-func resolveDatabaseURL(default defaultDatabaseURL: String, logger: Logger) -> String {
-    if let explicit = Environment.get("DATABASE_URL"), !explicit.isEmpty {
-        return explicit
-    }
-    if defaultDatabaseURL.hasPrefix("postgres://") || defaultDatabaseURL.hasPrefix("postgresql://"),
-       let endpoint = postgresTCPEndpoint(from: defaultDatabaseURL),
-       !tcpEndpointReachable(host: endpoint.host, port: endpoint.port, timeout: 0.4)
-    {
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("abbey-server.sqlite")
-            .path
-        logger.warning(
-            "DATABASE_URL unset and Postgres at \(endpoint.host):\(endpoint.port) unreachable; using sqlite://\(path)"
-        )
-        return "sqlite://\(path)"
-    }
-    return defaultDatabaseURL
-}
-
-func postgresTCPEndpoint(from urlString: String) -> (host: String, port: UInt16)? {
-    guard let url = URL(string: urlString), let host = url.host, !host.isEmpty else { return nil }
-    let port = UInt16(url.port ?? 5432)
-    return (host, port)
-}
-
-func tcpEndpointReachable(host: String, port: UInt16, timeout: TimeInterval) -> Bool {
-#if canImport(Network)
-    guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
-    final class ProbeState: @unchecked Sendable {
-        var reachable = false
-        let lock = NSLock()
-        func markReady() {
-            lock.lock()
-            reachable = true
-            lock.unlock()
-        }
-        var isReady: Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            return reachable
-        }
-    }
-    let state = ProbeState()
-    let semaphore = DispatchSemaphore(value: 0)
-    let connection = NWConnection(
-        host: NWEndpoint.Host(host),
-        port: nwPort,
-        using: .tcp
-    )
-    connection.stateUpdateHandler = { connectionState in
-        switch connectionState {
-        case .ready:
-            state.markReady()
-            connection.cancel()
-            semaphore.signal()
-        case .failed, .cancelled:
-            semaphore.signal()
-        default:
-            break
-        }
-    }
-    connection.start(queue: DispatchQueue(label: "abbey.postgres.probe"))
-    _ = semaphore.wait(timeout: .now() + timeout)
-    connection.cancel()
-    return state.isReady
-#else
-    // Linux CI/Docker always sets DATABASE_URL explicitly; without Network.framework
-    // treat an unset URL + postgres default as unreachable so boot uses sqlite.
-    _ = host
-    _ = port
-    _ = timeout
-    return false
-#endif
 }
 
 public struct BotLifecycleHandler: LifecycleHandler {

@@ -3,14 +3,14 @@ import Foundation
 import Testing
 import Vapor
 
-@Suite("AbbeyServerKit sqlite-memory", .serialized)
+@Suite("AbbeyServerKit sqlite-memory")
 struct AbbeyServerKitTests {
     private func withRuntime<T: Sendable>(
         _ body: @Sendable (Application, BotRuntime) async throws -> T
     ) async throws -> T {
         unsetenv("DISCORD_BOT_TOKEN")
         unsetenv("DISCORD_DEV_GUILD_ID")
-        setenv("DATABASE_URL", "sqlite://memory", 1)
+        unsetenv("DATABASE_URL")
 
         let app = try await Application.make(.testing)
         do {
@@ -30,43 +30,19 @@ struct AbbeyServerKitTests {
         }
     }
 
-    @Test func configureRuntimeFallsBackToSqliteWhenDefaultPostgresUnreachable() async throws {
+    @Test func configureRuntimeRejectsInvalidDatabaseURL() async throws {
         unsetenv("DISCORD_BOT_TOKEN")
-        unsetenv("DISCORD_DEV_GUILD_ID")
         unsetenv("DATABASE_URL")
         let app = try await Application.make(.testing)
         do {
-            // Port 1 is effectively never a Postgres listener; probe should fail fast.
-            _ = try await configureRuntime(
-                app,
-                defaultDatabaseURL: "postgres://abbey:abbey@127.0.0.1:1/abbeybot"
-            )
-            #expect(app.databaseDialect == "sqlite-file")
-            try await app.asyncShutdown()
-        } catch {
-            try? await app.asyncShutdown()
-            throw error
-        }
-        setenv("DATABASE_URL", "sqlite://memory", 1)
-    }
-
-    @Test func configureRuntimeRejectsInvalidDatabaseURL() async throws {
-        unsetenv("DISCORD_BOT_TOKEN")
-        setenv("DATABASE_URL", "mysql://nope", 1)
-        let app = try await Application.make(.testing)
-        do {
-            do {
-                _ = try await configureRuntime(app, defaultDatabaseURL: "sqlite://memory")
-                Issue.record("expected invalid DATABASE_URL to throw")
-            } catch {
-                // Abort / validation failure — any throw is success
+            await #expect(throws: (any Error).self) {
+                _ = try await configureRuntime(app, defaultDatabaseURL: "mysql://nope")
             }
             try await app.asyncShutdown()
         } catch {
             try? await app.asyncShutdown()
             throw error
         }
-        setenv("DATABASE_URL", "sqlite://memory", 1)
     }
 
     @Test func memoryRepositoryAppendFactsAndForget() async throws {
@@ -91,18 +67,12 @@ struct AbbeyServerKitTests {
             facts = try await MemoryRepository.facts(userId: "u1", guildId: "g1", on: db)
             #expect(facts == ["lives in nyc"])
 
-            do {
+            await #expect(throws: MemoryForgetError.invalidIndex) {
                 try await MemoryRepository.forgetFact(userId: "u1", guildId: "g1", index: 9, on: db)
-                Issue.record("expected invalidIndex")
-            } catch let error as MemoryForgetError {
-                #expect(error == .invalidIndex)
             }
 
-            do {
+            await #expect(throws: MemoryForgetError.noMemory) {
                 try await MemoryRepository.forgetFact(userId: "nobody", guildId: "g1", index: 1, on: db)
-                Issue.record("expected noMemory")
-            } catch let error as MemoryForgetError {
-                #expect(error == .noMemory)
             }
 
             try await MemoryRepository.appendFact(userId: "u1", guildId: "g1", fact: "   ", on: db)

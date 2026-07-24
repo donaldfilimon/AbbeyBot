@@ -10,13 +10,15 @@ if [[ -f "$ROOT/.env" ]]; then
   source "$ROOT/.env"
   set +a
 fi
-# Match smoke behavior: when DATABASE_URL is unset, prefer compose Postgres if healthy,
-# otherwise let AbbeyServerKit fall back to a temp sqlite file (do not leave a dead
-# postgres:// default that traps on boot).
+# When DATABASE_URL is unset: prefer compose Postgres if healthy, otherwise an explicit
+# temp sqlite URL (owned here — AbbeyServerKit does not probe or silently rewrite).
 if [[ -z "${DATABASE_URL:-}" ]]; then
   if command -v docker >/dev/null 2>&1 \
     && docker compose exec -T db pg_isready -U abbey -d abbeybot >/dev/null 2>&1; then
     export DATABASE_URL="postgres://abbey:abbey@127.0.0.1:5432/abbeybot"
+  else
+    export DATABASE_URL="sqlite://${TMPDIR:-/tmp}/abbey-server.sqlite"
+    echo "DATABASE_URL unset and Postgres unavailable; using $DATABASE_URL" >&2
   fi
 fi
 HOST="${HTTP_HOSTNAME:-127.0.0.1}"

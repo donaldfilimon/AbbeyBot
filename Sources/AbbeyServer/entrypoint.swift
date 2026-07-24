@@ -15,8 +15,8 @@ enum AbbeyServerMain {
             } catch {
                 app.logger.report(error: error)
                 try? await app.asyncShutdown()
-                // Prefer a clean exit over `swift_errorInMain` (SIGTRAP / "Fatal error"),
-                // which macOS records as a crash when Postgres is down and DATABASE_URL is unset.
+                // Prefer a clean exit over `swift_errorInMain` (SIGTRAP / "Fatal error")
+                // when configure/boot fails (e.g. bad DATABASE_URL or unreachable Postgres).
                 Foundation.exit(1)
             }
         } catch {
