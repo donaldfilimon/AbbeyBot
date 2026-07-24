@@ -1,0 +1,4 @@
+{
+  "name": "AbbeyBot",
+  "install": "bash .cursor/install.sh"
+}
