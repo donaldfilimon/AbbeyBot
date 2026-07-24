@@ -35,6 +35,22 @@ struct IngestResponseDTO: Content {
     var discordMessageId: String
 }
 
+struct RememberRequestDTO: Content {
+    var guildId: String
+    var userId: String
+    var fact: String
+}
+
+struct ForgetRequestDTO: Content {
+    var guildId: String
+    var userId: String
+    var index: Int
+}
+
+struct OkDTO: Content {
+    var ok: Bool
+}
+
 private func clampedLimit(_ req: Request, default defaultLimit: Int = 100, max maxLimit: Int = 500) -> Int {
     let raw = req.query[Int.self, at: "limit"] ?? defaultLimit
     return min(max(raw, 1), maxLimit)
@@ -88,6 +104,50 @@ func routes(_ app: Application) throws {
             discordMessageId: resolvedId
         )
         return IngestResponseDTO(ok: true, discordMessageId: resolvedId)
+    }
+
+    // Keyed shared-state reads/writes for the desktop app's sync client. Distinct from
+    // the "recent N" list endpoints below, which aren't keyed by a specific user/channel.
+    app.get("api", "state", "user") { req async throws -> UserStateDTO in
+        guard let guildId = req.query[String.self, at: "guildId"], !guildId.isEmpty,
+              let userId = req.query[String.self, at: "userId"], !userId.isEmpty
+        else {
+            throw Abort(.badRequest, reason: "guildId and userId query params are required")
+        }
+        return await req.application.botRuntime.userState(userId: userId, guildId: guildId)
+    }
+
+    app.get("api", "state", "channel") { req async throws -> ChannelStateDTO in
+        guard let guildId = req.query[String.self, at: "guildId"], !guildId.isEmpty,
+              let channelId = req.query[String.self, at: "channelId"], !channelId.isEmpty
+        else {
+            throw Abort(.badRequest, reason: "guildId and channelId query params are required")
+        }
+        return await req.application.botRuntime.channelState(channelId: channelId, guildId: guildId)
+    }
+
+    app.post("api", "state", "remember") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(RememberRequestDTO.self)
+        let fact = body.fact.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fact.isEmpty else {
+            throw Abort(.badRequest, reason: "fact must be non-empty")
+        }
+        try await req.application.botRuntime.remember(userId: body.userId, guildId: body.guildId, fact: fact)
+        return OkDTO(ok: true)
+    }
+
+    app.post("api", "state", "forget") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(ForgetRequestDTO.self)
+        do {
+            try await req.application.botRuntime.forget(userId: body.userId, guildId: body.guildId, index: body.index)
+            return OkDTO(ok: true)
+        } catch MemoryForgetError.noMemory {
+            throw Abort(.notFound, reason: "no memory for that user")
+        } catch MemoryForgetError.invalidIndex {
+            throw Abort(.badRequest, reason: "invalid fact index")
+        }
     }
 
     app.get("api", "users") { req async throws -> [UserMemory] in

@@ -38,6 +38,24 @@ public struct MetricsDTO: Content {
     }
 }
 
+public struct UserStateDTO: Content {
+    public var facts: [String]
+    public var reputation: Double
+
+    public init(facts: [String], reputation: Double) {
+        self.facts = facts
+        self.reputation = reputation
+    }
+}
+
+public struct ChannelStateDTO: Content {
+    public var summary: String
+
+    public init(summary: String) {
+        self.summary = summary
+    }
+}
+
 /// Headless engine: Fluent persistence + DiscordBM gateway + AbbeyCore brain.
 public actor BotRuntime {
     let app: Application
@@ -248,6 +266,32 @@ public actor BotRuntime {
         let persona = await personaRouter.currentPersona()
         let context = await personaContext(authorId: userId, guildId: guildId, channelId: channelId)
         return await persona.respond(to: text, context: context, inference: inferenceRouter).text
+    }
+
+    /// Keyed read of a user's shared state — used by the desktop app's sync client
+    /// (and anything else that needs facts/reputation without a channel in hand).
+    public func userState(userId: String, guildId: String) async -> UserStateDTO {
+        let facts = (try? await MemoryRepository.facts(userId: userId, guildId: guildId, on: app.db)) ?? []
+        let reputation = await socialBrain.reputation(userId: userId, guildId: guildId)
+        return UserStateDTO(facts: facts, reputation: reputation)
+    }
+
+    /// Keyed read of a channel's shared state (summary only — message count is
+    /// available via `/api/channels`).
+    public func channelState(channelId: String, guildId: String) async -> ChannelStateDTO {
+        let summary = (try? await ChannelRepository.summary(channelId: channelId, guildId: guildId, on: app.db)) ?? ""
+        return ChannelStateDTO(summary: summary)
+    }
+
+    /// Direct remember, outside the "remember ..." intent-classification round-trip —
+    /// used by the desktop app's sync client and anything else with a fact in hand already.
+    public func remember(userId: String, guildId: String, fact: String) async throws {
+        try await MemoryRepository.appendFact(userId: userId, guildId: guildId, fact: fact, on: app.db)
+    }
+
+    /// Direct forget by 1-based fact index (same indexing as the `/forget` slash command).
+    public func forget(userId: String, guildId: String, index: Int) async throws {
+        try await MemoryRepository.forgetFact(userId: userId, guildId: guildId, index: index, on: app.db)
     }
 
     public func metricsSnapshot() -> MetricsDTO {

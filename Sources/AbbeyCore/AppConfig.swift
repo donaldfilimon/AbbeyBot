@@ -59,6 +59,13 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(autoConnectOnLaunch, forKey: Keys.autoConnectOnLaunch) }
     }
 
+    public var syncServerURL: String {
+        didSet { defaults.set(syncServerURL, forKey: Keys.syncServerURL) }
+    }
+    public var syncAPIToken: String {
+        didSet { TokenStore.set(syncAPIToken, account: Keys.syncAPIToken) }
+    }
+
     private enum Keys {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
