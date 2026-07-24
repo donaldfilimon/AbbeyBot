@@ -475,21 +475,13 @@ final class AbbeyEngine {
     }
 
     private func performVoice(_ action: VoiceAction, guildId: String) async -> String {
-        let state = await discordBridge.state
-        guard state == .connected else { return DiscordCopy.voiceNotConnected }
-        let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedGuild.isEmpty, trimmedGuild != "DM" else {
-            return DiscordCopy.voiceMissingGuild
-        }
-        switch action {
-        case .join(let channelId):
-            let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedChannel.isEmpty else { return DiscordCopy.voiceMissingChannel }
-            let ok = await discordBridge.joinVoice(guildId: trimmedGuild, channelId: trimmedChannel)
-            return ok ? DiscordCopy.voiceJoined(channelId: trimmedChannel) : DiscordCopy.voiceNotConnected
-        case .leave:
-            let ok = await discordBridge.leaveVoice(guildId: trimmedGuild)
-            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceLeaveFailed
-        }
+        let bridge = discordBridge
+        return await VoicePresence.perform(
+            action,
+            guildId: guildId,
+            isConnected: await bridge.state == .connected,
+            join: { guild, channel in await bridge.joinVoice(guildId: guild, channelId: channel) },
+            leave: { guild in await bridge.leaveVoice(guildId: guild) }
+        )
     }
 }

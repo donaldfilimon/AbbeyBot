@@ -64,6 +64,60 @@ struct AbbeyCoreTests {
         #expect(VoiceAction.leave == .leave)
     }
 
+    @Test func voicePresenceMapsOutcomesWithoutDuplicatingEngineLogic() async {
+        let notConnected = await VoicePresence.perform(
+            .join(channelId: "c1"),
+            guildId: "g1",
+            isConnected: false,
+            join: { _, _ in .requested },
+            leave: { _ in .requested }
+        )
+        #expect(notConnected == DiscordCopy.voiceNotConnected)
+
+        let missingGuild = await VoicePresence.perform(
+            .leave,
+            guildId: "DM",
+            isConnected: true,
+            join: { _, _ in .requested },
+            leave: { _ in .requested }
+        )
+        #expect(missingGuild == DiscordCopy.voiceMissingGuild)
+
+        let joined = await VoicePresence.perform(
+            .join(channelId: "c9"),
+            guildId: "g9",
+            isConnected: true,
+            join: { guild, channel in
+                #expect(guild == "g9")
+                #expect(channel == "c9")
+                return .requested
+            },
+            leave: { _ in .gatewayUnavailable }
+        )
+        #expect(joined == DiscordCopy.voiceJoined(channelId: "c9"))
+
+        let badIdsOnJoin = await VoicePresence.perform(
+            .join(channelId: "c1"),
+            guildId: "g1",
+            isConnected: true,
+            join: { _, _ in .invalidIdentifiers },
+            leave: { _ in .requested }
+        )
+        #expect(badIdsOnJoin == DiscordCopy.voiceMissingChannel)
+
+        let leaveFailed = await VoicePresence.perform(
+            .leave,
+            guildId: "g1",
+            isConnected: true,
+            join: { _, _ in .requested },
+            leave: { _ in .gatewayUnavailable }
+        )
+        #expect(leaveFailed == DiscordCopy.voiceLeaveFailed)
+
+        #expect(VoiceUpdateResult.requested == .requested)
+        #expect(VoiceUpdateResult.gatewayUnavailable != .invalidIdentifiers)
+    }
+
     @Test func intentQualityAndSuggestions() {
         #expect(IntentClassifier.Intent.question.quality == 0.8)
         #expect(IntentClassifier.Intent.unknown.quality == 0.2)

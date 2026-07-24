@@ -70,7 +70,7 @@ Deploy: `Dockerfile` (Bun SPA stage → `swiftlang/swift:nightly-6.4.x-bookworm`
 
 Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, Leaf `GET /`, `/dashboard` (200 if built, 404 skip if not), `/api/status`, `POST /api/ingest`, list endpoints, and `/api/state` remember/user/channel.
 
-Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — best-effort **push** (ingest/remember/forget) plus **pull** on launch and Settings “Pull now” (server-wins users/channels/equity; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session.
+Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — best-effort **push** (ingest/remember/forget) plus **pull** on launch and Settings “Pull now” (server-wins users/channels/equity; messages insert-if-missing by Discord id; reputation/interactions insert-if-missing by Fluent `id`→`serverId`, rows without id skipped; limit 500). Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session.
 
 ## CLI ops
 
@@ -88,4 +88,4 @@ Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user,
 
 Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
 
-Full CRDT / cursor pagination / CLI↔desktop sync — desktop ships **push + pull** (launch + Settings “Pull now”; server-wins users/channels/equity; messages/reputation/interactions insert-if-missing; limit 500). No CRDT merge and no `?since=` cursors.
+Full CRDT / cursor pagination / CLI↔desktop sync — desktop ships **push + pull** (launch + Settings “Pull now”; server-wins users/channels/equity; messages by Discord id; reputation/interactions by Fluent id; limit 500). No CRDT merge and no `?since=` cursors.
