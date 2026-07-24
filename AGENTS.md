@@ -8,7 +8,7 @@ Unified Abbey bot at `~/Desktop/AbbeyBot` — **two products** in one package. *
 |---------|--------|-------|-----|
 | Desktop | `AbbeyBot` (`AbbeyBotApp`) | SwiftData | SwiftUI |
 | Server | `AbbeyServer` | Fluent + Postgres (SQLite smoke fallback) | Leaf status + `/api/*` + `/dashboard` SPA |
-| CLI | `abbey` (`AbbeyCLI` via `swift run -- cli`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
+| CLI | `abbey` (`AbbeyCLI` via `swift run AbbeyBot cli`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
 
 Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServerKit` (Fluent-backed engine used by `AbbeyServer` + `abbey`). One executable product `AbbeyBot` (`AbbeyEntry`). Swift 6.4 language mode; desktop requires Xcode toolchain (`xcrun --toolchain default` — swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros).
 
@@ -18,7 +18,8 @@ Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServe
 unset TOOLCHAINS
 bash Scripts/run-smoke.sh          # desktop build/test/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
-bash Scripts/verify-all.sh         # both gates
+bash Scripts/run-cli-smoke.sh      # abbey CLI boot + DATABASE_URL isolation
+bash Scripts/verify-all.sh         # all gates
 ```
 
 Launch wrappers (Xcode toolchain):
@@ -76,13 +77,35 @@ Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBE
 
 ```bash
 bash Scripts/run-abbey.sh
+# share server DATABASE_URL from .env (Postgres/sqlite):
+ABBEY_CLI_USE_SERVER_DATABASE=1 bash Scripts/run-abbey.sh
 ```
 
-Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `DATABASE_URL` overrides using the same convention as the server. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
+Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `Scripts/run-abbey.sh` sources `.env` for Discord/`ABBEY_*` knobs but **clears `DATABASE_URL` unless** `ABBEY_CLI_USE_SERVER_DATABASE=1`. To override without the wrapper, export `DATABASE_URL` (same postgres/sqlite conventions as the server) before `swift run AbbeyBot cli`. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
 
 ## Shared core (finalized)
 
 `AbbeyCore` owns `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, and strict-by-default `IntentClassifier`. Desktop `AbbeyEngine` and server `BotRuntime` keep persistence adapters only.
+
+## Multi-Persona (claim-honest)
+
+Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPersona` (`Sources/AbbeyCore/Personas/`). Modulation is **AbbeyCore-only** — intent routing and explicit switch in `ABIRouter`; not a separate WDBX product or Python ML stack.
+
+| Persona | Framework role | Shipped behavior |
+|---------|----------------|------------------|
+| **Abbey** | Ethical, professional community interaction | Default persona; direct community register (`AbbeyPersona.systemPrompt`) |
+| **Aviva** | Analytical, research, architecture | Structured system-builder register — server architecture, permissions, moderation policy, code (`AvivaPersona`) |
+| **Abi** | Moderation / compliance oversight tone | Warm rapport, welcomes, tone-setting, de-escalation (`AbiPersona`) |
+
+**Switch paths (shipped):**
+
+- Discord slash `/persona` (`CommandRegistry` → `InteractionRouter` → `ABIRouter.setPersona`)
+- Natural-language persona switch on ingest (`IntentClassifier.personaSwitch` → `PersonaName.resolve`)
+- Desktop **Personas** tab (`PersonaSwitcherView`)
+
+**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Aviva; `.greeting` / `.smallTalk` → Abi; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
+
+**Not shipped (do not claim as product features):** Python persona framework, TensorFlow/PyTorch stack, blockchain decentralization, industry healthcare/finance pilots, GDPR certification, or HIPAA compliance modules.
 
 ## Learning & Safety Policy
 
