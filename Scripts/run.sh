@@ -9,6 +9,12 @@ cd "$ROOT"
 export ABBEY_SWIFT=xcode
 # shellcheck source=abbey-swift.sh
 source "$ROOT/Scripts/abbey-swift.sh"
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
 
 DETACH=0
 if [[ "${ABBEY_DETACH:-0}" == "1" ]]; then
