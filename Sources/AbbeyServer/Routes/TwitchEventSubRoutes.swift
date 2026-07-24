@@ -1,8 +1,11 @@
+import AbbeyServerKit
+import Foundation
 import Vapor
 
-/// Stub webhook receiver for Twitch EventSub. Handles callback verification (`challenge` echo)
-/// and logs notification/revocation payloads. Full subscribe flow and HMAC signature verify
-/// (`Twitch-Eventsub-Message-Signature`) are deferred — see AGENTS.md.
+/// Webhook receiver for Twitch EventSub. Verifies the HMAC-SHA256 signature Twitch attaches
+/// to every delivery (`Twitch-Eventsub-Message-Signature`), then handles callback verification
+/// (`challenge` echo) and logs notification/revocation payloads. See AGENTS.md for what's
+/// still deferred (message-id replay dedup, per-event-type business logic).
 struct TwitchEventSubWebhookDTO: Content {
     var challenge: String?
     var subscription: TwitchEventSubSubscriptionDTO?
@@ -22,6 +25,35 @@ struct TwitchEventSubAckDTO: Content {
 enum TwitchEventSubRoutes {
     static func register(on app: Application) {
         app.post("api", "twitch", "eventsub") { req async throws -> Response in
+            guard let bodyBuffer = req.body.data else {
+                throw Abort(.badRequest, reason: "Missing request body")
+            }
+            let rawBody = Data(bodyBuffer.readableBytesView)
+
+            if let secret = Environment.get("TWITCH_EVENTSUB_SECRET"), !secret.isEmpty {
+                let messageId = req.headers.first(name: "Twitch-Eventsub-Message-Id")
+                let timestamp = req.headers.first(name: "Twitch-Eventsub-Message-Timestamp")
+                let signature = req.headers.first(name: "Twitch-Eventsub-Message-Signature")
+
+                guard let messageId, let timestamp,
+                      TwitchEventSubSignature.isWithinReplayWindow(timestamp: timestamp, now: Date()),
+                      TwitchEventSubSignature.verify(
+                          messageId: messageId,
+                          timestamp: timestamp,
+                          body: rawBody,
+                          signatureHeader: signature,
+                          secret: secret
+                      )
+                else {
+                    req.logger.warning("Twitch EventSub webhook: signature verification failed, rejecting")
+                    throw Abort(.forbidden, reason: "Invalid Twitch EventSub signature")
+                }
+            } else {
+                req.logger.warning(
+                    "Twitch EventSub webhook: TWITCH_EVENTSUB_SECRET not configured, skipping signature verification"
+                )
+            }
+
             let body = try req.content.decode(TwitchEventSubWebhookDTO.self)
 
             if let challenge = body.challenge?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -35,7 +67,7 @@ enum TwitchEventSubRoutes {
             let messageType = req.headers.first(name: "Twitch-Eventsub-Message-Type") ?? "unknown"
             let subscriptionType = body.subscription?.type ?? "unknown"
             req.logger.info(
-                "Twitch EventSub webhook stub: messageType=\(messageType) subscriptionType=\(subscriptionType); signature verify deferred, not handled"
+                "Twitch EventSub webhook: messageType=\(messageType) subscriptionType=\(subscriptionType) verified=ok; per-event handling deferred"
             )
 
             return try await TwitchEventSubAckDTO(ok: true, handled: false).encodeResponse(for: req)
