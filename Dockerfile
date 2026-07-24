@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-# Build with official Swift 6.4 bookworm image (Linux) — must match Package.swift's
+# Build with Swift 6.4 bookworm (Linux) — must match Package.swift's
 # swift-tools-version: an older toolchain's SwiftPM cannot parse a newer manifest.
+# library/swift:6.4-* is not on Docker Hub yet; use the swiftlang nightly until it is.
 # Leaf resources ship via SPM bundle. Dashboard SPA is built first so its static
 # output exists on disk before the Swift build stage copies Sources/ (SPM's
 # .copy("Resources") only picks up files already present at build time).
@@ -15,7 +16,7 @@ COPY web ./
 # directories itself, no placeholder copy needed.
 RUN npm run build
 
-FROM swift:6.4-bookworm AS build
+FROM swiftlang/swift:nightly-6.4.x-bookworm AS build
 WORKDIR /build
 COPY Package.swift Package.resolved* ./
 COPY Sources ./Sources
