@@ -160,27 +160,33 @@ func routes(_ app: Application) throws {
     }
 
     app.get("api", "users") { req async throws -> [UserMemory] in
-        try await MemoryRepository.recent(limit: clampedLimit(req), on: req.db)
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await MemoryRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
     app.get("api", "channels") { req async throws -> [ChannelContext] in
-        try await ChannelRepository.recent(limit: clampedLimit(req), on: req.db)
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await ChannelRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
     app.get("api", "messages") { req async throws -> [GuildMessage] in
-        try await MessageRepository.recent(limit: clampedLimit(req), on: req.db)
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await MessageRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
     app.get("api", "reputation") { req async throws -> [ReputationEvent] in
-        try await ReputationRepository.recent(limit: clampedLimit(req), on: req.db)
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await ReputationRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
     app.get("api", "interactions") { req async throws -> [InteractionLog] in
-        try await InteractionRepository.recent(limit: clampedLimit(req), on: req.db)
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await InteractionRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
     app.get("api", "equity") { req async throws -> [EquityIdea] in
-        try await EquityRepository.recent(limit: clampedLimit(req), on: req.db)
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await EquityRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
     app.get { req async throws -> View in
