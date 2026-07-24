@@ -7,16 +7,29 @@ struct UsersView: View {
     @Query(sort: \UserMemory.reputation, order: .reverse) private var users: [UserMemory]
     @State private var selectedUser: UserMemory?
 
+    private var sections: [(guildId: String, users: [UserMemory])] {
+        let grouped = Dictionary(grouping: users, by: \.guildId)
+        return grouped.keys.sorted().map { key in
+            (guildId: key, users: grouped[key] ?? [])
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
-            List(users, selection: $selectedUser) { user in
-                VStack(alignment: .leading) {
-                    Text(user.discordUserId).font(.headline)
-                    Text("guild: \(user.guildId) · rep: \(String(format: "%.2f", user.reputation))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            List(selection: $selectedUser) {
+                ForEach(sections, id: \.guildId) { section in
+                    Section(section.guildId) {
+                        ForEach(section.users) { user in
+                            VStack(alignment: .leading) {
+                                Text(user.discordUserId).font(.headline)
+                                Text("rep: \(String(format: "%.2f", user.reputation))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(user)
+                        }
+                    }
                 }
-                .tag(user)
             }
         } detail: {
             if let user = selectedUser {

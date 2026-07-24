@@ -18,6 +18,16 @@ struct AbbeyBotApp: App {
                 .environment(engine)
         }
         .modelContainer(engine.modelContainer)
+        .windowToolbarStyle(.unified(showsTitle: true))
+        .windowIdealSize(.fitToContent)
+        .defaultWindowPlacement { _, context in
+            let display = context.defaultDisplay
+            let size = CGSize(
+                width: min(1100, display.visibleRect.width * 0.72),
+                height: min(760, display.visibleRect.height * 0.78)
+            )
+            return WindowPlacement(.center, size: size)
+        }
         .commands {
             CommandGroup(replacing: .newItem) { }
         }

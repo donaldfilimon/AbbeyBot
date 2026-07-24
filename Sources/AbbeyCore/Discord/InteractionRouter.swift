@@ -1,6 +1,5 @@
 import Foundation
 import DiscordBM
-import SwiftData
 
 /// Slash / component / autocomplete routing for AbbeyBot.
 public struct InteractionRouter: Sendable {

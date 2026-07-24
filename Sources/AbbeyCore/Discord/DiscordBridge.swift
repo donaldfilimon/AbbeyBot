@@ -9,7 +9,7 @@ public enum DiscordConnectionState: String, Sendable {
     case failed
 }
 
-/// Owns the DiscordBM gateway manager and exposes connect/disconnect for the desktop app.
+/// Owns the DiscordBM gateway manager and exposes connect/disconnect for desktop + server.
 public actor DiscordBridge {
     public private(set) var state: DiscordConnectionState = .disconnected
     public private(set) var lastError: String?
@@ -27,7 +27,8 @@ public actor DiscordBridge {
 
     public func connect(
         token: String,
-        hooks: DiscordEventHooks
+        hooks: DiscordEventHooks,
+        presenceActivityName: String = "AbbeyBot"
     ) async {
         guard !token.isEmpty else {
             state = .failed
@@ -41,7 +42,7 @@ public actor DiscordBridge {
         let bot = await BotGatewayManager(
             token: token,
             presence: .init(
-                activities: [.init(name: "AbbeyBot desktop", type: .listening)],
+                activities: [.init(name: presenceActivityName, type: .listening)],
                 status: .online,
                 afk: false
             ),

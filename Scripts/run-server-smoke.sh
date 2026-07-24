@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+unset TOOLCHAINS || true
+BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.server.build"
+SWIFT=(/usr/bin/xcrun --toolchain default swift)
+COMPOSE=(docker compose)
+
+echo "======== 1/4 build AbbeyServer ========"
+"${SWIFT[@]}" build --product AbbeyServer --build-path "$BUILD_PATH"
+
+BIN="$BUILD_PATH/debug/AbbeyServer"
+if [[ ! -x "$BIN" ]]; then
+  BIN="$(find "$BUILD_PATH" -name AbbeyServer -type f -perm +111 | head -1)"
+fi
+test -x "$BIN"
+
+USE_SQLITE=0
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  echo "======== 2/4 postgres (docker compose) ========"
+  "${COMPOSE[@]}" up -d db
+  echo "Waiting for Postgres..."
+  for _ in $(seq 1 30); do
+    if "${COMPOSE[@]}" exec -T db pg_isready -U abbey -d abbeybot >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  "${COMPOSE[@]}" exec -T db pg_isready -U abbey -d abbeybot
+  export DATABASE_URL="${DATABASE_URL:-postgres://abbey:abbey@127.0.0.1:5432/abbeybot}"
+else
+  echo "======== 2/4 postgres unavailable — sqlite file smoke ========"
+  USE_SQLITE=1
+  SQLITE_PATH="${TMPDIR:-/tmp}/abbeyserver-smoke.sqlite"
+  rm -f "$SQLITE_PATH"
+  export DATABASE_URL="sqlite://${SQLITE_PATH}"
+fi
+
+export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
+export HTTP_HOSTNAME=127.0.0.1
+export HTTP_PORT=18080
+
+echo "======== 3/4 boot server (db=$DATABASE_URL) ========"
+"$BIN" serve --hostname "$HTTP_HOSTNAME" --port "$HTTP_PORT" >/tmp/abbeyserver-smoke.log 2>&1 &
+PID=$!
+cleanup() {
+  kill "$PID" 2>/dev/null || true
+  wait "$PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+ok=0
+for _ in $(seq 1 40); do
+  if curl -sf "http://127.0.0.1:${HTTP_PORT}/health" >/tmp/abbeyserver-health.json; then
+    ok=1
+    break
+  fi
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo "Server exited early:"
+    cat /tmp/abbeyserver-smoke.log || true
+    exit 1
+  fi
+  sleep 0.5
+done
+
+if [[ "$ok" != "1" ]]; then
+  echo "HEALTH_TIMEOUT"
+  cat /tmp/abbeyserver-smoke.log || true
+  exit 1
+fi
+
+echo "======== 4/4 assert /health ========"
+cat /tmp/abbeyserver-health.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-health.json")); assert d.get("status")=="ok", d'
+if [[ "$USE_SQLITE" == "1" ]]; then
+  echo "(note: smoke used sqlite file because Docker/Postgres was unavailable)"
+fi
+
+echo
+echo "======== SERVER SMOKE GREEN ========"

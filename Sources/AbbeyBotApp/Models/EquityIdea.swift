@@ -11,7 +11,7 @@ public final class EquityIdea {
     @Attribute(.unique) public var symbol: String        // e.g. "QX-4471"
     public var thesisSummary: String
     public var syntheticScore: Double                     // 0.0–1.0, from FactorScreen
-    public var factorBreakdown: [String: Double]
+    @Attribute(.codable) public var factorBreakdown: [String: Double]
     public var generatedAt: Date
 
     public static let disclaimer =

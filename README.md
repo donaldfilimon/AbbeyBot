@@ -1,58 +1,67 @@
 # AbbeyBot
 
-Unified Swift 6.4 desktop bot for Abbey: **SwiftUI + SwiftData + DiscordBM v1.16+**.
+Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Discord server**.
 
 | Layer | Tech |
 |-------|------|
-| App | `AbbeyBotApp` — macOS SwiftUI |
-| Core | `AbbeyCore` — brain, personas, inference, Discord bridge |
+| Desktop | `AbbeyBot` — macOS 27 SwiftUI + SwiftData |
+| Server | `AbbeyServer` — Vapor + Fluent/Postgres + Leaf |
+| Core | `AbbeyCore` — brain, personas, inference, DiscordBM |
 | Discord | DiscordBM gateway + REST (Voice deferred) |
-| Store | Local SwiftData (no Vapor/Postgres in v1) |
 
-## Run
+## Run desktop
 
 ```bash
-unset TOOLCHAINS   # use Xcode toolchain — not DEVELOPMENT-SNAPSHOT
+bash Scripts/run.sh
+# or:
+unset TOOLCHAINS
 cd ~/Desktop/AbbeyBot
-swift run
+/usr/bin/xcrun --toolchain default swift run AbbeyBot --build-path "${TMPDIR}/AbbeyBot.build"
 ```
 
-Or:
+## Run server
 
 ```bash
-open Package.swift   # Xcode ▸ Run
+cp .env.example .env   # fill DISCORD_BOT_TOKEN, etc.
+docker compose up -d db   # optional if using Postgres
+bash Scripts/run-server.sh
 ```
+
+Or full stack: `docker compose up --build`.
 
 ## Verify
 
 ```bash
 bash Scripts/run-smoke.sh
+bash Scripts/run-server-smoke.sh   # Postgres via compose, or sqlite file if Docker missing
 ```
 
 ## Discord
 
-1. Create a bot in the Discord Developer Portal; enable **Message Content** intent.
-2. Paste the token in the **Discord** sidebar tab (stored in Keychain) or export `DISCORD_BOT_TOKEN`.
-3. Connect → Register slash commands (optionally set a dev guild ID for instant sync).
-4. Set operating mode to `liveDiscord` in Settings.
+1. Create a bot; enable **Message Content** intent.
+2. Desktop: Discord sidebar → token (Keychain) → Connect → Register slash commands.
+3. Server: set `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` in `.env`; gateway starts on boot.
 
 Slash commands: `ask`, `rep`, `remember`, `forget`, `context`, `persona`.
 
 ## Layout
 
 ```
-Sources/AbbeyCore/     # library (Models, Engine, Inference, Personas, Equity, Discord)
-Sources/AbbeyBotApp/   # @main SwiftUI executable
-Tests/AbbeyCoreTests/
+Sources/AbbeyCore/      # shared library (no SwiftData)
+Sources/AbbeyBotApp/    # @main SwiftUI + SwiftData models
+Sources/AbbeyServer/    # Vapor executable + Fluent models
+Scripts/                # run-smoke.sh, run-server-smoke.sh
+deploy/abbeybot.service
+Dockerfile / docker-compose.yml
 ```
 
-## Phase 2 (not in this Desktop ship)
+## API (server)
 
-Vapor HTTP, Fluent/Postgres, React dashboard, Docker/systemd headless deploy.
+- `GET /health` — liveness + Discord state
+- `GET /api/metrics` — session counters
+- `GET /api/users` / `GET /api/channels` — Fluent rows
+- `GET /` — Leaf status page
 
-## Next steps (operator)
+## Phase 2
 
-1. `unset TOOLCHAINS && swift run` (or Xcode open `Package.swift`)
-2. Discord tab → bot token → Connect → Register slash commands (dev guild recommended)
-3. Invite the bot to a test guild with message content intent enabled
-4. When ready for a remote: `git remote add` + first commit (repo is initialized locally on `main`)
+Shipped (incl. macOS 27 window/SwiftData/Foundation Models APIs). Deferred: React dashboard SPA, Voice, Desktop↔Postgres sync.

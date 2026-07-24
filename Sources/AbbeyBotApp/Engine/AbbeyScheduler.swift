@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import AbbeyCore
 
 /// Owns the two time-driven behaviors described in /areas/abbey-bot.md:
 ///   - per-user reply cooldown (ABBEY_REPLY_COOLDOWN_SECONDS)

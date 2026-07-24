@@ -11,23 +11,36 @@ struct MessagesView: View {
         return messages.filter { $0.channelId.localizedCaseInsensitiveContains(channelFilter) }
     }
 
+    private var sections: [(guildId: String, messages: [GuildMessage])] {
+        let grouped = Dictionary(grouping: filtered, by: \.guildId)
+        return grouped.keys.sorted().map { key in
+            (guildId: key, messages: grouped[key] ?? [])
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             TextField("Filter by channel ID", text: $channelFilter)
                 .textFieldStyle(.roundedBorder)
                 .padding()
 
-            List(filtered) { message in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(message.authorId).font(.headline)
-                        Text("#\(message.channelId)").font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Text(message.createdAt, style: .time).font(.caption).foregroundStyle(.secondary)
+            List {
+                ForEach(sections, id: \.guildId) { section in
+                    Section(section.guildId) {
+                        ForEach(section.messages) { message in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(message.authorId).font(.headline)
+                                    Text("#\(message.channelId)").font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(message.createdAt, style: .time).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text(message.content)
+                            }
+                            .padding(.vertical, 2)
+                        }
                     }
-                    Text(message.content)
                 }
-                .padding(.vertical, 2)
             }
         }
         .navigationTitle("Messages")

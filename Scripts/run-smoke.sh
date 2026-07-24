@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Desktop smoke for AbbeyBot (macOS 27 / .macOS(.v27)).
+# Always uses Xcode toolchain via xcrun — never PATH/swiftly DEVELOPMENT-SNAPSHOT.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -7,7 +9,7 @@ unset TOOLCHAINS || true
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 
-echo "======== 1/4 debug build ========"
+echo "======== 1/4 debug build (macOS 27) ========"
 "${SWIFT[@]}" build --build-path "$BUILD_PATH"
 
 echo "======== 2/4 release build ========"

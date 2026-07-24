@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AbbeyServer</title>
+  <style>
+    :root { color-scheme: light dark; --ink: #1a1a1a; --muted: #5a5a5a; --line: #ccc; }
+    @media (prefers-color-scheme: dark) {
+      :root { --ink: #f2f2f2; --muted: #a8a8a8; --line: #444; }
+    }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem; color: var(--ink); }
+    h1 { font-size: 1.75rem; margin: 0 0 0.25rem; }
+    p { color: var(--muted); margin: 0 0 1.5rem; }
+    dl { display: grid; grid-template-columns: 12rem 1fr; gap: 0.5rem 1rem; max-width: 36rem; }
+    dt { color: var(--muted); }
+    dd { margin: 0; font-variant-numeric: tabular-nums; }
+    a { color: inherit; }
+    nav { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+  </style>
+</head>
+<body>
+  <h1>AbbeyServer</h1>
+  <p>Linux/Docker headless bot (Fluent Postgres or sqlite). Desktop companion is a separate macOS app.</p>
+  <dl>
+    <dt>Discord</dt><dd>#(discordState)</dd>
+    <dt>Bot user</dt><dd>#(botUserId)</dd>
+    <dt>Ingested (session)</dt><dd>#(messagesIngested)</dd>
+    <dt>Live Discord ingest</dt><dd>#(liveIngestCount)</dd>
+    <dt>Inference calls</dt><dd>#(inferenceCalls)</dd>
+    <dt>Inference failures</dt><dd>#(inferenceFailures)</dd>
+  </dl>
+  <nav>
+    <a href="/health">/health</a> ·
+    <a href="/api/metrics">/api/metrics</a> ·
+    <a href="/api/users">/api/users</a> ·
+    <a href="/api/channels">/api/channels</a>
+  </nav>
+</body>
+</html>

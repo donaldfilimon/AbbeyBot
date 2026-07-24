@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import AbbeyCore
 
 /// Reputation engine. Ported from the Vapor/Fluent version (references/brain.md) onto
 /// SwiftData: instead of taking a `Database` parameter per call, this actor owns a

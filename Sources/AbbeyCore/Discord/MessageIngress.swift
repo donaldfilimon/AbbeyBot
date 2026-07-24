@@ -1,6 +1,5 @@
 import Foundation
 import DiscordBM
-import SwiftData
 
 /// Turns Discord MESSAGE_CREATE into local ingest + optional persona reply.
 public struct MessageIngress: Sendable {

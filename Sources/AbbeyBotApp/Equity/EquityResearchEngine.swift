@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import AbbeyCore
 
 /// Idea-generation scaffolding over a made-up universe of `QX-####` instruments.
 /// This module exists to exercise factor-screening UI/UX, not to produce anything

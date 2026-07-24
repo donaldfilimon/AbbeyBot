@@ -3,21 +3,16 @@ import Foundation
 import FoundationModels
 #endif
 
-/// On-device inference via Apple's Foundation Models framework.
+/// On-device inference via Apple's Foundation Models framework (macOS 27+).
 ///
-/// Availability and session APIs are gated to macOS 26+. Falls back via
-/// `InferenceRouter` to the deterministic floor when the framework is missing,
-/// unavailable, or throws.
+/// Falls back via `InferenceRouter` to the deterministic floor when the framework
+/// is missing, unavailable, or throws.
 public struct FoundationModelsProvider: InferenceProvider {
     public let mode: InferenceMode = .onDevice
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
         #if canImport(FoundationModels)
-        guard #available(macOS 26.0, iOS 26.0, *) else {
-            throw InferenceError.providerUnavailable(.onDevice)
-        }
-
-        let model = SystemLanguageModel.default
+        let model = SystemLanguageModel(useCase: .general, guardrails: .default)
         switch model.availability {
         case .available:
             break
@@ -27,8 +22,11 @@ public struct FoundationModelsProvider: InferenceProvider {
             throw InferenceError.providerUnavailable(.onDevice)
         }
 
-        let session = LanguageModelSession(model: model, instructions: request.systemPrompt)
-        // systemPrompt is already on the session — do not duplicate it in the user turn.
+        let session = LanguageModelSession(
+            model: model,
+            instructions: Instructions(request.systemPrompt)
+        )
+        // Instructions live on the session — do not duplicate them in the user turn.
         let prompt = (request.contextLines + [request.userText])
             .filter { !$0.isEmpty }
             .joined(separator: "\n")

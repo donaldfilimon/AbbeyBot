@@ -59,13 +59,13 @@ struct DashboardView: View {
             .padding(24)
         }
         .navigationTitle("Dashboard")
+        .navigationSubtitle(
+            "Mode: \(engine.config.operatingMode.rawValue) · Inference: \(engine.config.inferenceMode.rawValue)"
+        )
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Mode: \(engine.config.operatingMode.rawValue) · Inference: \(engine.config.inferenceMode.rawValue)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
             if let event = engine.lastEvent {
                 Text("Last event: \(String(describing: event))")
                     .font(.caption2)

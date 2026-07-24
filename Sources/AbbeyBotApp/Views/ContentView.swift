@@ -55,6 +55,9 @@ struct ContentView: View {
                 EquityResearchView()
             }
         }
+        .toolbar {
+            DefaultToolbarItem(kind: .sidebarToggle)
+        }
         .task {
             await watchForConfirmationRequests()
         }

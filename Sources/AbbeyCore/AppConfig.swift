@@ -1,5 +1,8 @@
 import Foundation
+import Observation
+#if canImport(Security)
 import Security
+#endif
 
 public enum OperatingMode: String, CaseIterable, Codable, Identifiable, Sendable {
     case standalone
@@ -14,7 +17,7 @@ public enum InferenceMode: String, CaseIterable, Codable, Identifiable, Sendable
     public var id: String { rawValue }
 }
 
-/// Process configuration for AbbeyBot. Persisted via UserDefaults + Keychain (bot token).
+/// Process configuration for AbbeyBot. Token: Keychain on Apple platforms, env/UserDefaults elsewhere.
 @Observable
 public final class AppConfig: @unchecked Sendable {
     public static let shared = AppConfig()
@@ -46,11 +49,9 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(equityModuleEnabled, forKey: Keys.equityModuleEnabled) }
     }
 
-    /// Discord bot token — stored in Keychain, not UserDefaults.
     public var discordBotToken: String {
-        didSet { KeychainStore.set(discordBotToken, account: Keys.discordBotToken) }
+        didSet { TokenStore.set(discordBotToken, account: Keys.discordBotToken) }
     }
-    /// Optional guild for instant slash-command registration during development.
     public var discordDevGuildId: String {
         didSet { defaults.set(discordDevGuildId, forKey: Keys.discordDevGuildId) }
     }
@@ -75,7 +76,6 @@ public final class AppConfig: @unchecked Sendable {
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let modeRaw = defaults.string(forKey: Keys.operatingMode) ?? ""
-        // Migrate old "mirror" value from AbbeyCompanion.
         if modeRaw == "mirror" {
             self.operatingMode = .liveDiscord
         } else {
@@ -91,18 +91,21 @@ public final class AppConfig: @unchecked Sendable {
         self.reputationDecay = decay > 0 ? decay : 0.95
         self.confirmationRequiredForDestructiveActions = defaults.object(forKey: Keys.confirmationRequired) as? Bool ?? true
         self.equityModuleEnabled = defaults.object(forKey: Keys.equityModuleEnabled) as? Bool ?? true
-        self.discordBotToken = KeychainStore.get(account: Keys.discordBotToken)
+        self.discordBotToken = TokenStore.get(account: Keys.discordBotToken)
             ?? ProcessInfo.processInfo.environment["DISCORD_BOT_TOKEN"]
             ?? ""
-        self.discordDevGuildId = defaults.string(forKey: Keys.discordDevGuildId) ?? ""
+        self.discordDevGuildId = defaults.string(forKey: Keys.discordDevGuildId)
+            ?? ProcessInfo.processInfo.environment["DISCORD_DEV_GUILD_ID"]
+            ?? ""
         self.autoConnectOnLaunch = defaults.object(forKey: Keys.autoConnectOnLaunch) as? Bool ?? false
     }
 }
 
-enum KeychainStore {
+enum TokenStore {
     private static let service = "com.donaldfilimon.AbbeyBot"
 
     static func get(account: String) -> String? {
+        #if canImport(Security)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -114,9 +117,13 @@ enum KeychainStore {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+        #else
+        return UserDefaults.standard.string(forKey: "\(service).\(account)")
+        #endif
     }
 
     static func set(_ value: String, account: String) {
+        #if canImport(Security)
         let data = Data(value.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -129,5 +136,12 @@ enum KeychainStore {
         attrs[kSecValueData as String] = data
         attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         SecItemAdd(attrs as CFDictionary, nil)
+        #else
+        if value.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "\(service).\(account)")
+        } else {
+            UserDefaults.standard.set(value, forKey: "\(service).\(account)")
+        }
+        #endif
     }
 }

@@ -1,0 +1,77 @@
+import Fluent
+
+struct CreateAll: AsyncMigration {
+    func prepare(on database: Database) async throws {
+        try await database.schema(GuildMessage.schema)
+            .id()
+            .field("discord_message_id", .string, .required)
+            .field("channel_id", .string, .required)
+            .field("guild_id", .string, .required)
+            .field("author_id", .string, .required)
+            .field("content", .string, .required)
+            .field("created_at", .datetime)
+            .unique(on: "discord_message_id")
+            .create()
+
+        try await database.schema(UserMemory.schema)
+            .id()
+            .field("composite_key", .string, .required)
+            .field("discord_user_id", .string, .required)
+            .field("guild_id", .string, .required)
+            .field("facts", .array(of: .string), .required)
+            .field("reputation", .double, .required)
+            .field("interaction_count", .int, .required)
+            .field("updated_at", .datetime)
+            .unique(on: "composite_key")
+            .create()
+
+        try await database.schema(ChannelContext.schema)
+            .id()
+            .field("composite_key", .string, .required)
+            .field("channel_id", .string, .required)
+            .field("guild_id", .string, .required)
+            .field("summary", .string, .required)
+            .field("message_count", .int, .required)
+            .field("updated_at", .datetime)
+            .unique(on: "composite_key")
+            .create()
+
+        try await database.schema(ReputationEvent.schema)
+            .id()
+            .field("user_id", .string, .required)
+            .field("guild_id", .string, .required)
+            .field("delta", .double, .required)
+            .field("reason", .string, .required)
+            .field("created_at", .datetime)
+            .create()
+
+        try await database.schema(InteractionLog.schema)
+            .id()
+            .field("command_name", .string, .required)
+            .field("user_id", .string, .required)
+            .field("guild_id", .string, .required)
+            .field("succeeded", .bool, .required)
+            .field("latency_ms", .double, .required)
+            .field("created_at", .datetime)
+            .create()
+
+        try await database.schema(EquityIdea.schema)
+            .id()
+            .field("symbol", .string, .required)
+            .field("thesis_summary", .string, .required)
+            .field("synthetic_score", .double, .required)
+            .field("factor_breakdown", .json, .required)
+            .field("generated_at", .datetime)
+            .unique(on: "symbol")
+            .create()
+    }
+
+    func revert(on database: Database) async throws {
+        try await database.schema(EquityIdea.schema).delete()
+        try await database.schema(InteractionLog.schema).delete()
+        try await database.schema(ReputationEvent.schema).delete()
+        try await database.schema(ChannelContext.schema).delete()
+        try await database.schema(UserMemory.schema).delete()
+        try await database.schema(GuildMessage.schema).delete()
+    }
+}

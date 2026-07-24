@@ -283,7 +283,7 @@ final class AbbeyEngine {
             }
         )
 
-        await bridge.connect(token: token, hooks: hooks)
+        await bridge.connect(token: token, hooks: hooks, presenceActivityName: "AbbeyBot desktop")
         await refreshDiscordStatus()
     }
 
