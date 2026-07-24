@@ -101,28 +101,28 @@ struct AbbeyServerClient: Sendable {
 
     // MARK: - Public API (pull)
 
-    func fetchUsers(limit: Int = 500) async throws -> [SyncDTO.User] {
-        try await get(path: "/api/users", limit: limit)
+    func fetchUsers(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.User] {
+        try await get(path: "/api/users", limit: limit, since: since)
     }
 
-    func fetchChannels(limit: Int = 500) async throws -> [SyncDTO.Channel] {
-        try await get(path: "/api/channels", limit: limit)
+    func fetchChannels(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Channel] {
+        try await get(path: "/api/channels", limit: limit, since: since)
     }
 
-    func fetchMessages(limit: Int = 500) async throws -> [SyncDTO.Message] {
-        try await get(path: "/api/messages", limit: limit)
+    func fetchMessages(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Message] {
+        try await get(path: "/api/messages", limit: limit, since: since)
     }
 
-    func fetchReputation(limit: Int = 500) async throws -> [SyncDTO.Reputation] {
-        try await get(path: "/api/reputation", limit: limit)
+    func fetchReputation(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Reputation] {
+        try await get(path: "/api/reputation", limit: limit, since: since)
     }
 
-    func fetchInteractions(limit: Int = 500) async throws -> [SyncDTO.Interaction] {
-        try await get(path: "/api/interactions", limit: limit)
+    func fetchInteractions(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Interaction] {
+        try await get(path: "/api/interactions", limit: limit, since: since)
     }
 
-    func fetchEquity(limit: Int = 500) async throws -> [SyncDTO.Equity] {
-        try await get(path: "/api/equity", limit: limit)
+    func fetchEquity(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Equity] {
+        try await get(path: "/api/equity", limit: limit, since: since)
     }
 
     // MARK: - Internals
@@ -212,12 +212,11 @@ struct AbbeyServerClient: Sendable {
         }
     }
 
-    private func get<T: Decodable>(path: String, limit: Int) async throws -> T {
-        let clamped = min(max(limit, 1), 500)
+    private func get<T: Decodable>(path: String, limit: Int, since: Date? = nil) async throws -> T {
         var request = try makeRequest(
             path: path,
             method: "GET",
-            queryItems: [URLQueryItem(name: "limit", value: String(clamped))]
+            queryItems: SyncQuery.listItems(limit: limit, since: since)
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
