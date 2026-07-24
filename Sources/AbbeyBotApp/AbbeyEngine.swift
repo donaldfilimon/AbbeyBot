@@ -153,6 +153,12 @@ final class AbbeyEngine {
         guard !url.isEmpty else { return }
         guard SyncStatus.shared.beginPull() else { return }
 
+        // A pull attempt means we believe the server may be reachable again — resend
+        // anything a prior network blip left in the durable outbox first, so the pull
+        // below can observe their server-side effects (e.g. reputation re-derived from
+        // a flushed ingest).
+        _ = await AbbeyServerClient.shared.flushPendingPushes()
+
         do {
             let counts = try await SyncPull.run(into: modelContainer)
             SyncStatus.shared.recordPullSuccess(
