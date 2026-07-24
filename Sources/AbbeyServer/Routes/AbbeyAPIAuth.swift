@@ -2,7 +2,8 @@ import Vapor
 
 enum AbbeyAPIAuth {
     /// When `ABBEY_API_TOKEN` is set, require matching `Authorization: Bearer …` or `X-Abbey-Token`.
-    /// When unset (local smoke / desktop-adjacent), mutating routes stay open on loopback ops.
+    /// When unset (local smoke / desktop-adjacent), gated routes stay open for loopback ops.
+    /// Applied to mutating POSTs and list GET endpoints used by desktop pull sync.
     static func requireTokenIfConfigured(_ req: Request) throws {
         guard let expected = Environment.get("ABBEY_API_TOKEN"), !expected.isEmpty else {
             return
