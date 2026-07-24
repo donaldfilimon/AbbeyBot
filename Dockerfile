@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
-# Build with official Swift 6.x bookworm image (Linux). Leaf resources ship via SPM bundle.
+# Build with official Swift 6.4 bookworm image (Linux) — must match Package.swift's
+# swift-tools-version: an older toolchain's SwiftPM cannot parse a newer manifest.
+# Leaf resources ship via SPM bundle.
 
-FROM swift:6.0-bookworm AS build
+FROM swift:6.4-bookworm AS build
 WORKDIR /build
 COPY Package.swift Package.resolved* ./
 COPY Sources ./Sources

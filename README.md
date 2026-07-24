@@ -57,6 +57,8 @@ bash Scripts/run-server-smoke.sh   # Postgres via compose, or sqlite file if Doc
 bash Scripts/verify-all.sh         # both
 ```
 
+CI (`.github/workflows/ci.yml`) runs `AbbeyCore`/`AbbeyServerKit`/`AbbeyServer`/`AbbeyCLI` build + tests on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
+
 ## Discord
 
 1. Create a bot; enable **Message Content** intent.
