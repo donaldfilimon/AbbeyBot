@@ -110,7 +110,7 @@ struct DashboardView: View {
                         Image(systemName: row.succeeded ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .foregroundStyle(row.succeeded ? .green : .red)
                             .font(.caption)
-                        Text("/\(row.commandName)")
+                        Text(InteractionCommandLabel.format(row.commandName))
                             .font(.caption.monospaced())
                         Text(row.userId)
                             .font(.caption)

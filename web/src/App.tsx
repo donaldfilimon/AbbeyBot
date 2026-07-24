@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import "./App.css";
+import { formatCommandName } from "./formatCommandName";
 import {
   type ChannelRow,
   type EquityRow,
@@ -163,7 +164,7 @@ function App() {
             emptyLabel="No slash-command interactions yet"
             keyFor={(row, i) => `${row.commandName}-${row.createdAt}-${i}`}
             columns={[
-              { header: "Command", render: (r) => `/${r.commandName}` },
+              { header: "Command", render: (r) => formatCommandName(r.commandName) },
               { header: "User", render: (r) => r.userId },
               { header: "Guild", render: (r) => r.guildId },
               { header: "OK", render: (r) => (r.succeeded ? "yes" : "no") },

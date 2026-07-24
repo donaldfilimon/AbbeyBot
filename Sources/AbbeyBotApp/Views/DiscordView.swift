@@ -62,7 +62,7 @@ struct DiscordView: View {
                             try await engine.registerSlashCommands()
                             statusMessage = "Commands registered."
                         } catch {
-                            statusMessage = humanError(error)
+                            statusMessage = OperatorFacingError.message(error)
                         }
                         isBusy = false
                     }
@@ -111,10 +111,4 @@ struct DiscordView: View {
         }
     }
 
-    private func humanError(_ error: Error) -> String {
-        if let localized = error as? LocalizedError, let description = localized.errorDescription {
-            return description
-        }
-        return error.localizedDescription
-    }
 }

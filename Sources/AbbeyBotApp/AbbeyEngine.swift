@@ -331,11 +331,7 @@ final class AbbeyEngine {
             }
             await socialBrain.penalize(userId: targetUserId, guildId: guildId, reason: "\(kind.rawValue): \(reason)")
         } catch {
-            if let localized = error as? LocalizedError, let description = localized.errorDescription {
-                discordLastError = description
-            } else {
-                discordLastError = error.localizedDescription
-            }
+            discordLastError = OperatorFacingError.message(error)
         }
     }
 

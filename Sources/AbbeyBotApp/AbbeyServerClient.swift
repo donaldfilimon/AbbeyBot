@@ -123,7 +123,7 @@ struct AbbeyServerClient: Sendable {
             }
         } catch {
             print("[sync] \(path) failed: \(error)")
-            await recordFailure(path: path, message: error.localizedDescription)
+            await recordFailure(path: path, message: OperatorFacingError.message(error))
         }
     }
 

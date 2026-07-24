@@ -1,3 +1,4 @@
+import AbbeyCore
 import AbbeyServerKit
 import Foundation
 import Vapor
@@ -16,12 +17,14 @@ enum AbbeyCLIMain {
         let defaultDatabaseURL = "sqlite://\(dir)/abbey.sqlite"
 
         let app = try await Application.make(env)
+        var didStart = false
         do {
             let runtime = try await configureRuntime(app, defaultDatabaseURL: defaultDatabaseURL)
             // No app.lifecycle.use(...) here — that's AbbeyServer's job for the HTTP
             // process. We drive start()/stop() directly so the runtime is never stopped
             // twice from two different triggers.
             await runtime.start()
+            didStart = true
 
             print("""
             Abbey CLI — chatting with the Abbey persona locally (no Discord connection required).
@@ -34,8 +37,9 @@ enum AbbeyCLIMain {
             try await app.asyncShutdown()
         } catch {
             app.logger.report(error: error)
-            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            FileHandle.standardError.write(Data("abbey failed to start: \(detail)\n".utf8))
+            let detail = OperatorFacingError.message(error)
+            let prefix = didStart ? "abbey exited with error" : "abbey failed to start"
+            FileHandle.standardError.write(Data("\(prefix): \(detail)\n".utf8))
             try? await app.asyncShutdown()
             Foundation.exit(1)
         }

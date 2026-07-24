@@ -1,3 +1,4 @@
+import AbbeyCore
 import SwiftUI
 import SwiftData
 
@@ -19,7 +20,7 @@ struct InteractionsView: View {
                             .foregroundStyle(row.succeeded ? .green : .red)
                             .accessibilityLabel(row.succeeded ? "Succeeded" : "Failed")
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(commandLabel(row.commandName))
+                            Text(InteractionCommandLabel.format(row.commandName))
                                 .font(.headline.monospaced())
                             Text("\(row.userId) · \(row.guildId)")
                                 .font(.caption)
@@ -38,10 +39,5 @@ struct InteractionsView: View {
             }
         }
         .navigationTitle("Interactions")
-    }
-
-    /// Persona test prompts log as `persona.abbey` (no leading slash); slash cmds keep `/name`.
-    private func commandLabel(_ name: String) -> String {
-        name.hasPrefix("persona.") ? name : "/\(name)"
     }
 }

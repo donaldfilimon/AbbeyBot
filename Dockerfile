@@ -6,15 +6,15 @@
 # output exists on disk before the Swift build stage copies Sources/ (SPM's
 # .copy("Resources") only picks up files already present at build time).
 
-FROM node:22-bookworm-slim AS web-build
+FROM oven/bun:1.2.19-slim AS web-build
 WORKDIR /web-build
-COPY web/package.json web/package-lock.json* web/bun.lock* ./
-RUN npm install
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
 COPY web ./
 # vite.config.ts's outDir ('../Sources/AbbeyServer/Resources/Public', relative to /web-build)
 # resolves to /Sources/AbbeyServer/Resources/Public — Vite creates missing parent
 # directories itself, no placeholder copy needed.
-RUN npm run build
+RUN bun run build
 
 FROM swiftlang/swift:nightly-6.4.x-bookworm AS build
 WORKDIR /build
