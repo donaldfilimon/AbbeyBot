@@ -24,35 +24,30 @@ struct EquityResearchView: View {
                         systemImage: "chart.line.uptrend.xyaxis",
                         description: Text("Generate synthetic instruments below. \(EquityIdea.disclaimer)")
                     )
-                    HStack {
-                        Button("Generate one idea") {
-                            generate(count: 1)
-                        }
-                        Button("Generate 5 ideas") {
-                            generate(count: 5)
-                        }
-                        Spacer()
-                    }
-                    .padding()
+                    generateBar
                 }
             } else {
                 List(ideas) { idea in
                     IdeaRow(idea: idea)
                 }
 
-                HStack {
-                    Button("Generate one idea") {
-                        generate(count: 1)
-                    }
-                    Button("Generate 5 ideas") {
-                        generate(count: 5)
-                    }
-                    Spacer()
-                }
-                .padding()
+                generateBar
             }
         }
         .navigationTitle("Equity Research")
+    }
+
+    private var generateBar: some View {
+        HStack {
+            Button("Generate one idea") {
+                generate(count: 1)
+            }
+            Button("Generate 5 ideas") {
+                generate(count: 5)
+            }
+            Spacer()
+        }
+        .padding()
     }
 
     private var disclaimerBanner: some View {

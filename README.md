@@ -58,7 +58,9 @@ bash Scripts/run-server-smoke.sh   # Postgres via compose, or sqlite file if Doc
 bash Scripts/verify-all.sh         # both
 ```
 
-CI (`.github/workflows/ci.yml`) builds `AbbeyCore`/`AbbeyServerKit`/`AbbeyServer`/`AbbeyCLI` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
+CI (`.github/workflows/abbey-ci.yml`) builds the dashboard SPA (`bun test` + `bun run build`), then builds `AbbeyCore`/`AbbeyServerKit`/`AbbeyServer`/`AbbeyCLI` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
+
+**GitHub Actions billing:** this private repo's hosted workflows currently **`startup_failure` (0 jobs)** until Actions spending/quota is enabled under **Settings → Billing → Actions**. Use **`bash Scripts/verify-all.sh` locally** as the gate until then; after unblock, re-run **Abbey CI** (`abbey-ci`). CI is **not** green on GitHub today.
 
 ## Discord
 
@@ -87,14 +89,14 @@ Dockerfile / docker-compose.yml
 - `GET /dashboard` — React SPA (build with `bun run build` / `npm run build` in `web/`); tabs include Interactions + Equity (disclaimer); load-more capped at 500
 - `GET /api/metrics` — session counters
 - `GET /api/status` — dialect + table counts + session metrics (JSON)
-- `POST /api/ingest` — headless ingest (`content`, `channelId`, `guildId`, `authorId`, optional `discordMessageId`); when `ABBEY_API_TOKEN` is set, require `Authorization: Bearer …` or `X-Abbey-Token`
+- `POST /api/ingest` — headless ingest (`content`, `channelId`, `guildId`, `authorId`, optional `discordMessageId`); when `ABBEY_API_TOKEN` is set, require `Authorization: Bearer …` or `X-Abbey-Token` (same gate on list GETs and mutating `/api/state` POSTs)
 - State (desktop sync): `GET /api/state/user`, `GET /api/state/channel`, `POST /api/state/remember`, `POST /api/state/forget`
 - `GET /api/users` / `GET /api/channels` — Fluent rows (`?limit=`)
 - `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`, max 500)
 - `GET /` — Leaf status; Operator UI + JSON API nav; Dashboard SPA link when `Public/index.html` exists, else build hint
 
-Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” (server-wins users/channels; messages insert-if-missing). Failures never block local SwiftData writes.
+Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” (users/channels/messages **and** reputation/interactions/equity; server-wins users/channels/equity; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes.
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop→server push + pull-on-launch/manual. Still deferred: Discord Voice **audio** (Opus/UDP); CRDT / equity·interaction·reputation merge / cursor pagination / CLI↔desktop sync.
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop→server push + pull-on-launch/manual (users/channels/messages/reputation/interactions/equity). Still deferred: Discord Voice **audio** (Opus/UDP); CRDT / cursor pagination / CLI↔desktop sync.

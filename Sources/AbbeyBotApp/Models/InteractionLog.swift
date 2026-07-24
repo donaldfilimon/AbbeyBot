@@ -6,6 +6,8 @@ import SwiftData
 /// user drives commands from within this app's UI.
 @Model
 public final class InteractionLog {
+    /// Fluent `@ID` from AbbeyServer when pulled; nil for locally created rows.
+    public var serverId: UUID?
     public var commandName: String
     public var userId: String
     public var guildId: String
@@ -13,7 +15,16 @@ public final class InteractionLog {
     public var latencyMs: Double
     public var createdAt: Date
 
-    public init(commandName: String, userId: String, guildId: String, succeeded: Bool, latencyMs: Double, createdAt: Date = .now) {
+    public init(
+        serverId: UUID? = nil,
+        commandName: String,
+        userId: String,
+        guildId: String,
+        succeeded: Bool,
+        latencyMs: Double,
+        createdAt: Date = .now
+    ) {
+        self.serverId = serverId
         self.commandName = commandName
         self.userId = userId
         self.guildId = guildId

@@ -90,7 +90,10 @@ final class AbbeyEngine {
             SyncStatus.shared.recordPullSuccess(
                 users: counts.usersUpserted,
                 channels: counts.channelsUpserted,
-                messages: counts.messagesInserted
+                messages: counts.messagesInserted,
+                reputation: counts.reputationInserted,
+                interactions: counts.interactionsInserted,
+                equity: counts.equityUpserted
             )
             await socialBrain.warmCache()
         } catch {

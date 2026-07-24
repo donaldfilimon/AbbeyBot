@@ -23,6 +23,9 @@ final class SyncStatus {
     private(set) var lastPullUsersUpserted: Int = 0
     private(set) var lastPullChannelsUpserted: Int = 0
     private(set) var lastPullMessagesInserted: Int = 0
+    private(set) var lastPullReputationInserted: Int = 0
+    private(set) var lastPullInteractionsInserted: Int = 0
+    private(set) var lastPullEquityUpserted: Int = 0
 
     private init() {}
 
@@ -42,13 +45,23 @@ final class SyncStatus {
         isPulling = true
     }
 
-    func recordPullSuccess(users: Int, channels: Int, messages: Int) {
+    func recordPullSuccess(
+        users: Int,
+        channels: Int,
+        messages: Int,
+        reputation: Int,
+        interactions: Int,
+        equity: Int
+    ) {
         isPulling = false
         lastPullSuccessAt = .now
         lastPullError = nil
         lastPullUsersUpserted = users
         lastPullChannelsUpserted = channels
         lastPullMessagesInserted = messages
+        lastPullReputationInserted = reputation
+        lastPullInteractionsInserted = interactions
+        lastPullEquityUpserted = equity
     }
 
     func recordPullFailure(message: String) {
@@ -75,7 +88,7 @@ final class SyncStatus {
             return "Last pull failure: \(err) (\(relative(at)))"
         }
         if let at = lastPullSuccessAt {
-            return "Last pull OK: \(lastPullUsersUpserted) users, \(lastPullChannelsUpserted) channels, \(lastPullMessagesInserted) messages inserted (\(relative(at)))"
+            return "Last pull OK: \(lastPullUsersUpserted) users, \(lastPullChannelsUpserted) channels, \(lastPullMessagesInserted) messages, \(lastPullReputationInserted) reputation, \(lastPullInteractionsInserted) interactions, \(lastPullEquityUpserted) equity (\(relative(at)))"
         }
         return "No pull attempts yet this session."
     }
