@@ -38,6 +38,11 @@ public actor DiscordBridge {
         gateway?.client
     }
 
+    /// True when a live BotGatewayManager is held (false under dry-run).
+    public var hasGateway: Bool {
+        gateway != nil
+    }
+
     public func connect(
         token: String,
         hooks: DiscordEventHooks,

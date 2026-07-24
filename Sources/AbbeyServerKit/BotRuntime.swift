@@ -104,7 +104,13 @@ public actor BotRuntime {
     }
 
     public func start() async {
-        try? await dqnAgent.loadCheckpointIfPresent()
+        do {
+            try await dqnAgent.loadCheckpointIfPresent()
+        } catch {
+            app.logger.warning(
+                "DQN checkpoint load failed: \(OperatorFacingError.message(error)) — using fresh weights"
+            )
+        }
         await socialBrain.warmCache()
         await scheduler.start()
         metricsListener = Task { [weak self] in
@@ -420,6 +426,7 @@ public actor BotRuntime {
             action,
             guildId: guildId,
             isConnected: await bridge.state == .connected,
+            gatewayReady: await bridge.hasGateway,
             join: { guild, channel in await bridge.joinVoice(guildId: guild, channelId: channel) },
             leave: { guild in await bridge.leaveVoice(guildId: guild) }
         )

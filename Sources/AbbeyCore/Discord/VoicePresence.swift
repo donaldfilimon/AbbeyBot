@@ -16,10 +16,13 @@ public enum VoicePresence: Sendable {
         _ action: VoiceAction,
         guildId: String,
         isConnected: Bool,
+        gatewayReady: Bool,
         join: @Sendable (_ guildId: String, _ channelId: String) async -> VoiceUpdateResult,
         leave: @Sendable (_ guildId: String) async -> VoiceUpdateResult
     ) async -> String {
         guard isConnected else { return DiscordCopy.voiceNotConnected }
+        // Dry-run sets state=.connected without a gateway — fail clearly before join/leave.
+        guard gatewayReady else { return DiscordCopy.voiceDryRunNoGateway }
 
         let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGuild.isEmpty, trimmedGuild != "DM" else {
