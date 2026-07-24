@@ -345,6 +345,86 @@ struct AbbeyCoreTests {
         }
     }
 
+    @Test func experienceJournalAppendAndReload() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-journal-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("exp.jsonl")
+        let journal = ExperienceJournal(url: url)
+        let exp = Experience(
+            state: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            action: 1,
+            reward: 0.5,
+            nextState: [0.2, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            done: true
+        )
+        try journal.append(exp)
+        try journal.append(exp)
+        let loaded = try journal.loadRecent(limit: 10)
+        #expect(loaded.count == 2)
+        #expect(loaded[0].action == 1)
+
+        let agent = DQNAgent(
+            topology: [8, 32, 16, 3],
+            experienceJournalURL: url
+        )
+        await agent.remember(exp)
+        let again = try ExperienceJournal(url: url).loadRecent()
+        #expect(again.count >= 3)
+    }
+
+    @Test func codeProposalValidatorRejectsShellAndAcceptsSafeSwift() {
+        #expect(CodeProposalValidator.validate("func hello() -> String { \"hi\" }") == .accepted)
+        if case .rejected(let reasons) = CodeProposalValidator.validate("let p = Process(); p.executableURL = URL(fileURLWithPath: \"/bin/sh\")") {
+            #expect(!reasons.isEmpty)
+        } else {
+            Issue.record("expected Process proposal to reject")
+        }
+        if case .rejected = CodeProposalValidator.validate("URLSession.shared.data(from: url)") {
+            // ok
+        } else {
+            Issue.record("expected URLSession.data to reject")
+        }
+        #expect(throws: CodeProposalRejection.self) {
+            try CodeProposalValidator.acceptOrThrow("rm -rf /tmp/x")
+        }
+    }
+
+    @Test func rollbackStoreSnapshotAndRestore() throws {
+        let abbey = try RollbackStore.abbeyHome()
+        let live = abbey.appendingPathComponent("rollback-test-\(UUID().uuidString).txt")
+        try Data("v1".utf8).write(to: live)
+        defer { try? FileManager.default.removeItem(at: live) }
+        let snapName = "test-\(UUID().uuidString)"
+        _ = try RollbackStore.snapshot(file: live, as: snapName)
+        try Data("v2".utf8).write(to: live)
+        try RollbackStore.restore(file: live, fromSnapshot: snapName)
+        #expect(String(data: try Data(contentsOf: live), encoding: .utf8) == "v1")
+
+        try Data("v3".utf8).write(to: live)
+        let bak = live.appendingPathExtension("bak")
+        try Data("from-bak".utf8).write(to: bak)
+        defer { try? FileManager.default.removeItem(at: bak) }
+        try RollbackStore.restoreFromBak(live)
+        #expect(String(data: try Data(contentsOf: live), encoding: .utf8) == "from-bak")
+
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("not-abbey.txt")
+        try Data("x".utf8).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        #expect(throws: RollbackStore.Error.self) {
+            try RollbackStore.snapshot(file: outside, as: "nope")
+        }
+    }
+
+    @Test func twitchBridgeDryRunConnectsWithoutSocket() async {
+        let bridge = TwitchBridge()
+        await bridge.connect(oauthToken: "oauth:fake", login: "abbeybot", channel: "test", dryRun: true)
+        #expect(await bridge.state == .connected)
+        #expect(await bridge.loginNick == "abbeybot")
+        await bridge.disconnect()
+        #expect(await bridge.state == .disconnected)
+    }
+
     @Test func discordBridgeDryRunSkipsGateway() async {
         let bridge = DiscordBridge()
         await bridge.connect(token: "", hooks: DiscordEventHooks(), dryRun: true)

@@ -71,6 +71,17 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(dryRun, forKey: Keys.dryRun) }
     }
 
+    /// Twitch IRC OAuth token (env `TWITCH_OAUTH_TOKEN`); empty disables Twitch.
+    public var twitchOAuthToken: String {
+        didSet { TokenStore.set(twitchOAuthToken, account: Keys.twitchOAuthToken) }
+    }
+    public var twitchBotLogin: String {
+        didSet { defaults.set(twitchBotLogin, forKey: Keys.twitchBotLogin) }
+    }
+    public var twitchChannel: String {
+        didSet { defaults.set(twitchChannel, forKey: Keys.twitchChannel) }
+    }
+
     private enum Keys {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
@@ -86,6 +97,9 @@ public final class AppConfig: @unchecked Sendable {
         static let syncServerURL = "ABBEY_SYNC_SERVER_URL"
         static let syncAPIToken = "ABBEY_SYNC_API_TOKEN"
         static let dryRun = "ABBEY_DRY_RUN"
+        static let twitchOAuthToken = "TWITCH_OAUTH_TOKEN"
+        static let twitchBotLogin = "TWITCH_BOT_LOGIN"
+        static let twitchChannel = "TWITCH_CHANNEL"
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -132,6 +146,15 @@ public final class AppConfig: @unchecked Sendable {
         } else {
             self.dryRun = false
         }
+        self.twitchOAuthToken = TokenStore.get(account: Keys.twitchOAuthToken)
+            ?? ProcessInfo.processInfo.environment["TWITCH_OAUTH_TOKEN"]
+            ?? ""
+        self.twitchBotLogin = defaults.string(forKey: Keys.twitchBotLogin)
+            ?? ProcessInfo.processInfo.environment["TWITCH_BOT_LOGIN"]
+            ?? ""
+        self.twitchChannel = defaults.string(forKey: Keys.twitchChannel)
+            ?? ProcessInfo.processInfo.environment["TWITCH_CHANNEL"]
+            ?? ""
     }
 }
 
