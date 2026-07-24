@@ -94,11 +94,22 @@ final class AbbeyEngine {
             await scheduler.start()
             let token = config.twitchOAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
             if !token.isEmpty {
+                let hooks = TwitchEventHooks { [weak self] msg in
+                    guard let self else { return }
+                    await self.ingestMessage(
+                        content: msg.text,
+                        channelId: msg.channel,
+                        guildId: "twitch",
+                        authorId: msg.login,
+                        discordMessageId: "twitch-\(UUID().uuidString)"
+                    )
+                }
                 await twitchBridge.connect(
                     oauthToken: token,
                     login: config.twitchBotLogin,
                     channel: config.twitchChannel,
-                    dryRun: config.dryRun
+                    dryRun: config.dryRun,
+                    hooks: hooks
                 )
             }
         }

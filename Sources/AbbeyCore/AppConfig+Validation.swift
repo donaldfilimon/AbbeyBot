@@ -78,5 +78,7 @@ extension AppConfig {
                 throw AppConfigValidationError.liveDiscordMissingToken
             }
         }
+
+        try DecentralizationPolicy(enabled: decentralizationEnabled).validate()
     }
 }

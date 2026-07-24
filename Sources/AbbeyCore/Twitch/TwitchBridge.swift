@@ -8,8 +8,9 @@ public enum TwitchConnectionState: String, Sendable {
     case failed
 }
 
-/// Optional Twitch IRC presence (Phase 2). Dry-run skips the socket; live path speaks
-/// IRC to `irc.chat.twitch.tv:6667` (PASS oauth / NICK / JOIN). No EventSub, no pubsub.
+/// Optional Twitch IRC + chat→ingest (Phase 2). Dry-run skips the socket; live path
+/// speaks IRC to `irc.chat.twitch.tv:6667` (PASS oauth / NICK / JOIN). PRIVMSG lines
+/// invoke `TwitchEventHooks`. No EventSub / PubSub.
 public actor TwitchBridge {
     public private(set) var state: TwitchConnectionState = .disconnected
     public private(set) var lastError: String?
@@ -17,6 +18,7 @@ public actor TwitchBridge {
 
     private var readTask: Task<Void, Never>?
     private var connection: TwitchIRCConnection?
+    private var hooks = TwitchEventHooks()
     private let logger = Logger(label: "AbbeyBot.TwitchBridge")
 
     public init() {}
@@ -26,12 +28,15 @@ public actor TwitchBridge {
     ///   - login: bot login / nick (lowercase).
     ///   - channel: channel to JOIN (without `#`).
     ///   - dryRun: when true, marks connected without opening a socket.
+    ///   - hooks: PRIVMSG → engine ingest callbacks.
     public func connect(
         oauthToken: String,
         login: String,
         channel: String,
-        dryRun: Bool = AppConfig.shared.dryRun
+        dryRun: Bool = AppConfig.shared.dryRun,
+        hooks: TwitchEventHooks = TwitchEventHooks()
     ) async {
+        self.hooks = hooks
         let nick = login.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let chan = channel.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
@@ -63,6 +68,7 @@ public actor TwitchBridge {
         }
 
         await disconnect()
+        self.hooks = hooks
         state = .connecting
         lastError = nil
 
@@ -108,9 +114,18 @@ public actor TwitchBridge {
         while !Task.isCancelled {
             do {
                 guard let line = try await conn.readLine() else { break }
-                if line.hasPrefix("PING ") {
-                    let payload = String(line.dropFirst(5))
+                if line.hasPrefix("PING ") || line.uppercased().hasPrefix("PING ") {
+                    let payload: String
+                    if let idx = line.firstIndex(of: " ") {
+                        payload = String(line[line.index(after: idx)...])
+                    } else {
+                        payload = ""
+                    }
                     try await conn.send("PONG \(payload)")
+                    continue
+                }
+                if let msg = TwitchIRCParser.parsePrivmsg(line) {
+                    await hooks.onPrivmsg(msg)
                 }
             } catch {
                 if !Task.isCancelled {
