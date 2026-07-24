@@ -12,4 +12,4 @@ if [[ -f "$ROOT/.env" ]]; then
 fi
 HOST="${HTTP_HOSTNAME:-127.0.0.1}"
 PORT="${HTTP_PORT:-8080}"
-exec /usr/bin/xcrun --toolchain default swift run AbbeyServer --build-path "${TMPDIR:-/tmp}/AbbeyBot.server.build" -- serve --hostname "$HOST" --port "$PORT"
+exec /usr/bin/xcrun --toolchain default swift run --build-path "${TMPDIR:-/tmp}/AbbeyBot.server.build" AbbeyServer -- serve --hostname "$HOST" --port "$PORT"
