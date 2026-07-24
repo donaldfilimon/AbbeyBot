@@ -83,8 +83,8 @@ final class AbbeyEngine {
     func pullFromServer() async {
         let url = config.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else { return }
+        guard SyncStatus.shared.beginPull() else { return }
 
-        SyncStatus.shared.beginPull()
         do {
             let counts = try await SyncPull.run(into: modelContainer)
             SyncStatus.shared.recordPullSuccess(
@@ -489,7 +489,7 @@ final class AbbeyEngine {
             return ok ? DiscordCopy.voiceJoined(channelId: trimmedChannel) : DiscordCopy.voiceNotConnected
         case .leave:
             let ok = await discordBridge.leaveVoice(guildId: trimmedGuild)
-            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceMissingGuild
+            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceLeaveFailed
         }
     }
 }

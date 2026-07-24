@@ -418,7 +418,7 @@ public actor BotRuntime {
             return ok ? DiscordCopy.voiceJoined(channelId: trimmedChannel) : DiscordCopy.voiceNotConnected
         case .leave:
             let ok = await discordBridge.leaveVoice(guildId: trimmedGuild)
-            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceMissingGuild
+            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceLeaveFailed
         }
     }
 }
