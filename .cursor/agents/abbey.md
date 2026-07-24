@@ -20,7 +20,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 2. Keep the dual product coherent: desktop AbbeyBotApp (SwiftData), AbbeyServer (Vapor/Fluent; Postgres with SQLite smoke fallback), and `abbey` CLI (local SQLite under `~/.abbey/` unless `DATABASE_URL` overrides).
 3. Put shared logic in `AbbeyCore` (personas, inference, DiscordBM bridge, DQN, `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, strict-by-default `IntentClassifier`). Keep Fluent-backed engine work in `AbbeyServerKit` for AbbeyServer + `abbey`. Leave desktop `AbbeyEngine` and server `BotRuntime` as persistence adapters only.
 4. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` call sites so desktop and server do not drift.
-5. Respect deferred scope: Discord Voice is out; full bidirectional SwiftData↔Postgres sync is out. Desktop server sync is best-effort one-way HTTP mirror via `AbbeyServerClient` (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) for ingest/remember/forget only.
+5. Respect deferred scope: Discord Voice **audio** (Opus/UDP) is out — voice **presence** (`/voice join|leave`, Discord tab) is shipped. Full CRDT / cursor pagination / CLI↔desktop sync is out. Desktop server sync is best-effort **push + pull** via `AbbeyServerClient` (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`): push mirrors ingest/remember/forget; pull on launch and Settings “Pull now” (server-wins users/channels/equity; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes.
 6. Prefer recent improvement focus: remember/forget engine drift, package tests in verify scripts, and DiscordCopy completeness — without claiming those are done unless evidence exists.
 
 **Toolchain (hard rules):**
@@ -32,7 +32,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 **Workflow:**
 1. Read `AGENTS.md` (and relevant nearby sources only as needed).
 2. Locate the owning layer: AbbeyCore shared pure logic vs AbbeyEngine / BotRuntime adapters vs AbbeyServer routes / AbbeyCLI / SwiftUI.
-3. Implement the minimal change; do not expand into deferred Voice or full bidirectional sync.
+3. Implement the minimal change; do not expand into deferred Voice **audio**, CRDT merge, or full CLI↔desktop sync.
 4. Verify with the narrowest honest gate:
    - Full: `unset TOOLCHAINS && bash Scripts/verify-all.sh`
    - Desktop: `bash Scripts/run-smoke.sh`
@@ -46,6 +46,10 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 - Do not push, force-push, or open remotes unless the user explicitly asks.
 - Never commit secrets (`.env`, tokens, Keychain material).
 
+**Learning & Safety Policy (binding summary):**
+
+Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 will add config validate-before-boot, Discord dry-run, and durable DQN checkpoints; do not claim those APIs exist until code + tests land. Verification gate = `Scripts/verify-all.sh` (or matching smoke). Deferred roadmap only: Twitch, generated-code validator, rollback FS beyond checkpoint `*.bak`. Full policy: `AGENTS.md` → Learning & Safety Policy.
+
 **Quality Standards:**
 - Claim-honest: cite real targets, scripts, env vars, and routes from `AGENTS.md` / code — no speculative APIs.
 - Dual-path safety: ingest/slash/scoring changes must not leave AbbeyEngine and BotRuntime inconsistent.
@@ -55,13 +59,12 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 **Output Format:**
 - Short verdict of what you did and which gate ran.
 - Path-anchored notes for key files touched.
-- Explicit deferred/out-of-scope callouts when relevant (Voice, full bidirectional sync).
+- Explicit deferred/out-of-scope callouts when relevant (Voice audio, CRDT/cursor sync, Twitch, codegen validator, rollback FS).
 - Next step only if blocked or user action is required (token, Docker, guild ID).
 
 **Edge Cases:**
 - **Linux CI vs desktop:** GitHub Linux builds/tests AbbeyCore / AbbeyServerKit / AbbeyServer / AbbeyCLI; desktop job is disabled pending a self-hosted macOS 27 runner — do not claim desktop CI is green on GitHub-hosted macOS.
 - **Dashboard 404:** `/dashboard` may 404 if the React SPA is not built into `Sources/AbbeyServer/Resources/Public/`; server smoke may skip that assertion — do not treat as a product regression unless the SPA was expected to be present.
 - **No Discord token:** CLI/server can run local-only with a warning; desktop live Discord needs Developer Portal bot + Message Content intent + Keychain token.
-- **Ambiguous "sync":** clarify one-way best-effort mirror vs deferred full bidirectional sync before implementing.
+- **Ambiguous "sync":** shipped path is push + pull (launch + “Pull now”); deferred is CRDT merge, `?since=` cursors, and CLI↔desktop sync — not “push-only mirror.”
 - **Conflicting docs vs code:** prefer code + `AGENTS.md`; fix drift rather than inventing features to match outdated prose.
-)

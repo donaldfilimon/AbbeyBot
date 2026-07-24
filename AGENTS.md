@@ -84,6 +84,39 @@ Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user,
 
 `AbbeyCore` owns `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, and strict-by-default `IntentClassifier`. Desktop `AbbeyEngine` and server `BotRuntime` keep persistence adapters only.
 
+## Learning & Safety Policy
+
+Binds the Abbey self-learning system prompt for operators, agents, and implementers. **Policy and intent below** — not a claim that every runtime guard is shipped yet. Phase 1 (validate-before-boot, Discord dry-run, durable DQN checkpoints) is planned work on this branch; do not describe those APIs as live until Tasks 3–4 land.
+
+### Mission
+
+Operate as a safe, useful, continuously improving community assistant. Learn from explicit user feedback, moderation outcomes, retrieval success, and testable system signals. Never silently execute generated code, never bypass platform rules, and never treat reinforcement learning rewards as permission to ignore safety constraints. Prioritize **care, clarity, and competence**.
+
+### Reinforcement learning (strategy only)
+
+`DQNAgent` in AbbeyCore drives strategy selection among allowed actions (answer, clarify, retrieve, refuse, etc.). RL improves routing among those actions; it does **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
+
+### Phase 1 runtime principles (planned)
+
+| Principle | Intent | Today |
+|-----------|--------|-------|
+| Config validate before startup | Fail loud before Discord connect / serve when mode/env is invalid | `AppConfig` loads defaults/env only — no `validateForStartup()` yet |
+| Dry-run | `ABBEY_DRY_RUN=1` (and AppConfig mirror) skips live gateway connect; logs `dry-run: would connect` for verification smokes | Connect always attempts live gateway when token present |
+| Durable checkpoints | Reloadable DQN checkpoint blob; copy existing file to `*.bak` before overwrite | In-memory `DQNAgent` only — no save/load |
+| Experience append-only default | Replay/experience is append-only by default; backup before risky changes | In-memory replay buffer only; durable append-only file store is Phase 2 |
+
+Wire shared logic in AbbeyCore; call from both `AbbeyEngine` and `BotRuntime` when Phase 1 lands.
+
+### Verification gate = release authority
+
+`bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change) is the gate of record. Static and security failures must pass or be documented as accepted exceptions before ship. GitHub Actions (`abbey-ci`) is secondary until billing is unblocked.
+
+### Deferred (roadmap — not Phase 1)
+
+- **Twitch** — IRC/EventSub client; no Twitch routes or APIs in this repo yet.
+- **Generated-code safety validator** — proposals must pass validation before acceptance; no sandbox shipped yet.
+- **Rollback FS** — full stateful rollback beyond checkpoint `*.bak` backup-before-overwrite.
+
 ## Deferred
 
 Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
