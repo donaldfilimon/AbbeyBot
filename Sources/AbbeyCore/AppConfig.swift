@@ -90,8 +90,13 @@ public final class AppConfig: @unchecked Sendable {
         } else {
             self.operatingMode = OperatingMode(rawValue: modeRaw) ?? .standalone
         }
-        self.inferenceMode = InferenceMode(rawValue: defaults.string(forKey: Keys.inferenceMode) ?? "") ?? .deterministicFloor
-        self.remoteEndpoint = defaults.string(forKey: Keys.remoteEndpoint) ?? ""
+        let inferenceModeRaw = defaults.string(forKey: Keys.inferenceMode)
+            ?? ProcessInfo.processInfo.environment["ABBEY_INFERENCE_MODE"]
+            ?? ""
+        self.inferenceMode = InferenceMode(rawValue: inferenceModeRaw) ?? .deterministicFloor
+        self.remoteEndpoint = defaults.string(forKey: Keys.remoteEndpoint)
+            ?? ProcessInfo.processInfo.environment["ABBEY_REMOTE_ENDPOINT"]
+            ?? ""
         let cooldown = defaults.double(forKey: Keys.replyCooldownSeconds)
         self.replyCooldownSeconds = cooldown > 0 ? cooldown : 8.0
         let interval = defaults.double(forKey: Keys.consolidationInterval)

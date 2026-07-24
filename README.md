@@ -5,7 +5,8 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 | Layer | Tech |
 |-------|------|
 | Desktop | `AbbeyBot` — macOS 27 SwiftUI + SwiftData |
-| Server | `AbbeyServer` — Vapor + Fluent/Postgres + Leaf |
+| Server | `AbbeyServer` — Vapor + Fluent/Postgres + Leaf + `/dashboard` SPA |
+| Shared engine | `AbbeyServerKit` — Fluent-backed `BotRuntime` used by server + CLI |
 | CLI | `abbey` — terminal chat sharing the same brain, local SQLite |
 | Core | `AbbeyCore` — brain, personas, inference, DiscordBM |
 | Discord | DiscordBM gateway + REST (Voice deferred) |
@@ -83,13 +84,17 @@ Dockerfile / docker-compose.yml
 ## API (server)
 
 - `GET /health` — liveness + Discord state
+- `GET /dashboard` — React SPA (build with `bun run build` / `npm run build` in `web/`)
 - `GET /api/metrics` — session counters
 - `GET /api/status` — dialect + table counts + session metrics (JSON)
 - `POST /api/ingest` — headless ingest (`content`, `channelId`, `guildId`, `authorId`, optional `discordMessageId`); when `ABBEY_API_TOKEN` is set, require `Authorization: Bearer …` or `X-Abbey-Token`
+- State (desktop sync): `GET /api/state/user`, `GET /api/state/channel`, `POST /api/state/remember`, `POST /api/state/forget`
 - `GET /api/users` / `GET /api/channels` — Fluent rows (`?limit=`)
 - `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`)
 - `GET /` — Leaf status (dialect + table counts)
 
+Desktop optional sync: Settings / `ABBEY_SYNC_SERVER_URL` + `ABBEY_SYNC_API_TOKEN` best-effort mirrors ingest/remember/forget to AbbeyServer (failures never block local SwiftData writes).
+
 ## Status
 
-Core shared helpers shipped (`IngestScorer`, `ReputationMath`, `DiscordCopy`, async Vapor lifecycle). Still deferred: React SPA, Voice, Desktop↔Postgres sync.
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA, one-way desktop→server HTTP sync. Still deferred: Discord Voice; full bidirectional SwiftData↔Postgres sync.
