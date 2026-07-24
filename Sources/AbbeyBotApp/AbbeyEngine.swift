@@ -75,7 +75,7 @@ final class AbbeyEngine {
         }
 
         startEventListener()
-        Task { [socialBrain, scheduler, dqnAgent, twitchBridge] in
+        Task { [self, socialBrain, scheduler, dqnAgent, twitchBridge] in
             do {
                 try await dqnAgent.loadCheckpointIfPresent()
             } catch {
