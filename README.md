@@ -59,9 +59,10 @@ Dockerfile / docker-compose.yml
 
 - `GET /health` — liveness + Discord state
 - `GET /api/metrics` — session counters
-- `GET /api/users` / `GET /api/channels` — Fluent rows
-- `GET /` — Leaf status page
+- `GET /api/users` / `GET /api/channels` — Fluent rows (`?limit=`)
+- `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` — recent rows (`?limit=`)
+- `GET /` — Leaf status (dialect + table counts)
 
-## Phase 2
+## Phase 2 / 3a
 
-Shipped (incl. macOS 27 window/SwiftData/Foundation Models APIs). Deferred: React dashboard SPA, Voice, Desktop↔Postgres sync.
+Phase 2 shipped (macOS 27 + AbbeyServer). Phase 3a shipped (expanded `/api/*` + Leaf counts). Deferred: React dashboard SPA, Voice, Desktop↔Postgres sync.

@@ -12,19 +12,24 @@
     body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem; color: var(--ink); }
     h1 { font-size: 1.75rem; margin: 0 0 0.25rem; }
     p { color: var(--muted); margin: 0 0 1.5rem; }
-    dl { display: grid; grid-template-columns: 12rem 1fr; gap: 0.5rem 1rem; max-width: 36rem; }
+    dl { display: grid; grid-template-columns: 12rem 1fr; gap: 0.5rem 1rem; max-width: 40rem; }
     dt { color: var(--muted); }
     dd { margin: 0; font-variant-numeric: tabular-nums; }
     a { color: inherit; }
-    nav { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+    nav { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--line); line-height: 1.8; }
   </style>
 </head>
 <body>
   <h1>AbbeyServer</h1>
   <p>Linux/Docker headless bot (Fluent Postgres or sqlite). Desktop companion is a separate macOS app.</p>
   <dl>
+    <dt>Database</dt><dd>#(databaseDialect)</dd>
     <dt>Discord</dt><dd>#(discordState)</dd>
     <dt>Bot user</dt><dd>#(botUserId)</dd>
+    <dt>Users</dt><dd>#(userCount)</dd>
+    <dt>Channels</dt><dd>#(channelCount)</dd>
+    <dt>Messages</dt><dd>#(messageCount)</dd>
+    <dt>Reputation events</dt><dd>#(reputationEventCount)</dd>
     <dt>Ingested (session)</dt><dd>#(messagesIngested)</dd>
     <dt>Live Discord ingest</dt><dd>#(liveIngestCount)</dd>
     <dt>Inference calls</dt><dd>#(inferenceCalls)</dd>
@@ -34,7 +39,10 @@
     <a href="/health">/health</a> ·
     <a href="/api/metrics">/api/metrics</a> ·
     <a href="/api/users">/api/users</a> ·
-    <a href="/api/channels">/api/channels</a>
+    <a href="/api/channels">/api/channels</a> ·
+    <a href="/api/messages">/api/messages</a> ·
+    <a href="/api/reputation">/api/reputation</a> ·
+    <a href="/api/interactions">/api/interactions</a>
   </nav>
 </body>
 </html>

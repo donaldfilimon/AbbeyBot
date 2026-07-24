@@ -33,6 +33,7 @@ public func configure(_ app: Application) async throws {
             reason: "DATABASE_URL must be postgres://… or sqlite://… (sqlite://memory for in-memory smoke)"
         )
     }
+    app.databaseDialect = dialect
     app.logger.info("Database dialect: \(dialect)")
 
     app.migrations.add(CreateAll())
@@ -62,5 +63,16 @@ struct BotLifecycleHandler: LifecycleHandler {
             semaphore.signal()
         }
         _ = semaphore.wait(timeout: .now() + 5)
+    }
+}
+
+extension Application {
+    private struct DatabaseDialectKey: StorageKey {
+        typealias Value = String
+    }
+
+    var databaseDialect: String {
+        get { storage[DatabaseDialectKey.self] ?? "unknown" }
+        set { storage[DatabaseDialectKey.self] = newValue }
     }
 }

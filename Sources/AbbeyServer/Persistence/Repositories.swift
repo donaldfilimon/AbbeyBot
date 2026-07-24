@@ -86,6 +86,30 @@ enum MessageRepository {
             .limit(limit)
             .all()
     }
+
+    static func recent(limit: Int, on db: any Database) async throws -> [GuildMessage] {
+        try await GuildMessage.query(on: db)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
+    }
+
+    static func count(on db: any Database) async throws -> Int {
+        try await GuildMessage.query(on: db).count()
+    }
+}
+
+enum ReputationRepository {
+    static func recent(limit: Int, on db: any Database) async throws -> [ReputationEvent] {
+        try await ReputationEvent.query(on: db)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
+    }
+
+    static func count(on db: any Database) async throws -> Int {
+        try await ReputationEvent.query(on: db).count()
+    }
 }
 
 enum InteractionRepository {
@@ -105,5 +129,22 @@ enum InteractionRepository {
             latencyMs: latencyMs
         )
         try await row.create(on: db)
+    }
+
+    static func recent(limit: Int, on db: any Database) async throws -> [InteractionLog] {
+        try await InteractionLog.query(on: db)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
+    }
+}
+
+enum StatusRepository {
+    static func counts(on db: any Database) async throws -> (users: Int, channels: Int, messages: Int, reputationEvents: Int) {
+        let users = try await UserMemory.query(on: db).count()
+        let channels = try await ChannelContext.query(on: db).count()
+        let messages = try await MessageRepository.count(on: db)
+        let reputationEvents = try await ReputationRepository.count(on: db)
+        return (users, channels, messages, reputationEvents)
     }
 }
