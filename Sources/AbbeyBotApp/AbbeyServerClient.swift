@@ -93,6 +93,7 @@ struct AbbeyServerClient: Sendable {
         let suffix = path.hasPrefix("/") ? path : "/\(path)"
         guard let url = URL(string: base + suffix) else {
             print("[sync] invalid syncServerURL, skipping \(path)")
+            await recordFailure(path: path, message: "invalid syncServerURL")
             return
         }
 
@@ -108,6 +109,7 @@ struct AbbeyServerClient: Sendable {
             request.httpBody = try JSONSerialization.data(withJSONObject: jsonObjectBody)
         } catch {
             print("[sync] failed to encode body for \(path): \(error)")
+            await recordFailure(path: path, message: "encode failed")
             return
         }
 
@@ -115,9 +117,25 @@ struct AbbeyServerClient: Sendable {
             let (_, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 print("[sync] \(path) returned status \(http.statusCode)")
+                await recordFailure(path: path, message: "HTTP \(http.statusCode)")
+            } else {
+                await recordSuccess(path: path)
             }
         } catch {
             print("[sync] \(path) failed: \(error)")
+            await recordFailure(path: path, message: error.localizedDescription)
+        }
+    }
+
+    private func recordSuccess(path: String) async {
+        await MainActor.run {
+            SyncStatus.shared.recordSuccess(path: path)
+        }
+    }
+
+    private func recordFailure(path: String, message: String) async {
+        await MainActor.run {
+            SyncStatus.shared.recordFailure(path: path, message: message)
         }
     }
 }

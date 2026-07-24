@@ -7,6 +7,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case users = "Users"
     case channels = "Channels"
     case messages = "Messages"
+    case interactions = "Interactions"
     case personas = "Personas"
     case equity = "Equity Research"
 
@@ -15,10 +16,11 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .dashboard: return "gauge.with.dots.needle.67percent"
-        case .discord: return "bubble.left.and.bubble.right.fill"
+        case .discord: return "antenna.radiowaves.left.and.right"
         case .users: return "person.2"
         case .channels: return "number"
-        case .messages: return "bubble.left.and.bubble.right"
+        case .messages: return "text.bubble"
+        case .interactions: return "bolt.horizontal"
         case .personas: return "sparkles"
         case .equity: return "chart.line.uptrend.xyaxis"
         }
@@ -49,6 +51,8 @@ struct ContentView: View {
                 ChannelContextsView()
             case .messages:
                 MessagesView()
+            case .interactions:
+                InteractionsView()
             case .personas:
                 PersonaSwitcherView()
             case .equity:

@@ -19,25 +19,43 @@ struct MessagesView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            TextField("Filter by channel ID", text: $channelFilter)
-                .textFieldStyle(.roundedBorder)
-                .padding()
+        Group {
+            if messages.isEmpty {
+                ContentUnavailableView(
+                    "No messages yet",
+                    systemImage: "text.bubble",
+                    description: Text("Simulate an ingest on the Dashboard or connect Discord.")
+                )
+            } else {
+                VStack(spacing: 0) {
+                    TextField("Filter by channel ID", text: $channelFilter)
+                        .textFieldStyle(.roundedBorder)
+                        .padding()
 
-            List {
-                ForEach(sections, id: \.guildId) { section in
-                    Section(section.guildId) {
-                        ForEach(section.messages) { message in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(message.authorId).font(.headline)
-                                    Text("#\(message.channelId)").font(.caption).foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(message.createdAt, style: .time).font(.caption).foregroundStyle(.secondary)
+                    if filtered.isEmpty {
+                        ContentUnavailableView(
+                            "No matches",
+                            systemImage: "line.3.horizontal.decrease.circle",
+                            description: Text("No messages match “\(channelFilter)”.")
+                        )
+                    } else {
+                        List {
+                            ForEach(sections, id: \.guildId) { section in
+                                Section(section.guildId) {
+                                    ForEach(section.messages) { message in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            HStack {
+                                                Text(message.authorId).font(.headline)
+                                                Text("#\(message.channelId)").font(.caption).foregroundStyle(.secondary)
+                                                Spacer()
+                                                Text(message.createdAt, style: .time).font(.caption).foregroundStyle(.secondary)
+                                            }
+                                            Text(message.content)
+                                        }
+                                        .padding(.vertical, 2)
+                                    }
                                 }
-                                Text(message.content)
                             }
-                            .padding(.vertical, 2)
                         }
                     }
                 }

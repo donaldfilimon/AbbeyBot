@@ -11,21 +11,29 @@ struct ChannelContextsView: View {
 
     var body: some View {
         VStack {
-            List(channels) { channel in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("#\(channel.channelId)").font(.headline)
-                        Spacer()
-                        Text("\(channel.messageCount) msgs")
+            if channels.isEmpty {
+                ContentUnavailableView(
+                    "No channels tracked",
+                    systemImage: "number",
+                    description: Text("Add a channel below, or ingest a message to create context automatically.")
+                )
+            } else {
+                List(channels) { channel in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("#\(channel.channelId)").font(.headline)
+                            Spacer()
+                            Text("\(channel.messageCount) msgs")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(channel.summary.isEmpty ? "No summary yet." : channel.summary)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(channel.summary.isEmpty ? .secondary : .primary)
+                            .lineLimit(6)
                     }
-                    Text(channel.summary.isEmpty ? "No summary yet." : channel.summary)
-                        .font(.caption)
-                        .foregroundStyle(channel.summary.isEmpty ? .secondary : .primary)
-                        .lineLimit(6)
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
 
             Divider()
