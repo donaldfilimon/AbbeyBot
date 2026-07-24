@@ -7,11 +7,9 @@ import AbbeyCore
 @main
 struct AbbeyBotApp: App {
     @State private var engine: AbbeyEngine
+    @State private var didActivate = false
 
     init() {
-        // `swift run` / Scripts/run.sh launch without LaunchServices activation; force a
-        // regular Dock app and frontmost window so post-build silence isn't mistaken for a hang.
-        NSApplication.shared.setActivationPolicy(.regular)
         let boot = Self.makeModelContainer()
         _engine = State(initialValue: AbbeyEngine(modelContainer: boot.container, storeDegraded: boot.degraded))
     }
@@ -21,6 +19,9 @@ struct AbbeyBotApp: App {
             ContentView()
                 .environment(engine)
                 .onAppear {
+                    // Terminal / `swift run` launches often open behind the IDE; bring forward once.
+                    guard !didActivate else { return }
+                    didActivate = true
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
