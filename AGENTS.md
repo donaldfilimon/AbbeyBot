@@ -16,6 +16,11 @@ Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServe
 
 ```bash
 unset TOOLCHAINS
+# Raw SPM UX with Desktop-safe build dir (preferred over bare `swift run` on Desktop/iCloud):
+bash Scripts/swift-run.sh help
+# Equivalent:
+# /usr/bin/xcrun --toolchain default swift run --build-path "${TMPDIR}/AbbeyBot.build" AbbeyBot help
+
 bash Scripts/run-smoke.sh          # desktop build/test/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
 bash Scripts/run-cli-smoke.sh      # abbey CLI boot + DATABASE_URL isolation
@@ -25,11 +30,13 @@ bash Scripts/verify-all.sh         # all gates
 Launch wrappers (Xcode toolchain):
 
 ```bash
+bash Scripts/swift-run.sh    # desktop (pass serve|cli|help as args)
 bash Scripts/run.sh          # desktop
 bash Scripts/run-server.sh   # server (loads .env if present)
 bash Scripts/run-abbey.sh    # abbey CLI (loads .env if present)
 ```
 
+Bare `swift run` works when using the Xcode toolchain and `--build-path "${TMPDIR}/AbbeyBot.build"` (Desktop trees otherwise hit iCloud xattr codesign failures). Do not use PATH swiftly for the GUI.
 Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
 
 CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run swiftlang/swift:nightly-6.4.x-bookworm` — official `library/swift:6.4-*` not published yet) builds `web/` (bun), runs dashboard SPA tests, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`. Desktop job disabled (`if: false`) pending a self-hosted macOS 27 runner — GitHub-hosted `macos-*` runners don't satisfy the pin.
@@ -109,7 +116,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 
 **Roles reference:** `research_mlai.md` (Abbey-Aviva-Abi framework §2) is the role/policy source of truth only; do not port WDBX throughput, Python stack, or industry pilot claims as AbbeyBot product features.
 
-**Not shipped (do not claim as product features):** Python persona framework, TensorFlow/PyTorch stack, blockchain decentralization, industry healthcare/finance pilots, GDPR certification, or HIPAA compliance modules.
+**Not shipped (do not claim as product features):** Python persona framework, TensorFlow/PyTorch stack, live blockchain decentralization, industry healthcare/finance pilots as certified products, GDPR certification, or HIPAA compliance modules. `IndustryProfile` / `WDBXMemoryFacade` / `DecentralizationPolicy` are claim-honest shells only (see Phase 2).
 
 ## Learning & Safety Policy
 
@@ -138,7 +145,10 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Experience journal | Append-only JSONL `~/.abbey/dqn-experience.jsonl` via `ExperienceJournal`; `DQNAgent.remember` appends; engines call `loadExperienceJournalIfPresent()` on start into the in-memory replay buffer. |
 | Generated-code validator | `CodeProposalValidator.validate` / `acceptOrThrow` — static reject of shell/process/dlopen/network/rm patterns (not a sandbox). |
 | Rollback FS | `RollbackStore` snapshots under `~/.abbey/rollback/<name>/`; `restore` / `restoreFromBak`; checkpoint saves also snapshot when managed. |
-| Twitch IRC | `TwitchBridge` — optional connect when `TWITCH_OAUTH_TOKEN` (+ login/channel) set; dry-run supported. **Not shipped:** EventSub, PubSub, chat reply loop into ingest. |
+| Twitch IRC + chat→ingest | `TwitchBridge` + `TwitchIRCParser` — optional connect when `TWITCH_OAUTH_TOKEN` set; PRIVMSG → engine ingest with `guildId=twitch`. Dry-run supported. **Not shipped:** EventSub, PubSub. |
+| Industry profile shell | `IndustryProfile` (`ABBEY_INDUSTRY_PROFILE`) — prompt suffix only; not HIPAA/GDPR product modules. |
+| WDBX memory facade | `WDBXMemoryFacade` over `ExperienceJournal` — local strategy memory name only; **not** Zig abi WDBX; no throughput claims. |
+| Decentralization stub | `DecentralizationPolicy` / `ABBEY_DECENTRALIZATION_ENABLED` — must stay false; startup validates. No blockchain node. |
 
 ### Toolchain / run UX
 
@@ -152,8 +162,9 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 ### Still deferred
 
-- **Twitch EventSub / chat→ingest** — IRC presence only; no EventSub client and no automatic Twitch message ingest yet.
+- **Twitch EventSub / PubSub** — IRC PRIVMSG ingest ships; no EventSub client yet.
 - **Codegen sandbox** — static `CodeProposalValidator` only; no isolated execution sandbox.
+- **Real WDBX / blockchain** — facade + policy stubs only; Zig abi WDBX and chain nodes are out of this package.
 - Full CRDT / cursor pagination / CLI↔desktop sync — see Deferred below.
 
 ## Deferred

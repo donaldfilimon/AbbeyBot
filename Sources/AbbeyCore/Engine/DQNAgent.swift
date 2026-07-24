@@ -73,7 +73,7 @@ public actor DQNAgent {
            (try? RollbackStore.isManaged(url)) == true {
             let stamp = ISO8601DateFormatter().string(from: Date())
                 .replacingOccurrences(of: ":", with: "-")
-            try? RollbackStore.snapshot(file: url, as: "dqn-checkpoint-\(stamp)")
+            _ = try? RollbackStore.snapshot(file: url, as: "dqn-checkpoint-\(stamp)")
         }
         let blob = DQNCheckpointBlob(
             topology: online.topology,

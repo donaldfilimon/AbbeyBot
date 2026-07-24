@@ -82,6 +82,16 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(twitchChannel, forKey: Keys.twitchChannel) }
     }
 
+    /// Industry prompt overlay (`ABBEY_INDUSTRY_PROFILE`); default `general`.
+    public var industryProfile: IndustryProfile {
+        didSet { defaults.set(industryProfile.rawValue, forKey: Keys.industryProfile) }
+    }
+
+    /// Blockchain/decentralization stub — must stay false (no node in this package).
+    public var decentralizationEnabled: Bool {
+        didSet { defaults.set(decentralizationEnabled, forKey: Keys.decentralizationEnabled) }
+    }
+
     private enum Keys {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
@@ -100,6 +110,8 @@ public final class AppConfig: @unchecked Sendable {
         static let twitchOAuthToken = "TWITCH_OAUTH_TOKEN"
         static let twitchBotLogin = "TWITCH_BOT_LOGIN"
         static let twitchChannel = "TWITCH_CHANNEL"
+        static let industryProfile = "ABBEY_INDUSTRY_PROFILE"
+        static let decentralizationEnabled = "ABBEY_DECENTRALIZATION_ENABLED"
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -155,6 +167,17 @@ public final class AppConfig: @unchecked Sendable {
         self.twitchChannel = defaults.string(forKey: Keys.twitchChannel)
             ?? ProcessInfo.processInfo.environment["TWITCH_CHANNEL"]
             ?? ""
+        let industryRaw = defaults.string(forKey: Keys.industryProfile)
+            ?? ProcessInfo.processInfo.environment["ABBEY_INDUSTRY_PROFILE"]
+        self.industryProfile = IndustryProfile.resolve(industryRaw)
+        if let envDec = ProcessInfo.processInfo.environment["ABBEY_DECENTRALIZATION_ENABLED"] {
+            let normalized = envDec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            self.decentralizationEnabled = ["1", "true", "yes", "on"].contains(normalized)
+        } else if let stored = defaults.object(forKey: Keys.decentralizationEnabled) as? Bool {
+            self.decentralizationEnabled = stored
+        } else {
+            self.decentralizationEnabled = false
+        }
     }
 }
 

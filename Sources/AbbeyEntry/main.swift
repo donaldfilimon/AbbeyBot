@@ -70,7 +70,8 @@ enum AbbeyEntry {
           swift run AbbeyBot cli                 abbey terminal REPL
           swift run AbbeyBot help
 
-        Wrappers: Scripts/run.sh | run-server.sh | run-abbey.sh
+        Wrappers: Scripts/swift-run.sh (TMPDIR build path) | run.sh | run-server.sh | run-abbey.sh
+        Prefer: bash Scripts/swift-run.sh help   # same as Xcode swift run + --build-path $TMPDIR
         Server-only graph (Linux/Docker/swiftly): ABBEY_PACKAGE_ROLE=server
         """
     }

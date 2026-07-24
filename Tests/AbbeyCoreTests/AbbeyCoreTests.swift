@@ -425,6 +425,48 @@ struct AbbeyCoreTests {
         #expect(await bridge.state == .disconnected)
     }
 
+    @Test func twitchIRCParserPrivmsg() {
+        let line = ":alice!alice@alice.tmi.twitch.tv PRIVMSG #mychan :hello world"
+        let msg = TwitchIRCParser.parsePrivmsg(line)
+        #expect(msg?.channel == "mychan")
+        #expect(msg?.login == "alice")
+        #expect(msg?.text == "hello world")
+        let tagged = "@badge-info=;badges= :bob!bob@bob.tmi.twitch.tv PRIVMSG #x :hi"
+        #expect(TwitchIRCParser.parsePrivmsg(tagged)?.login == "bob")
+        #expect(TwitchIRCParser.parsePrivmsg("PING :tmi.twitch.tv") == nil)
+    }
+
+    @Test func industryProfilePromptSuffixes() {
+        #expect(IndustryProfile.general.promptSuffix.isEmpty)
+        #expect(!IndustryProfile.healthcare.promptSuffix.isEmpty)
+        #expect(IndustryProfile.resolve("FINANCE") == .finance)
+        #expect(IndustryProfile.resolve("nope") == .general)
+    }
+
+    @Test func wdbxMemoryFacadeRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("j.jsonl")
+        let facade = WDBXMemoryFacade(journalURL: url)
+        let exp = Experience(
+            state: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            action: 0,
+            reward: 1,
+            nextState: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            done: true
+        )
+        try facade.remember(exp)
+        #expect(try facade.recent(limit: 5).count == 1)
+    }
+
+    @Test func decentralizationPolicyRejectsEnabled() {
+        #expect(throws: DecentralizationPolicy.ValidationError.self) {
+            try DecentralizationPolicy(enabled: true).validate()
+        }
+        try! DecentralizationPolicy.disabled.validate()
+    }
+
     @Test func discordBridgeDryRunSkipsGateway() async {
         let bridge = DiscordBridge()
         await bridge.connect(token: "", hooks: DiscordEventHooks(), dryRun: true)

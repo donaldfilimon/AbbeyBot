@@ -128,11 +128,22 @@ public actor BotRuntime {
         await scheduler.start()
         let twitchToken = config.twitchOAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if !twitchToken.isEmpty {
+            let hooks = TwitchEventHooks { [weak self] msg in
+                guard let self else { return }
+                await self.ingestMessage(
+                    content: msg.text,
+                    channelId: msg.channel,
+                    guildId: "twitch",
+                    authorId: msg.login,
+                    discordMessageId: "twitch-\(UUID().uuidString)"
+                )
+            }
             await twitchBridge.connect(
                 oauthToken: twitchToken,
                 login: config.twitchBotLogin,
                 channel: config.twitchChannel,
-                dryRun: config.dryRun
+                dryRun: config.dryRun,
+                hooks: hooks
             )
         }
         metricsListener = Task { [weak self] in
