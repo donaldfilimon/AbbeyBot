@@ -4,15 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Full agent instructions (ops, personas, safety policy, deferred features) live in [`AGENTS.md`](./AGENTS.md) — **read that file before making non-trivial changes.** This file is a quick-reference layer on top of it.
 
-## What this is
-
-AbbeyBot: one SwiftPM package, **three products, one shared brain**, macOS 27 / Swift 6.4 language mode.
-
-- **Desktop** — `AbbeyBotApp` (SwiftUI + SwiftData), launched by bare `swift run`.
-- **Server** — `AbbeyServer` (Vapor + Fluent/Postgres, Leaf status page, `/api/*`, `/dashboard` React SPA), launched by `swift run AbbeyBot serve`.
-- **CLI** — `abbey` (`AbbeyCLI`, terminal REPL, local SQLite), launched by `swift run AbbeyBot cli`.
-
-All three route through `AbbeyEntry` (the package's sole `@main`), which dispatches on the first argument (`serve` / `cli` / nothing → desktop).
+All three products route through `AbbeyEntry` (the package's sole `@main`), which dispatches on the first argument (`serve` / `cli` / nothing → desktop).
 
 ## Commands
 
@@ -55,17 +47,6 @@ bun run build      # tsc -b && vite build → packed into Sources/AbbeyServer/Re
 **`bash Scripts/verify-all.sh` is the gate of record**, not GitHub Actions — hosted workflows on this private repo currently fail at startup (0 jobs) pending Actions billing/quota. Re-run `abbey-ci` once that's unblocked.
 
 ## Architecture
-
-```
-Sources/AbbeyCore/      shared brain: personas, inference, DiscordBM bridge, DQN, IntentClassifier — no SwiftData
-Sources/AbbeyServerKit/ Fluent-backed BotRuntime + Models + Persistence — shared by AbbeyServer and abbey CLI
-Sources/AbbeyEntry/     sole @main; dispatches desktop | serve | cli
-Sources/AbbeyBotApp/    SwiftUI + SwiftData desktop UI (Engine/Equity/Models/Views)
-Sources/AbbeyServer/    Vapor HTTP + Leaf status page + Routes; serves web/'s built SPA
-Sources/AbbeyCLI/       abbey terminal REPL
-Tests/                  AbbeyCoreTests, AbbeyCLITests, AbbeyServerKitTests (desktop has no hosted CI — needs a macOS 27 host)
-web/                    React 19 + Vite dashboard SPA, built into Sources/AbbeyServer/Resources/Public/
-```
 
 **Persistence split:** desktop uses SwiftData directly; server and CLI share `AbbeyServerKit`'s Fluent engine (`BotRuntime`) but keep **separate databases** — CLI defaults to local SQLite at `~/.abbey/abbey.sqlite` and only shares the server's Postgres/`DATABASE_URL` when `ABBEY_CLI_USE_SERVER_DATABASE=1` is set. Desktop optionally push/pulls against the server's `/api/state/*` (best-effort, server-wins on conflicts, never blocks local writes).
 

@@ -25,7 +25,8 @@ var packageTargets: [Target] = [
             .product(name: "Fluent", package: "fluent"),
             .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
             .product(name: "FluentSQLiteDriver", package: "fluent-sqlite-driver"),
-            .product(name: "DiscordBM", package: "DiscordBM")
+            .product(name: "DiscordBM", package: "DiscordBM"),
+            .product(name: "Crypto", package: "swift-crypto")
         ],
         path: "Sources/AbbeyServerKit",
         swiftSettings: [
@@ -80,7 +81,10 @@ var packageTargets: [Target] = [
     ),
     .testTarget(
         name: "AbbeyServerKitTests",
-        dependencies: ["AbbeyServerKit"],
+        dependencies: [
+            "AbbeyServerKit",
+            .product(name: "Crypto", package: "swift-crypto")
+        ],
         path: "Tests/AbbeyServerKitTests",
         swiftSettings: [
             .swiftLanguageMode(.v6)
@@ -145,7 +149,8 @@ let package = Package(
         .package(url: "https://github.com/vapor/fluent", from: "4.9.0"),
         .package(url: "https://github.com/vapor/fluent-postgres-driver", from: "2.9.0"),
         .package(url: "https://github.com/vapor/fluent-sqlite-driver", from: "4.6.0"),
-        .package(url: "https://github.com/vapor/leaf", from: "4.4.0")
+        .package(url: "https://github.com/vapor/leaf", from: "4.4.0"),
+        .package(url: "https://github.com/apple/swift-crypto", from: "4.5.0")
     ],
     targets: packageTargets
 )
