@@ -56,4 +56,9 @@ struct CLICommandParserTests {
         #expect(CLICommandParser.parse("/Exit") == .exit)
         #expect(CLICommandParser.parse("/Model onDevice") == .model("onDevice"))
     }
+
+    @Test func validateParsesSourceArgument() {
+        #expect(CLICommandParser.parse("/validate") == .validate(""))
+        #expect(CLICommandParser.parse("/validate func x() {}") == .validate("func x() {}"))
+    }
 }

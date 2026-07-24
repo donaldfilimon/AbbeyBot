@@ -19,9 +19,33 @@ public actor TwitchBridge {
     private var readTask: Task<Void, Never>?
     private var connection: TwitchIRCConnection?
     private var hooks = TwitchEventHooks()
+    private var isDryRun = false
     private let logger = Logger(label: "AbbeyBot.TwitchBridge")
 
     public init() {}
+
+    /// Send a channel PRIVMSG. Dry-run logs only; no-op if disconnected.
+    public func sendPrivmsg(channel: String, text: String) async {
+        let chan = channel.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !chan.isEmpty, !body.isEmpty else { return }
+        if isDryRun {
+            logger.info("dry-run: would PRIVMSG #\(chan): \(body.prefix(200))")
+            return
+        }
+        guard let connection, state == .connected else {
+            logger.warning("Twitch sendPrivmsg skipped — not connected")
+            return
+        }
+        do {
+            try await connection.send("PRIVMSG #\(chan) :\(body)")
+        } catch {
+            lastError = OperatorFacingError.message(error)
+            logger.error("Twitch PRIVMSG send failed: \(lastError ?? "")")
+        }
+    }
 
     /// - Parameters:
     ///   - oauthToken: Twitch OAuth access token (with or without `oauth:` prefix).
@@ -37,6 +61,7 @@ public actor TwitchBridge {
         hooks: TwitchEventHooks = TwitchEventHooks()
     ) async {
         self.hooks = hooks
+        self.isDryRun = dryRun
         let nick = login.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let chan = channel.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
@@ -44,6 +69,7 @@ public actor TwitchBridge {
 
         if dryRun {
             await disconnect()
+            isDryRun = true
             state = .connected
             lastError = nil
             loginNick = nick.isEmpty ? "dry-run" : nick
