@@ -72,13 +72,13 @@ ABBEY_PACKAGE_ROLE=server /usr/bin/xcrun --toolchain default swift run AbbeyBot 
 # without Docker: DATABASE_URL=sqlite://${TMPDIR}/abbey.sqlite …
 ```
 
-Routes: `GET /health`, `GET /dashboard` (React SPA when `web/` is built into `Sources/AbbeyServer/Resources/Public/`), `GET /api/metrics`, `GET /api/status`, `POST /api/ingest` / `POST /api/state/*` / list `GET /api/users|channels|messages|reputation|interactions|equity` (optional `ABBEY_API_TOKEN` when set — Bearer or `X-Abbey-Token`; leave unset for open local SPA list tabs), `GET /api/state/user|channel`, `GET /` (Leaf: Operator UI + JSON API; dashboard link only if built). Optional `?limit=` (default 100, max 500) on list endpoints.
+Routes: `GET /health`, `GET /dashboard` (React SPA when `web/` is built into `Sources/AbbeyServer/Resources/Public/`), `GET /api/metrics`, `GET /api/status`, `GET /api/sync-status` (last desktop-reported sync outcome — Sync tab), `POST /api/ingest` / `POST /api/state/*` (`remember`/`forget`/`sync-status`) / list `GET /api/users|channels|messages|reputation|interactions|equity` (optional `ABBEY_API_TOKEN` when set — Bearer or `X-Abbey-Token`; leave unset for open local SPA list tabs), `GET /api/state/user|channel`, `GET /` (Leaf: Operator UI + JSON API; dashboard link only if built). Optional `?limit=` (default 100, max 500) and `?since=<unix epoch seconds>` (incremental cursor) on list endpoints.
 
 Deploy: `Dockerfile` (Bun SPA stage → `swiftlang/swift:nightly-6.4.x-bookworm`, copies `AbbeyBot_AbbeyServer.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`. Linux CI (`abbey-ci.yml`) builds `web/` with Bun (frozen lockfile + `bun test` + `bun run build`) before the Swift docker build so SPM packs dashboard assets.
 
 Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, Leaf `GET /`, `/dashboard` (200 if built, 404 skip if not), `/api/status`, `POST /api/ingest`, list endpoints, and `/api/state` remember/user/channel.
 
-Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — best-effort **push** (ingest/remember/forget) plus **pull** on launch and Settings “Pull now” (server-wins users/channels/equity; messages insert-if-missing by Discord id; reputation/interactions insert-if-missing by Fluent `id`→`serverId`, rows without id skipped; limit 500). Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session.
+Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — durable **push** (ingest/remember/forget/sync-status; failed POSTs retry via a JSONL outbox at `~/.abbey/pending-pushes.jsonl`, flushed on the next pull attempt) plus **pull** on launch and Settings “Pull now”, using `?since=` cursors to fetch only rows changed since the last pull. Users/channels use **last-write-wins by `updatedAt`** (an unsynced local edit newer than the remote row survives instead of being clobbered — not resilient to clock skew); equity is still server-wins; messages insert-if-missing by Discord id; reputation/interactions insert-if-missing by Fluent `id`→`serverId`, rows without id skipped; limit 500. Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session, and the SPA's Sync tab shows the server's view of the same (desktop-reported).
 
 ## CLI ops
 
@@ -165,10 +165,10 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 - **Twitch EventSub / PubSub** — IRC PRIVMSG ingest ships; `POST /api/twitch/eventsub` stub (challenge echo + log-only); full subscribe + HMAC verify deferred.
 - **Codegen sandbox** — static `CodeProposalValidator` only; no isolated execution sandbox.
 - **Real WDBX / blockchain** — facade + policy stubs only; Zig abi WDBX and chain nodes are out of this package.
-- Full CRDT / cursor pagination / CLI↔desktop sync — see Deferred below.
+- Full CRDT merge, delete propagation, CLI↔desktop sync — see Deferred below (`?since=` cursors and last-write-wins for users/channels now ship).
 
 ## Deferred
 
-Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
+Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet, and a real implementation (Voice Gateway WS + UDP/IP-discovery + RTP + Opus codec + audio capture/playback) is a standalone effort on the order of the rest of this package combined. Deliberately out of scope; not planned alongside other sync/UI work. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
 
-Full CRDT / cursor pagination / CLI↔desktop sync — desktop ships **push + pull** (launch + Settings “Pull now”; server-wins users/channels/equity; messages by Discord id; reputation/interactions by Fluent id; limit 500). No CRDT merge and no `?since=` cursors.
+Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` incremental cursors (launch + Settings “Pull now”) and **last-write-wins by `updatedAt`** for users/channels (equity is still server-wins; messages by Discord id; reputation/interactions by Fluent id; limit 500). LWW compares each side's own wall clock — not resilient to significant clock skew between desktop and server. No CRDT merge, no delete/tombstone propagation, and the CLI still doesn't participate in sync at all (`abbey` is local-SQLite-only per its own DATABASE_URL section above).
