@@ -30,6 +30,7 @@
     <dt>Channels</dt><dd>#(channelCount)</dd>
     <dt>Messages</dt><dd>#(messageCount)</dd>
     <dt>Reputation events</dt><dd>#(reputationEventCount)</dd>
+    <dt>Equity ideas</dt><dd>#(equityIdeaCount)</dd>
     <dt>Ingested (session)</dt><dd>#(messagesIngested)</dd>
     <dt>Live Discord ingest</dt><dd>#(liveIngestCount)</dd>
     <dt>Inference calls</dt><dd>#(inferenceCalls)</dd>
@@ -42,7 +43,8 @@
     <a href="/api/channels">/api/channels</a> ·
     <a href="/api/messages">/api/messages</a> ·
     <a href="/api/reputation">/api/reputation</a> ·
-    <a href="/api/interactions">/api/interactions</a>
+    <a href="/api/interactions">/api/interactions</a> ·
+    <a href="/api/equity">/api/equity</a>
   </nav>
 </body>
 </html>

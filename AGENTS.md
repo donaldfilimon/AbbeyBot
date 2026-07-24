@@ -48,7 +48,7 @@ docker compose up -d db          # Postgres 16
 # without Docker: DATABASE_URL=sqlite://${TMPDIR}/abbey.sqlite …
 ```
 
-Routes: `GET /health`, `GET /api/metrics`, `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
+Routes: `GET /health`, `GET /api/metrics`, `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
 
 Deploy: `Dockerfile` (`swift:6.0-bookworm`, copies `AbbeyServer_*.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`.
 
@@ -58,6 +58,6 @@ Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker i
 
 Shipped: Vapor HTTP, Fluent/Postgres, Leaf status, Docker/systemd, macOS 27 desktop APIs.
 
-## Phase 3a
+## Phase 3a / 3b
 
-Shipped: richer `/api/*` list endpoints + Leaf dialect/counts. Still deferred: React SPA, Voice, SwiftData↔Postgres sync.
+Shipped: richer `/api/*` list endpoints + Leaf dialect/counts + `/api/equity`. Still deferred: React SPA, Voice, SwiftData↔Postgres sync.

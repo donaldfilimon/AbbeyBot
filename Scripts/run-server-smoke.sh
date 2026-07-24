@@ -74,10 +74,13 @@ echo "======== 4/5 assert /health ========"
 cat /tmp/abbeyserver-health.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-health.json")); assert d.get("status")=="ok", d'
 
-echo "======== 5/5 assert /api/messages ========"
+echo "======== 5/5 assert /api/messages + /api/equity ========"
 curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=10" >/tmp/abbeyserver-messages.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-messages.json")); assert isinstance(d, list), d'
 echo "messages_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-messages.json"))))')"
+curl -sf "http://127.0.0.1:${HTTP_PORT}/api/equity?limit=10" >/tmp/abbeyserver-equity.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-equity.json")); assert isinstance(d, list), d'
+echo "equity_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-equity.json"))))')"
 
 if [[ "$USE_SQLITE" == "1" ]]; then
   echo "(note: smoke used sqlite file because Docker/Postgres was unavailable)"

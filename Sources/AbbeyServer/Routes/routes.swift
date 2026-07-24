@@ -55,6 +55,10 @@ func routes(_ app: Application) throws {
         try await InteractionRepository.recent(limit: clampedLimit(req), on: req.db)
     }
 
+    app.get("api", "equity") { req async throws -> [EquityIdea] in
+        try await EquityRepository.recent(limit: clampedLimit(req), on: req.db)
+    }
+
     app.get { req async throws -> View in
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
@@ -72,7 +76,8 @@ func routes(_ app: Application) throws {
                 "userCount": "\(counts.users)",
                 "channelCount": "\(counts.channels)",
                 "messageCount": "\(counts.messages)",
-                "reputationEventCount": "\(counts.reputationEvents)"
+                "reputationEventCount": "\(counts.reputationEvents)",
+                "equityIdeaCount": "\(counts.equityIdeas)"
             ]
         )
     }

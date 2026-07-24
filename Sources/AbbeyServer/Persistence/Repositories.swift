@@ -140,11 +140,25 @@ enum InteractionRepository {
 }
 
 enum StatusRepository {
-    static func counts(on db: any Database) async throws -> (users: Int, channels: Int, messages: Int, reputationEvents: Int) {
+    static func counts(on db: any Database) async throws -> (users: Int, channels: Int, messages: Int, reputationEvents: Int, equityIdeas: Int) {
         let users = try await UserMemory.query(on: db).count()
         let channels = try await ChannelContext.query(on: db).count()
         let messages = try await MessageRepository.count(on: db)
         let reputationEvents = try await ReputationRepository.count(on: db)
-        return (users, channels, messages, reputationEvents)
+        let equityIdeas = try await EquityRepository.count(on: db)
+        return (users, channels, messages, reputationEvents, equityIdeas)
+    }
+}
+
+enum EquityRepository {
+    static func recent(limit: Int, on db: any Database) async throws -> [EquityIdea] {
+        try await EquityIdea.query(on: db)
+            .sort(\.$generatedAt, .descending)
+            .limit(limit)
+            .all()
+    }
+
+    static func count(on db: any Database) async throws -> Int {
+        try await EquityIdea.query(on: db).count()
     }
 }
