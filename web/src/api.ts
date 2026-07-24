@@ -84,6 +84,16 @@ export interface InteractionRow {
   createdAt: string | null;
 }
 
+export interface SyncStatusResponse {
+  id: string | null;
+  lastPullAt: string | null;
+  lastPullError: string | null;
+  lastPushAt: string | null;
+  lastPushError: string | null;
+  pendingPushCount: number;
+  reportedAt: string | null;
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { Accept: "application/json" } });
   if (!res.ok) {
@@ -126,4 +136,8 @@ export function fetchEquity(limit: number): Promise<EquityRow[]> {
 
 export function fetchInteractions(limit: number): Promise<InteractionRow[]> {
   return getJSON<InteractionRow[]>(`/api/interactions?limit=${limit}`);
+}
+
+export function fetchSyncStatus(): Promise<SyncStatusResponse> {
+  return getJSON<SyncStatusResponse>("/api/sync-status");
 }
