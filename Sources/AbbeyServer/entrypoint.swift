@@ -1,11 +1,11 @@
 import Foundation
 import Vapor
 
-@main
-enum AbbeyServerMain {
-    static func main() async {
+/// HTTP + Discord server entry (invoked as `swift run -- serve`).
+public enum AbbeyServerMain {
+    public static func main(arguments: [String] = CommandLine.arguments) async {
         do {
-            var env = try Environment.detect()
+            var env = try Environment.detect(arguments: arguments)
             try LoggingSystem.bootstrap(from: &env)
             let app = try await Application.make(env)
             do {

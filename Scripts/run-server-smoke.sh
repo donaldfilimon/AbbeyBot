@@ -7,12 +7,13 @@ BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.server.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 COMPOSE=(docker compose)
 
-echo "======== 1/8 build AbbeyServer ========"
-"${SWIFT[@]}" build --product AbbeyServer --build-path "$BUILD_PATH"
+echo "======== 1/8 build AbbeyBot (server graph) ========"
+export ABBEY_PACKAGE_ROLE=server
+"${SWIFT[@]}" build --product AbbeyBot --build-path "$BUILD_PATH"
 
-BIN="$BUILD_PATH/debug/AbbeyServer"
+BIN="$BUILD_PATH/debug/AbbeyBot"
 if [[ ! -x "$BIN" ]]; then
-  BIN="$(find "$BUILD_PATH" -name AbbeyServer -type f -perm +111 | head -1)"
+  BIN="$(find "$BUILD_PATH" -name AbbeyBot -type f -perm +111 | head -1)"
 fi
 test -x "$BIN"
 

@@ -2,12 +2,13 @@
 # Resolve which `swift` to use for Abbey launchers.
 #
 # Default: Xcode via xcrun (required for desktop SwiftData).
-# Opt-in swiftly for AbbeyServer / abbey only:
+# Opt-in swiftly for server/CLI (server-only package graph):
 #   ABBEY_SWIFT=swiftly bash Scripts/run-server.sh
 #
 # Usage (sourced by run*.sh):
 #   source Scripts/abbey-swift.sh
-#   abbey_swift_run <build-path-suffix> <product> [-- args...]
+#   abbey_swift_run <build-path-suffix> <role> [-- args...]
+#   role: desktop | server | cli
 set -euo pipefail
 
 abbey_resolve_swift() {
@@ -35,13 +36,13 @@ abbey_resolve_swift() {
 
 abbey_swift_run() {
   local build_suffix="$1"
-  local product="$2"
+  local role="$2"
   shift 2
 
   abbey_resolve_swift
 
-  if [[ "$product" == "AbbeyBot" && "$ABBEY_SWIFT_LABEL" == "swiftly" ]]; then
-    echo "error: desktop AbbeyBot cannot build under swiftly (SwiftData @Query / \\.modelContext break)." >&2
+  if [[ "$role" == "desktop" && "$ABBEY_SWIFT_LABEL" == "swiftly" ]]; then
+    echo "error: desktop cannot build under swiftly (SwiftData @Query / \\.modelContext break)." >&2
     echo "Use: bash Scripts/run.sh   # Xcode toolchain" >&2
     return 1
   fi
@@ -52,5 +53,24 @@ abbey_swift_run() {
     echo "Using swiftly PATH swift ($(command -v swift))" >&2
   fi
 
-  exec "${ABBEY_SWIFT_BIN[@]}" run --build-path "$build_path" "$product" "$@"
+  case "$role" in
+    desktop)
+      unset ABBEY_PACKAGE_ROLE || true
+      # Sole executable product — bare `swift run` also works without naming it.
+      exec "${ABBEY_SWIFT_BIN[@]}" run --build-path "$build_path" AbbeyBot "$@"
+      ;;
+    server)
+      export ABBEY_PACKAGE_ROLE=server
+      # Name the product so `serve` is an app arg, not an SPM product name.
+      exec "${ABBEY_SWIFT_BIN[@]}" run --build-path "$build_path" AbbeyBot serve "$@"
+      ;;
+    cli)
+      export ABBEY_PACKAGE_ROLE=server
+      exec "${ABBEY_SWIFT_BIN[@]}" run --build-path "$build_path" AbbeyBot cli "$@"
+      ;;
+    *)
+      echo "abbey_swift_run: role must be desktop|server|cli (got: $role)" >&2
+      return 1
+      ;;
+  esac
 }

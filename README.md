@@ -11,34 +11,29 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 | Core | `AbbeyCore` — brain, personas, inference, DiscordBM |
 | Discord | DiscordBM gateway + REST (voice presence join/leave; audio deferred) |
 
-## Run desktop
+## Run
 
-Bare `swift run` fails (three executables). Name a product or use a wrapper.
-
-```bash
-bash Scripts/run.sh          # Xcode only — required for SwiftData
-```
-
-Swiftly / DEVELOPMENT-SNAPSHOT **cannot** build the desktop app (`@Query` / `\.modelContext` break).
-
-## Run server
+One executable product (`AbbeyBot`). Bare `swift run` launches the **desktop** app (macOS / Xcode).
 
 ```bash
-cp .env.example .env   # fill DISCORD_BOT_TOKEN, etc.
-docker compose up -d db   # optional if using Postgres
+unset TOOLCHAINS
+swift run                         # desktop (Xcode toolchain; not swiftly)
+swift run AbbeyBot serve          # AbbeyServer
+swift run AbbeyBot cli            # abbey REPL
+# or wrappers:
+bash Scripts/run.sh
 bash Scripts/run-server.sh
-# optional global swiftly:
-ABBEY_SWIFT=swiftly bash Scripts/run-server.sh
+bash Scripts/run-abbey.sh
 ```
 
-Or full stack: `docker compose up --build`. Unset `DATABASE_URL` falls back to sqlite under `$TMPDIR` when Postgres is down.
-
-## Run abbey CLI
+Swiftly / DEVELOPMENT-SNAPSHOT **cannot** build the desktop target. For server/CLI under swiftly:
 
 ```bash
-bash Scripts/run-abbey.sh
-ABBEY_SWIFT=swiftly bash Scripts/run-abbey.sh   # optional
+ABBEY_SWIFT=swiftly bash Scripts/run-server.sh   # sets ABBEY_PACKAGE_ROLE=server
+ABBEY_SWIFT=swiftly bash Scripts/run-abbey.sh
 ```
+
+Unset `DATABASE_URL` falls back to sqlite under `$TMPDIR` when Postgres is down. Full stack: `docker compose up --build`.
 
 Local SQLite state lives at `~/.abbey/abbey.sqlite` (directory auto-created); override with `DATABASE_URL` same as the server (`postgres://…`, `sqlite://memory`, `sqlite://<path>`). Set `DISCORD_BOT_TOKEN` (and optional `DISCORD_DEV_GUILD_ID`) to connect live to Discord, otherwise it runs local-only with a warning logged.
 
@@ -57,7 +52,7 @@ bash Scripts/run-server-smoke.sh   # Postgres via compose, or sqlite file if Doc
 bash Scripts/verify-all.sh         # both
 ```
 
-CI (`.github/workflows/abbey-ci.yml`) builds the dashboard SPA (`bun test` + `bun run build`), then builds `AbbeyCore`/`AbbeyServerKit`/`AbbeyServer`/`AbbeyCLI` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
+CI (`.github/workflows/abbey-ci.yml`) builds the dashboard SPA (`bun test` + `bun run build`), then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
 
 **GitHub Actions billing:** this private repo's hosted workflows currently **`startup_failure` (0 jobs)** until Actions spending/quota is enabled under **Settings → Billing → Actions**. Use **`bash Scripts/verify-all.sh` locally** as the gate until then; after unblock, re-run **Abbey CI** (`abbey-ci`). CI is **not** green on GitHub today.
 
@@ -73,11 +68,12 @@ Slash commands: `ask`, `rep`, `remember`, `forget`, `context`, `persona`.
 
 ```
 Sources/AbbeyCore/      # shared library (no SwiftData)
-Sources/AbbeyBotApp/    # @main SwiftUI + SwiftData models
-Sources/AbbeyServer/    # Vapor executable + Fluent models
-Sources/AbbeyServerKit/ # shared Fluent-backed engine (BotRuntime, Models, Persistence) used by AbbeyServer + abbey CLI
-Sources/AbbeyCLI/       # abbey terminal chat executable
-Scripts/                # run-smoke.sh, run-server-smoke.sh
+Sources/AbbeyEntry/     # sole @main → desktop | serve | cli
+Sources/AbbeyBotApp/    # SwiftUI + SwiftData desktop (via bare `swift run`)
+Sources/AbbeyServer/    # Vapor HTTP + Discord (via `swift run -- serve`)
+Sources/AbbeyServerKit/ # shared Fluent-backed engine (BotRuntime, Models, Persistence)
+Sources/AbbeyCLI/       # abbey terminal REPL (via `swift run -- cli`)
+Scripts/                # run.sh, run-smoke.sh, run-server-smoke.sh
 deploy/abbeybot.service
 Dockerfile / docker-compose.yml
 ```

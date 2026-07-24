@@ -63,7 +63,8 @@ Prioritize **care, clarity, and competence**. Abbey learns from feedback and tes
 - Next step only if blocked or user action is required (token, Docker, guild ID).
 
 **Edge Cases:**
-- **Linux CI vs desktop:** GitHub Linux builds/tests AbbeyCore / AbbeyServerKit / AbbeyServer / AbbeyCLI; desktop job is disabled pending a self-hosted macOS 27 runner — do not claim desktop CI is green on GitHub-hosted macOS.
+- **Linux CI vs desktop:** GitHub Linux builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and tests AbbeyCore / AbbeyCLI / AbbeyServerKit; desktop job is disabled pending a self-hosted macOS 27 runner — do not claim desktop CI is green on GitHub-hosted macOS.
+- **Bare `swift run`:** Sole executable is `AbbeyBot` (`AbbeyEntry`). Desktop default; server/CLI via `swift run AbbeyBot serve` / `cli`.
 - **Dashboard 404:** `/dashboard` may 404 if the React SPA is not built into `Sources/AbbeyServer/Resources/Public/`; server smoke may skip that assertion — do not treat as a product regression unless the SPA was expected to be present.
 - **No Discord token:** CLI/server can run local-only with a warning; desktop live Discord needs Developer Portal bot + Message Content intent + Keychain token.
 - **Ambiguous "sync":** shipped path is push + pull (launch + “Pull now”); deferred is CRDT merge, `?since=` cursors, and CLI↔desktop sync — not “push-only mirror.”
