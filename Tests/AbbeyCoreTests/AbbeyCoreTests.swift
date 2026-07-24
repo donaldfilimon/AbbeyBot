@@ -52,7 +52,12 @@ struct AbbeyCoreTests {
         let left = DiscordCopy.voiceLeft(guildId: "g1")
         let idle = DiscordCopy.voiceStatus(guildId: nil, channelId: nil)
         let active = DiscordCopy.voiceStatus(guildId: "g1", channelId: "c1")
-        for sample in [joined, left, idle, active, DiscordCopy.voicePresenceOnly, DiscordCopy.voiceUnknownSubcommand] {
+        for sample in [
+            joined, left, idle, active,
+            DiscordCopy.voicePresenceOnly,
+            DiscordCopy.voiceUnknownSubcommand,
+            DiscordCopy.voiceDryRunNoGateway
+        ] {
             #expect(sample.localizedCaseInsensitiveContains("no audio") || sample.localizedCaseInsensitiveContains("presence only"))
             #expect(!sample.localizedCaseInsensitiveContains("listening to you"))
             #expect(!sample.localizedCaseInsensitiveContains("playing audio"))
@@ -69,15 +74,27 @@ struct AbbeyCoreTests {
             .join(channelId: "c1"),
             guildId: "g1",
             isConnected: false,
+            gatewayReady: false,
             join: { _, _ in .requested },
             leave: { _ in .requested }
         )
         #expect(notConnected == DiscordCopy.voiceNotConnected)
 
+        let dryRunNoGateway = await VoicePresence.perform(
+            .join(channelId: "c1"),
+            guildId: "g1",
+            isConnected: true,
+            gatewayReady: false,
+            join: { _, _ in .requested },
+            leave: { _ in .requested }
+        )
+        #expect(dryRunNoGateway == DiscordCopy.voiceDryRunNoGateway)
+
         let missingGuild = await VoicePresence.perform(
             .leave,
             guildId: "DM",
             isConnected: true,
+            gatewayReady: true,
             join: { _, _ in .requested },
             leave: { _ in .requested }
         )
@@ -87,6 +104,7 @@ struct AbbeyCoreTests {
             .join(channelId: "c9"),
             guildId: "g9",
             isConnected: true,
+            gatewayReady: true,
             join: { guild, channel in
                 #expect(guild == "g9")
                 #expect(channel == "c9")
@@ -100,6 +118,7 @@ struct AbbeyCoreTests {
             .join(channelId: "c1"),
             guildId: "g1",
             isConnected: true,
+            gatewayReady: true,
             join: { _, _ in .invalidIdentifiers },
             leave: { _ in .requested }
         )
@@ -109,6 +128,7 @@ struct AbbeyCoreTests {
             .leave,
             guildId: "g1",
             isConnected: true,
+            gatewayReady: true,
             join: { _, _ in .requested },
             leave: { _ in .gatewayUnavailable }
         )
@@ -266,6 +286,10 @@ struct AbbeyCoreTests {
         }
         config.dryRun = true
         try config.validateForStartup()
+        // Headless must not fail on desktop liveDiscord-without-token leftovers.
+        config.dryRun = false
+        config.discordBotToken = ""
+        try config.validateForStartup(scope: .headless)
     }
 
     @Test func appConfigValidateRemoteEndpoint() throws {

@@ -15,7 +15,7 @@ import Vapor
 /// `DATABASE_URL` explicitly (see `Scripts/run-server.sh`); this function does not probe
 /// the network or silently change database identity.
 public func configureRuntime(_ app: Application, defaultDatabaseURL: String) async throws -> BotRuntime {
-    try AppConfig.shared.validateForStartup()
+    try AppConfig.shared.validateForStartup(scope: .headless)
 
     let databaseURL = Environment.get("DATABASE_URL").flatMap { $0.isEmpty ? nil : $0 }
         ?? defaultDatabaseURL

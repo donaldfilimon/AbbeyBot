@@ -29,9 +29,19 @@ public enum AppConfigValidationError: Error, LocalizedError, Sendable {
     }
 }
 
+/// Where startup validation runs — desktop UserDefaults must not block headless HTTP/CLI boots.
+public enum AppConfigValidationScope: Sendable {
+    /// Desktop GUI: enforce `liveDiscord` token (unless dry-run) and full checks.
+    case desktop
+    /// AbbeyServer / `abbey` CLI: skip desktop `operatingMode` token gate; still validate numerics,
+    /// remote endpoint when `remoteCompatible`, and sync URL shape when set.
+    case headless
+}
+
 extension AppConfig {
-    /// Fail-loud checks before Discord connect / serve. Dry-run skips the liveDiscord token requirement.
-    public func validateForStartup() throws {
+    /// Fail-loud checks before Discord connect / serve.
+    /// - Parameter scope: `.desktop` (default) vs `.headless` for server/CLI.
+    public func validateForStartup(scope: AppConfigValidationScope = .desktop) throws {
         if replyCooldownSeconds < 0 {
             throw AppConfigValidationError.replyCooldownNegative
         }
@@ -52,12 +62,17 @@ extension AppConfig {
 
         let sync = syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sync.isEmpty {
-            guard let url = URL(string: sync), let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else {
+            guard let url = URL(string: sync), let scheme = url.scheme,
+                  ["http", "https"].contains(scheme.lowercased()),
+                  url.host != nil
+            else {
                 throw AppConfigValidationError.syncServerURLInvalid(sync)
             }
         }
 
-        if operatingMode == .liveDiscord, !dryRun {
+        // Desktop-only: UserDefaults may keep liveDiscord from a prior GUI session.
+        // Headless processes previously booted HTTP-only without a token — keep that.
+        if scope == .desktop, operatingMode == .liveDiscord, !dryRun {
             let token = discordBotToken.trimmingCharacters(in: .whitespacesAndNewlines)
             if token.isEmpty {
                 throw AppConfigValidationError.liveDiscordMissingToken

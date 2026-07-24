@@ -12,6 +12,8 @@ public enum DiscordCopy: Sendable {
     public static let voiceMissingGuild = "Need a server (guild) id to join or leave voice."
     public static let voiceMissingChannel = "Need a voice channel id to join."
     public static let voiceLeaveFailed = "Could not leave voice — gateway not ready (presence only — no audio)."
+    public static let voiceDryRunNoGateway =
+        "Dry-run mode — Discord gateway is not active; voice presence unavailable (connect live for presence only — no audio)."
     public static let voiceUnknownSubcommand = "Use `/voice join` or `/voice leave` (presence only — no audio)."
     public static let voicePresenceOnly = "Presence only — muted & deafened; no audio (DiscordBM has no Opus/UDP)."
 

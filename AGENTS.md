@@ -100,7 +100,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 | Principle | Behavior |
 |-----------|----------|
-| Config validate before startup | `AppConfig.validateForStartup()` — liveDiscord needs token (unless dry-run); remoteCompatible needs URL; sync URL shape; cooldown/decay ranges. Called from desktop `AbbeyBotApp` init and `configureRuntime` (server/CLI). |
+| Config validate before startup | `AppConfig.validateForStartup(scope:)` — `.desktop` (GUI) enforces `liveDiscord` token unless dry-run; `.headless` (server/CLI via `configureRuntime`) skips that UserDefaults gate so HTTP can boot without a token. Also: remoteCompatible URL; sync URL http(s)+host; cooldown/decay ranges. |
 | Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge.connect` skips gateway, logs `dry-run: would connect`, sets state connected with `botUserId=dry-run`. |
 | Durable checkpoints | `DQNAgent.save/load` + `DQNCheckpointStore` default `~/.abbey/dqn-checkpoint.json`; `*.bak` before overwrite; load on engine start; save every 100 learn steps with target sync. |
 | Experience append-only default | Replay buffer remains **in-memory** for Phase 1; durable append-only experience journal is Phase 2 — do not claim it. |

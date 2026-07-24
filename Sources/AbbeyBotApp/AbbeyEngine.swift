@@ -70,7 +70,13 @@ final class AbbeyEngine {
 
         startEventListener()
         Task { [socialBrain, scheduler, dqnAgent] in
-            try? await dqnAgent.loadCheckpointIfPresent()
+            do {
+                try await dqnAgent.loadCheckpointIfPresent()
+            } catch {
+                print(
+                    "[dqn] checkpoint load failed: \(OperatorFacingError.message(error)) — using fresh weights"
+                )
+            }
             await socialBrain.warmCache()
             await scheduler.start()
         }
@@ -493,6 +499,7 @@ final class AbbeyEngine {
             action,
             guildId: guildId,
             isConnected: await bridge.state == .connected,
+            gatewayReady: await bridge.hasGateway,
             join: { guild, channel in await bridge.joinVoice(guildId: guild, channelId: channel) },
             leave: { guild in await bridge.leaveVoice(guildId: guild) }
         )
