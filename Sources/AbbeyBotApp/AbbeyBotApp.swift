@@ -62,12 +62,39 @@ struct AbbeyBotApp: App {
             let container = try ModelContainer(for: schema, configurations: [configuration])
             return (container, false)
         } catch {
-            let fallback = ModelConfiguration(isStoredInMemoryOnly: true)
+            // Lightweight migration cannot rewrite attribute types (e.g. EquityIdea.factorBreakdown
+            // Binary Data → Codable). Wipe the on-disk store once and retry before degrading.
+            NSLog("AbbeyBot: persistent store open failed (%@); resetting %@",
+                  String(describing: error), configuration.url.path)
+            Self.removeStoreFiles(at: configuration.url)
             do {
-                let container = try ModelContainer(for: schema, configurations: [fallback])
-                return (container, true)
+                let container = try ModelContainer(for: schema, configurations: [configuration])
+                return (container, false)
             } catch {
-                fatalError("AbbeyBot: could not construct any ModelContainer: \(error)")
+                let fallback = ModelConfiguration(isStoredInMemoryOnly: true)
+                do {
+                    let container = try ModelContainer(for: schema, configurations: [fallback])
+                    return (container, true)
+                } catch {
+                    fatalError("AbbeyBot: could not construct any ModelContainer: \(error)")
+                }
+            }
+        }
+    }
+
+    /// Removes the SQLite store and its `-wal`/`-shm` sidecars so SwiftData can recreate a fresh schema.
+    private static func removeStoreFiles(at url: URL) {
+        let fm = FileManager.default
+        let candidates = [
+            url,
+            URL(fileURLWithPath: url.path + "-wal"),
+            URL(fileURLWithPath: url.path + "-shm")
+        ]
+        for file in candidates where fm.fileExists(atPath: file.path) {
+            do {
+                try fm.removeItem(at: file)
+            } catch {
+                NSLog("AbbeyBot: failed to remove store file %@: %@", file.path, String(describing: error))
             }
         }
     }
