@@ -5,6 +5,7 @@ enum CLICommand: Equatable {
     case help
     case clear
     case model(String?)
+    case validate(String)
     case exit
     case chat(String)
 }
@@ -51,6 +52,8 @@ enum CLICommandParser {
                 return .model(argument)
             }
             return .model(nil)
+        case "validate":
+            return .validate(argument ?? "")
         default:
             return .chat(trimmed)
         }

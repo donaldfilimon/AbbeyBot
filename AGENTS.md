@@ -145,7 +145,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Experience journal | Append-only JSONL `~/.abbey/dqn-experience.jsonl` via `ExperienceJournal`; `DQNAgent.remember` appends; engines call `loadExperienceJournalIfPresent()` on start into the in-memory replay buffer. |
 | Generated-code validator | `CodeProposalValidator.validate` / `acceptOrThrow` — static reject of shell/process/dlopen/network/rm patterns (not a sandbox). |
 | Rollback FS | `RollbackStore` snapshots under `~/.abbey/rollback/<name>/`; `restore` / `restoreFromBak`; checkpoint saves also snapshot when managed. |
-| Twitch IRC + chat→ingest | `TwitchBridge` + `TwitchIRCParser` — optional connect when `TWITCH_OAUTH_TOKEN` set; PRIVMSG → engine ingest with `guildId=twitch`. Dry-run supported. **Not shipped:** EventSub, PubSub. |
+| Twitch IRC + chat→ingest/reply | `TwitchBridge` + `TwitchIRCParser` — PRIVMSG → ingest (`guildId=twitch`) + persona reply via IRC; dry-run logs sends. EventSub stub: `POST /api/twitch/eventsub` (challenge + log). **Not shipped:** EventSub subscribe + HMAC, PubSub. |
 | Industry profile shell | `IndustryProfile` (`ABBEY_INDUSTRY_PROFILE`) — prompt suffix only; not HIPAA/GDPR product modules. |
 | WDBX memory facade | `WDBXMemoryFacade` over `ExperienceJournal` — local strategy memory name only; **not** Zig abi WDBX; no throughput claims. |
 | Decentralization stub | `DecentralizationPolicy` / `ABBEY_DECENTRALIZATION_ENABLED` — must stay false; startup validates. No blockchain node. |

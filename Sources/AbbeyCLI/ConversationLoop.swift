@@ -72,6 +72,23 @@ final class ConversationLoop {
                     print("Unknown inference mode '\(name)'. Valid values: \(valid)")
                 }
 
+            case .validate(let source):
+                let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else {
+                    print("Usage: /validate <source code snippet>")
+                    print("(Static CodeProposalValidator only — not a sandbox.)")
+                    continue
+                }
+                switch CodeProposalValidator.validate(trimmed) {
+                case .accepted:
+                    print("accepted (static gate only — not a sandbox)")
+                case .rejected(let reasons):
+                    print("rejected:")
+                    for reason in reasons {
+                        print("  - \(reason)")
+                    }
+                }
+
             case .exit:
                 break replLoop
 
@@ -89,6 +106,7 @@ final class ConversationLoop {
           /help            Show this help text.
           /clear           Start a new conversation (fresh channel context).
           /model [mode]    Show or set the inference mode (\(InferenceMode.allCases.map(\.rawValue).joined(separator: ", "))).
+          /validate <src>  Static CodeProposalValidator (not a sandbox).
           /exit, /quit     Quit.
         """)
     }

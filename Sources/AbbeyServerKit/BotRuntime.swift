@@ -130,6 +130,8 @@ public actor BotRuntime {
         if !twitchToken.isEmpty {
             let hooks = TwitchEventHooks { [weak self] msg in
                 guard let self else { return }
+                let botNick = (await self.twitchBridge.loginNick ?? "").lowercased()
+                if !botNick.isEmpty, msg.login == botNick { return }
                 await self.ingestMessage(
                     content: msg.text,
                     channelId: msg.channel,
@@ -137,6 +139,25 @@ public actor BotRuntime {
                     authorId: msg.login,
                     discordMessageId: "twitch-\(UUID().uuidString)"
                 )
+                if await self.scheduler.isCoolingDown(userId: msg.login, guildId: "twitch") {
+                    return
+                }
+                let intent = IntentClassifier.classify(msg.text)
+                let persona = await self.personaRouter.route(intent: intent)
+                let context = await self.personaContext(
+                    authorId: msg.login,
+                    guildId: "twitch",
+                    channelId: msg.channel
+                )
+                let response = await persona.respond(
+                    to: msg.text,
+                    context: context,
+                    inference: self.inferenceRouter
+                )
+                let reply = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !reply.isEmpty else { return }
+                await self.twitchBridge.sendPrivmsg(channel: msg.channel, text: reply)
+                await self.scheduler.markReplied(userId: msg.login, guildId: "twitch")
             }
             await twitchBridge.connect(
                 oauthToken: twitchToken,
