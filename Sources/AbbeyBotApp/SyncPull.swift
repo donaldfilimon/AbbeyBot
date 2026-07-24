@@ -27,18 +27,27 @@ enum SyncPull {
 
     /// Fetch list endpoints (`limit` clamped to 500) and upsert into `container`.
     /// Throws on network/decode/store failures; local store is only mutated after a successful fetch set.
+    ///
+    /// Pass `since` to fetch only rows the server has touched after that instant (`?since=`
+    /// cursor). Callers supply the last *successful* pull time, so a failed pull never advances
+    /// the cursor past rows that were never applied. Two caveats worth knowing:
+    /// - The cursor lives in `SyncStatus`, which is session-only — the first pull after launch
+    ///   is always a full window, and only later pulls in that session are incremental.
+    /// - The server compares against its own `updatedAt` clock, so a desktop clock running ahead
+    ///   of the server can skip rows (same clock-skew family as the last-write-wins caveat above).
     @MainActor
     static func run(
         into container: ModelContainer,
         client: AbbeyServerClient = .shared,
-        limit: Int = defaultLimit
+        limit: Int = defaultLimit,
+        since: Date? = nil
     ) async throws -> Counts {
-        async let usersTask = client.fetchUsers(limit: limit)
-        async let channelsTask = client.fetchChannels(limit: limit)
-        async let messagesTask = client.fetchMessages(limit: limit)
-        async let reputationTask = client.fetchReputation(limit: limit)
-        async let interactionsTask = client.fetchInteractions(limit: limit)
-        async let equityTask = client.fetchEquity(limit: limit)
+        async let usersTask = client.fetchUsers(limit: limit, since: since)
+        async let channelsTask = client.fetchChannels(limit: limit, since: since)
+        async let messagesTask = client.fetchMessages(limit: limit, since: since)
+        async let reputationTask = client.fetchReputation(limit: limit, since: since)
+        async let interactionsTask = client.fetchInteractions(limit: limit, since: since)
+        async let equityTask = client.fetchEquity(limit: limit, since: since)
 
         let users = try await usersTask
         let channels = try await channelsTask

@@ -159,8 +159,12 @@ final class AbbeyEngine {
         // a flushed ingest).
         _ = await AbbeyServerClient.shared.flushPendingPushes()
 
+        // Incremental after the first successful pull of the session: ask the server only for
+        // rows touched since then. Read before recordPullSuccess() below overwrites it.
+        let cursor = SyncStatus.shared.lastPullSuccessAt
+
         do {
-            let counts = try await SyncPull.run(into: modelContainer)
+            let counts = try await SyncPull.run(into: modelContainer, since: cursor)
             SyncStatus.shared.recordPullSuccess(
                 users: counts.usersUpserted,
                 channels: counts.channelsUpserted,
