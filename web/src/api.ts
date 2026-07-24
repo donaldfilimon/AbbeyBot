@@ -75,6 +75,15 @@ export interface EquityRow {
   generatedAt: string | null;
 }
 
+export interface InteractionRow {
+  commandName: string;
+  userId: string;
+  guildId: string;
+  succeeded: boolean;
+  latencyMs: number;
+  createdAt: string | null;
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { Accept: "application/json" } });
   if (!res.ok) {
@@ -113,4 +122,8 @@ export function fetchReputation(limit: number): Promise<ReputationRow[]> {
 
 export function fetchEquity(limit: number): Promise<EquityRow[]> {
   return getJSON<EquityRow[]>(`/api/equity?limit=${limit}`);
+}
+
+export function fetchInteractions(limit: number): Promise<InteractionRow[]> {
+  return getJSON<InteractionRow[]>(`/api/interactions?limit=${limit}`);
 }

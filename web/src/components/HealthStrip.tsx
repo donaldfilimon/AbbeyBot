@@ -7,41 +7,54 @@ export interface HealthStripProps {
   metricsError: string | null;
 }
 
+function pendingOr(value: string | number | undefined, errored: boolean): string {
+  if (errored) return "—";
+  if (value === undefined) return "—";
+  return String(value);
+}
+
 export function HealthStrip({
   health,
   healthError,
   metrics,
   metricsError,
 }: HealthStripProps) {
+  const statusValue = healthError ? "error" : (health?.status ?? "—");
+  const discordValue = healthError ? "error" : (health?.discord ?? "—");
+  const statusBadge = healthError ? "error" : (health?.status ?? "unknown");
+  const discordBadge = healthError ? "error" : (health?.discord ?? "unknown");
+
   return (
     <div className="health-strip" data-testid="health-strip">
       <div className="health-item">
-        <span className="health-label">Status</span>
-        <span className={`badge badge-${health?.status ?? "unknown"}`}>
-          {healthError ? "error" : (health?.status ?? "…")}
-        </span>
+        <span className="health-label">Health</span>
+        <span className={`badge badge-${statusBadge}`}>{statusValue}</span>
       </div>
       <div className="health-item">
         <span className="health-label">Discord</span>
-        <span className={`badge badge-${health?.discord ?? "unknown"}`}>
-          {healthError ? "error" : (health?.discord ?? "…")}
-        </span>
+        <span className={`badge badge-${discordBadge}`}>{discordValue}</span>
       </div>
       <div className="health-item">
         <span className="health-label">Inference calls</span>
-        <span>{metricsError ? "—" : (metrics?.inferenceCalls ?? "…")}</span>
+        <span className="health-value">
+          {pendingOr(metrics?.inferenceCalls, Boolean(metricsError))}
+        </span>
       </div>
       <div className="health-item">
         <span className="health-label">Inference failures</span>
-        <span>{metricsError ? "—" : (metrics?.inferenceFailures ?? "…")}</span>
+        <span className="health-value">
+          {pendingOr(metrics?.inferenceFailures, Boolean(metricsError))}
+        </span>
       </div>
       <div className="health-item">
-        <span className="health-label">Live ingest</span>
-        <span>{metricsError ? "—" : (metrics?.liveIngestCount ?? "…")}</span>
+        <span className="health-label">Live Discord ingest</span>
+        <span className="health-value">
+          {pendingOr(metrics?.liveIngestCount, Boolean(metricsError))}
+        </span>
       </div>
       <div className="health-item">
         <span className="health-label">Last inference error</span>
-        <span className="muted">
+        <span className="muted health-value">
           {metricsError ? "—" : metrics?.lastInferenceError || "none"}
         </span>
       </div>

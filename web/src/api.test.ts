@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchChannels, fetchHealth, fetchStatus, fetchUsers } from "./api";
+import {
+  fetchChannels,
+  fetchHealth,
+  fetchInteractions,
+  fetchStatus,
+  fetchUsers,
+} from "./api";
 
 function mockFetchOnce(body: unknown, ok = true, status = 200) {
   const response = {
@@ -71,6 +77,28 @@ describe("api client", () => {
 
     const result = await fetchChannels(100);
 
+    expect(result).toEqual(rows);
+  });
+
+  it("fetchInteractions appends the limit and returns interaction rows", async () => {
+    const rows = [
+      {
+        commandName: "remember",
+        userId: "u1",
+        guildId: "g1",
+        succeeded: true,
+        latencyMs: 12.4,
+        createdAt: "2026-07-24T12:00:00Z",
+      },
+    ];
+    mockFetchOnce(rows);
+
+    const result = await fetchInteractions(100);
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/interactions?limit=100",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
     expect(result).toEqual(rows);
   });
 
