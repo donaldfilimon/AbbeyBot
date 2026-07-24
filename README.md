@@ -84,17 +84,17 @@ Dockerfile / docker-compose.yml
 ## API (server)
 
 - `GET /health` — liveness + Discord state
-- `GET /dashboard` — React SPA (build with `bun run build` / `npm run build` in `web/`)
+- `GET /dashboard` — React SPA (build with `bun run build` / `npm run build` in `web/`); tabs include Interactions + Equity (disclaimer); load-more capped at 500
 - `GET /api/metrics` — session counters
 - `GET /api/status` — dialect + table counts + session metrics (JSON)
 - `POST /api/ingest` — headless ingest (`content`, `channelId`, `guildId`, `authorId`, optional `discordMessageId`); when `ABBEY_API_TOKEN` is set, require `Authorization: Bearer …` or `X-Abbey-Token`
 - State (desktop sync): `GET /api/state/user`, `GET /api/state/channel`, `POST /api/state/remember`, `POST /api/state/forget`
 - `GET /api/users` / `GET /api/channels` — Fluent rows (`?limit=`)
-- `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`)
-- `GET /` — Leaf status (dialect + table counts)
+- `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`, max 500)
+- `GET /` — Leaf status; Operator UI + JSON API nav; Dashboard SPA link when `Public/index.html` exists, else build hint
 
-Desktop optional sync: Settings / `ABBEY_SYNC_SERVER_URL` + `ABBEY_SYNC_API_TOKEN` best-effort mirrors ingest/remember/forget to AbbeyServer (failures never block local SwiftData writes).
+Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) best-effort mirrors ingest/remember/forget (failures never block local SwiftData writes).
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA, one-way desktop→server HTTP sync. Still deferred: Discord Voice; full bidirectional SwiftData↔Postgres sync.
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, one-way desktop→server HTTP sync. Still deferred: Discord Voice; full bidirectional SwiftData↔Postgres sync.

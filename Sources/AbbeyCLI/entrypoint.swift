@@ -34,8 +34,10 @@ enum AbbeyCLIMain {
             try await app.asyncShutdown()
         } catch {
             app.logger.report(error: error)
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            FileHandle.standardError.write(Data("abbey failed to start: \(detail)\n".utf8))
             try? await app.asyncShutdown()
-            throw error
+            Foundation.exit(1)
         }
     }
 }

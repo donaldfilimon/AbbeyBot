@@ -8,22 +8,26 @@ struct ConfirmationSheetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Confirm \(request.kind.rawValue)", systemImage: "exclamationmark.shield.fill")
+            Label("Confirm \(kindTitle)", systemImage: "exclamationmark.shield.fill")
                 .font(.title2.bold())
                 .foregroundStyle(.red)
+                .accessibilityAddTraits(.isHeader)
 
             Grid(alignment: .leading, verticalSpacing: 8) {
                 GridRow {
                     Text("Target user").foregroundStyle(.secondary)
                     Text(request.targetUserId)
+                        .textSelection(.enabled)
                 }
                 GridRow {
                     Text("Guild").foregroundStyle(.secondary)
                     Text(request.guildId)
+                        .textSelection(.enabled)
                 }
                 GridRow {
                     Text("Reason").foregroundStyle(.secondary)
                     Text(request.reason)
+                        .textSelection(.enabled)
                 }
                 GridRow {
                     Text("Requested").foregroundStyle(.secondary)
@@ -31,7 +35,7 @@ struct ConfirmationSheetView: View {
                 }
             }
 
-            Text("This action was routed through ConfirmationGate because ABBEY_CONFIRMATION_REQUIRED is on. Cancelling here stops it from executing.")
+            Text("Destructive actions need an explicit OK when confirmation is enabled in Settings. Cancel stops this from running.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -42,8 +46,11 @@ struct ConfirmationSheetView: View {
                         dismiss()
                     }
                 }
+                .keyboardShortcut(.cancelAction)
+
                 Spacer()
-                Button("Confirm \(request.kind.rawValue.capitalized)", role: .destructive) {
+
+                Button("Confirm \(kindTitle)", role: .destructive) {
                     Task {
                         await engine.confirmationGate.confirm(request.id)
                         dismiss()
@@ -54,11 +61,19 @@ struct ConfirmationSheetView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 420)
+        .frame(minWidth: 420, idealWidth: 480, minHeight: 220)
         .onDisappear {
             // Safety net if the sheet is torn down without Confirm/Cancel (e.g. window
             // close). `cancel` is a no-op once the continuation is already resumed.
             Task { await engine.confirmationGate.cancel(request.id) }
+        }
+    }
+
+    private var kindTitle: String {
+        switch request.kind {
+        case .purge: return "Purge"
+        case .kick: return "Kick"
+        case .ban: return "Ban"
         }
     }
 }

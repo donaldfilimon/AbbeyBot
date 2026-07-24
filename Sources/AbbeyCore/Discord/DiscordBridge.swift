@@ -7,6 +7,16 @@ public enum DiscordConnectionState: String, Sendable {
     case connecting
     case connected
     case failed
+
+    /// Title-case label for dashboards and forms (not the wire `rawValue`).
+    public var displayName: String {
+        switch self {
+        case .connected: return "Connected"
+        case .connecting: return "Connecting…"
+        case .failed: return "Failed"
+        case .disconnected: return "Disconnected"
+        }
+    }
 }
 
 /// Owns the DiscordBM gateway manager and exposes connect/disconnect for desktop + server.

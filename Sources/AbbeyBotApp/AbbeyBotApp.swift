@@ -73,7 +73,7 @@ struct AbbeyBotApp: App {
             // Binary Data → Codable). Move the on-disk store aside (not delete — keeps it available
             // for manual recovery/inspection) and retry with a fresh store before degrading.
             NSLog("AbbeyBot: persistent store open failed (%@); backing up %@",
-                  String(describing: error), configuration.url.path)
+                  error.localizedDescription, configuration.url.path)
             Self.backUpStoreFiles(at: configuration.url)
             do {
                 let container = try ModelContainer(for: schema, configurations: [configuration])
@@ -106,7 +106,7 @@ struct AbbeyBotApp: App {
             do {
                 try fm.moveItem(at: file, to: backupURL)
             } catch {
-                NSLog("AbbeyBot: failed to back up store file %@: %@", file.path, String(describing: error))
+                NSLog("AbbeyBot: failed to back up store file %@: %@", file.path, error.localizedDescription)
             }
         }
     }

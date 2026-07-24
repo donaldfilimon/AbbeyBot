@@ -43,10 +43,14 @@ struct PersonaSwitcherView: View {
                 Divider()
 
                 Text("Test prompt").font(.headline)
+                Text("Uses the active persona and the same reply-cooldown rules as live Discord.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 HStack {
-                    TextField("Channel", text: $testChannelId)
-                    TextField("Guild", text: $testGuildId)
-                    TextField("Author", text: $testAuthorId)
+                    TextField("Channel ID", text: $testChannelId)
+                    TextField("Guild ID", text: $testGuildId)
+                    TextField("Author ID", text: $testAuthorId)
                 }
                 .textFieldStyle(.roundedBorder)
 
@@ -97,7 +101,7 @@ struct PersonaSwitcherView: View {
         statusMessage = nil
 
         if await engine.scheduler.isCoolingDown(userId: testAuthorId, guildId: testGuildId) {
-            statusMessage = "Reply cooldown active (ABBEY_REPLY_COOLDOWN_SECONDS). Wait and try again."
+            statusMessage = "Reply cooldown is active for this author in this guild. Wait a moment, then try again (Settings → Reply cooldown)."
             return
         }
 
