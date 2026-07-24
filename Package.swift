@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "AbbeyCore", targets: ["AbbeyCore"]),
+        .library(name: "AbbeyServerKit", targets: ["AbbeyServerKit"]),
         .executable(name: "AbbeyBot", targets: ["AbbeyBotApp"]),
         .executable(name: "AbbeyServer", targets: ["AbbeyServer"]),
         .executable(name: "abbey", targets: ["AbbeyCLI"])
@@ -96,6 +97,14 @@ let package = Package(
             name: "AbbeyCLITests",
             dependencies: ["AbbeyCLI"],
             path: "Tests/AbbeyCLITests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
+        .testTarget(
+            name: "AbbeyServerKitTests",
+            dependencies: ["AbbeyServerKit"],
+            path: "Tests/AbbeyServerKitTests",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
             ]

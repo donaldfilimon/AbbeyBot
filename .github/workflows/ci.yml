@@ -42,6 +42,11 @@ jobs:
       - name: Test AbbeyCLITests
         run: swift test --filter AbbeyCLITests
 
+      - name: Test AbbeyServerKitTests
+        env:
+          DATABASE_URL: sqlite://memory
+        run: swift test --filter AbbeyServerKitTests
+
   macos-desktop:
     # AbbeyBotApp needs a macOS 27 + Xcode host, which GitHub-hosted macos-* runners do
     # not currently provide (they lag the newest macOS release by months). This job is a

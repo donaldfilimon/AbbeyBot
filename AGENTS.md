@@ -31,7 +31,7 @@ bash Scripts/run-abbey.sh    # abbey CLI (loads .env if present)
 
 Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
 
-CI: `.github/workflows/ci.yml`, Linux job (`swift:6.4-bookworm` container) builds + tests `AbbeyCore`/`AbbeyServerKit`/`AbbeyServer`/`AbbeyCLI`. Desktop job disabled (`if: false`) pending a self-hosted macOS 27 runner — GitHub-hosted `macos-*` runners don't satisfy the pin.
+CI: `.github/workflows/ci.yml`, Linux job (`swift:6.4-bookworm` container) builds `AbbeyCore`/`AbbeyServerKit`/`AbbeyServer`/`AbbeyCLI` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`. Desktop job disabled (`if: false`) pending a self-hosted macOS 27 runner — GitHub-hosted `macos-*` runners don't satisfy the pin.
 
 ## Discord live path (desktop)
 
