@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Launch AbbeyServer. Default toolchain: Xcode. For global swiftly:
-#   ABBEY_SWIFT=swiftly bash Scripts/run-server.sh
+# Launch AbbeyServer via unified AbbeyBot entry (`swift run -- serve`).
+# Swiftly: ABBEY_SWIFT=swiftly bash Scripts/run-server.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -23,4 +23,4 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 HOST="${HTTP_HOSTNAME:-127.0.0.1}"
 PORT="${HTTP_PORT:-8080}"
-abbey_swift_run server AbbeyServer -- serve --hostname "$HOST" --port "$PORT"
+abbey_swift_run server server --hostname "$HOST" --port "$PORT"

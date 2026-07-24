@@ -3,10 +3,10 @@ import AbbeyServerKit
 import Foundation
 import Vapor
 
-@main
-enum AbbeyCLIMain {
-    static func main() async throws {
-        var env = try Environment.detect()
+/// Terminal REPL entry (invoked as `swift run -- cli`).
+public enum AbbeyCLIMain {
+    public static func main(arguments: [String] = CommandLine.arguments) async throws {
+        var env = try Environment.detect(arguments: arguments)
         try LoggingSystem.bootstrap(from: &env)
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path

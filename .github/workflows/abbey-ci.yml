@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SWIFT_IMAGE: swiftlang/swift:nightly-6.4.x-bookworm
+      # Omit SwiftUI/SwiftData desktop target on Linux.
+      ABBEY_PACKAGE_ROLE: server
     steps:
       - uses: actions/checkout@v4
 
@@ -43,31 +45,27 @@ jobs:
 
       - name: Resolve dependencies
         run: >
-          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift package resolve
 
-      - name: Build (server + CLI + core)
+      - name: Build (unified AbbeyBot server graph)
         run: >
-          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
-          swift build
-          --target AbbeyCore
-          --target AbbeyServerKit
-          --target AbbeyServer
-          --target AbbeyCLI
+          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          swift build --product AbbeyBot
 
       - name: Test AbbeyCoreTests
         run: >
-          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyCoreTests
 
       - name: Test AbbeyCLITests
         run: >
-          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyCLITests
 
       - name: Test AbbeyServerKitTests
         env:
           DATABASE_URL: sqlite://memory
         run: >
-          docker run --rm -e DATABASE_URL -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm -e ABBEY_PACKAGE_ROLE -e DATABASE_URL -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyServerKitTests

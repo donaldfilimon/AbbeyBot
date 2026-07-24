@@ -3,8 +3,15 @@ import SwiftData
 import AppKit
 import AbbeyCore
 
-/// Root entry point for AbbeyBot desktop — SwiftUI + SwiftData + DiscordBM.
-@main
+/// Public entry for unified `AbbeyEntry` (`swift run` → desktop).
+public enum AbbeyDesktopMain {
+    @MainActor
+    public static func main() {
+        AbbeyBotApp.main()
+    }
+}
+
+/// Desktop SwiftUI + SwiftData app (internal; launched via `AbbeyDesktopMain`).
 struct AbbeyBotApp: App {
     @State private var engine: AbbeyEngine
     @State private var didActivate = false
