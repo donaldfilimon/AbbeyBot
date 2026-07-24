@@ -64,6 +64,60 @@ struct AbbeyCoreTests {
         #expect(VoiceAction.leave == .leave)
     }
 
+    @Test func voicePresenceMapsOutcomesWithoutDuplicatingEngineLogic() async {
+        let notConnected = await VoicePresence.perform(
+            .join(channelId: "c1"),
+            guildId: "g1",
+            isConnected: false,
+            join: { _, _ in .requested },
+            leave: { _ in .requested }
+        )
+        #expect(notConnected == DiscordCopy.voiceNotConnected)
+
+        let missingGuild = await VoicePresence.perform(
+            .leave,
+            guildId: "DM",
+            isConnected: true,
+            join: { _, _ in .requested },
+            leave: { _ in .requested }
+        )
+        #expect(missingGuild == DiscordCopy.voiceMissingGuild)
+
+        let joined = await VoicePresence.perform(
+            .join(channelId: "c9"),
+            guildId: "g9",
+            isConnected: true,
+            join: { guild, channel in
+                #expect(guild == "g9")
+                #expect(channel == "c9")
+                return .requested
+            },
+            leave: { _ in .gatewayUnavailable }
+        )
+        #expect(joined == DiscordCopy.voiceJoined(channelId: "c9"))
+
+        let badIdsOnJoin = await VoicePresence.perform(
+            .join(channelId: "c1"),
+            guildId: "g1",
+            isConnected: true,
+            join: { _, _ in .invalidIdentifiers },
+            leave: { _ in .requested }
+        )
+        #expect(badIdsOnJoin == DiscordCopy.voiceMissingChannel)
+
+        let leaveFailed = await VoicePresence.perform(
+            .leave,
+            guildId: "g1",
+            isConnected: true,
+            join: { _, _ in .requested },
+            leave: { _ in .gatewayUnavailable }
+        )
+        #expect(leaveFailed == DiscordCopy.voiceLeaveFailed)
+
+        #expect(VoiceUpdateResult.requested == .requested)
+        #expect(VoiceUpdateResult.gatewayUnavailable != .invalidIdentifiers)
+    }
+
     @Test func intentQualityAndSuggestions() {
         #expect(IntentClassifier.Intent.question.quality == 0.8)
         #expect(IntentClassifier.Intent.unknown.quality == 0.2)
@@ -197,5 +251,68 @@ struct AbbeyCoreTests {
         )
         #expect(scored.action >= 0 && scored.action < 3)
         #expect(scored.quality >= 0)
+    }
+
+    @Test func appConfigValidateLiveDiscordRequiresToken() throws {
+        let suite = "AbbeyCoreTests.validate.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let config = AppConfig(defaults: defaults)
+        config.operatingMode = .liveDiscord
+        config.dryRun = false
+        config.discordBotToken = ""
+        #expect(throws: AppConfigValidationError.self) {
+            try config.validateForStartup()
+        }
+        config.dryRun = true
+        try config.validateForStartup()
+    }
+
+    @Test func appConfigValidateRemoteEndpoint() throws {
+        let suite = "AbbeyCoreTests.remote.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let config = AppConfig(defaults: defaults)
+        config.inferenceMode = .remoteCompatible
+        config.remoteEndpoint = ""
+        #expect(throws: AppConfigValidationError.self) {
+            try config.validateForStartup()
+        }
+        config.remoteEndpoint = "https://example.com/v1"
+        try config.validateForStartup()
+    }
+
+    @Test func dqnCheckpointRoundTripPreservesGreedyAction() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-dqn-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("ckpt.json")
+        let agent = DQNAgent(topology: [8, 32, 16, 3], epsilon: 0, seed: 99, checkpointURL: url)
+        await agent.setEpsilonForTesting(0)
+        let state: [Float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+        let actionBefore = await agent.selectAction(state: state)
+        try await agent.save(to: url)
+        #expect(FileManager.default.fileExists(atPath: url.path))
+
+        let restored = DQNAgent(topology: [8, 32, 16, 3], epsilon: 0.5, seed: 1, checkpointURL: url)
+        try await restored.load(from: url)
+        await restored.setEpsilonForTesting(0)
+        let actionAfter = await restored.selectAction(state: state)
+        #expect(actionAfter == actionBefore)
+
+        try Data("not-json".utf8).write(to: url)
+        do {
+            try await restored.load(from: url)
+            Issue.record("expected corrupt checkpoint to throw")
+        } catch is DQNCheckpointError {
+            // expected
+        }
+    }
+
+    @Test func discordBridgeDryRunSkipsGateway() async {
+        let bridge = DiscordBridge()
+        await bridge.connect(token: "", hooks: DiscordEventHooks(), dryRun: true)
+        #expect(await bridge.state == .connected)
+        #expect(await bridge.botUserId == "dry-run")
+        #expect(await bridge.client == nil)
     }
 }

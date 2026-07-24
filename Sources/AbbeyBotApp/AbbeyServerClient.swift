@@ -20,67 +20,6 @@ struct AbbeyServerClient: Sendable {
         self.session = session
     }
 
-    // MARK: - DTO shapes (Fluent Model Content / camelCase)
-
-    struct SyncUserDTO: Decodable, Sendable {
-        var id: UUID?
-        var compositeKey: String
-        var discordUserId: String
-        var guildId: String
-        var facts: [String]
-        var reputation: Double
-        var interactionCount: Int
-        var updatedAt: Date?
-    }
-
-    struct SyncChannelDTO: Decodable, Sendable {
-        var id: UUID?
-        var compositeKey: String
-        var channelId: String
-        var guildId: String
-        var summary: String
-        var messageCount: Int
-        var updatedAt: Date?
-    }
-
-    struct SyncMessageDTO: Decodable, Sendable {
-        var id: UUID?
-        var discordMessageId: String
-        var channelId: String
-        var guildId: String
-        var authorId: String
-        var content: String
-        var createdAt: Date?
-    }
-
-    struct SyncReputationDTO: Decodable, Sendable {
-        var id: UUID?
-        var userId: String
-        var guildId: String
-        var delta: Double
-        var reason: String
-        var createdAt: Date?
-    }
-
-    struct SyncInteractionDTO: Decodable, Sendable {
-        var id: UUID?
-        var commandName: String
-        var userId: String
-        var guildId: String
-        var succeeded: Bool
-        var latencyMs: Double
-        var createdAt: Date?
-    }
-
-    struct SyncEquityDTO: Decodable, Sendable {
-        var id: UUID?
-        var symbol: String
-        var thesisSummary: String
-        var syntheticScore: Double
-        var factorBreakdown: [String: Double]
-        var generatedAt: Date?
-    }
-
     // MARK: - Public API (push)
 
     func ingest(
@@ -122,27 +61,27 @@ struct AbbeyServerClient: Sendable {
 
     // MARK: - Public API (pull)
 
-    func fetchUsers(limit: Int = 500) async throws -> [SyncUserDTO] {
+    func fetchUsers(limit: Int = 500) async throws -> [SyncDTO.User] {
         try await get(path: "/api/users", limit: limit)
     }
 
-    func fetchChannels(limit: Int = 500) async throws -> [SyncChannelDTO] {
+    func fetchChannels(limit: Int = 500) async throws -> [SyncDTO.Channel] {
         try await get(path: "/api/channels", limit: limit)
     }
 
-    func fetchMessages(limit: Int = 500) async throws -> [SyncMessageDTO] {
+    func fetchMessages(limit: Int = 500) async throws -> [SyncDTO.Message] {
         try await get(path: "/api/messages", limit: limit)
     }
 
-    func fetchReputation(limit: Int = 500) async throws -> [SyncReputationDTO] {
+    func fetchReputation(limit: Int = 500) async throws -> [SyncDTO.Reputation] {
         try await get(path: "/api/reputation", limit: limit)
     }
 
-    func fetchInteractions(limit: Int = 500) async throws -> [SyncInteractionDTO] {
+    func fetchInteractions(limit: Int = 500) async throws -> [SyncDTO.Interaction] {
         try await get(path: "/api/interactions", limit: limit)
     }
 
-    func fetchEquity(limit: Int = 500) async throws -> [SyncEquityDTO] {
+    func fetchEquity(limit: Int = 500) async throws -> [SyncDTO.Equity] {
         try await get(path: "/api/equity", limit: limit)
     }
 

@@ -84,7 +84,8 @@ public actor BotRuntime {
         let bus = EventBus()
         self.eventBus = bus
         self.socialBrain = FluentSocialBrain(db: app.db, eventBus: bus, decay: { config.reputationDecay })
-        self.dqnAgent = DQNAgent(topology: [8, 32, 16, 3])
+        let checkpointURL = try? DQNCheckpointStore.defaultURL()
+        self.dqnAgent = DQNAgent(topology: [8, 32, 16, 3], checkpointURL: checkpointURL)
         self.scheduler = FluentScheduler(
             db: app.db,
             logger: app.logger,
@@ -103,6 +104,7 @@ public actor BotRuntime {
     }
 
     public func start() async {
+        try? await dqnAgent.loadCheckpointIfPresent()
         await socialBrain.warmCache()
         await scheduler.start()
         metricsListener = Task { [weak self] in
@@ -115,6 +117,10 @@ public actor BotRuntime {
 
         let token = ProcessInfo.processInfo.environment["DISCORD_BOT_TOKEN"]
             ?? config.discordBotToken
+        if config.dryRun {
+            await connectDiscord(token: token.isEmpty ? "dry-run" : token)
+            return
+        }
         guard !token.isEmpty else {
             app.logger.warning("DISCORD_BOT_TOKEN empty — HTTP API only; Discord gateway not started")
             return
@@ -165,14 +171,19 @@ public actor BotRuntime {
             }
         )
 
-        await bridge.connect(token: token, hooks: hooks, presenceActivityName: "AbbeyServer")
+        await bridge.connect(
+            token: token,
+            hooks: hooks,
+            presenceActivityName: "AbbeyServer",
+            dryRun: config.dryRun
+        )
         discordState = await bridge.state
         discordLastError = await bridge.lastError
         discordBotUserId = await bridge.botUserId
 
         let guild = ProcessInfo.processInfo.environment["DISCORD_DEV_GUILD_ID"]
             ?? config.discordDevGuildId
-        if let client = await bridge.client {
+        if !config.dryRun, let client = await bridge.client {
             do {
                 try await CommandRegistry.register(client: client, guildId: guild.isEmpty ? nil : guild)
                 app.logger.info("Slash commands registered")
@@ -404,22 +415,14 @@ public actor BotRuntime {
     }
 
     private func performVoice(_ action: VoiceAction, guildId: String) async -> String {
-        let state = await discordBridge.state
-        guard state == .connected else { return DiscordCopy.voiceNotConnected }
-        let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedGuild.isEmpty, trimmedGuild != "DM" else {
-            return DiscordCopy.voiceMissingGuild
-        }
-        switch action {
-        case .join(let channelId):
-            let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedChannel.isEmpty else { return DiscordCopy.voiceMissingChannel }
-            let ok = await discordBridge.joinVoice(guildId: trimmedGuild, channelId: trimmedChannel)
-            return ok ? DiscordCopy.voiceJoined(channelId: trimmedChannel) : DiscordCopy.voiceNotConnected
-        case .leave:
-            let ok = await discordBridge.leaveVoice(guildId: trimmedGuild)
-            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceLeaveFailed
-        }
+        let bridge = discordBridge
+        return await VoicePresence.perform(
+            action,
+            guildId: guildId,
+            isConnected: await bridge.state == .connected,
+            join: { guild, channel in await bridge.joinVoice(guildId: guild, channelId: channel) },
+            leave: { guild in await bridge.leaveVoice(guildId: guild) }
+        )
     }
 }
 

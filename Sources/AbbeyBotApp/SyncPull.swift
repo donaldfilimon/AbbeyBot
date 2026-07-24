@@ -7,10 +7,8 @@ import SwiftData
 /// - `UserMemory` by `compositeKey` — facts, reputation, interactionCount, updatedAt (**server wins**)
 /// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (**server wins**)
 /// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing
-/// - `ReputationEvent` — insert-if-missing by Fluent `serverId`; else skip dupes by
-///   (userId, guildId, reason, createdAt) best-effort
-/// - `InteractionLog` — insert-if-missing by Fluent `serverId`; else by
-///   (commandName, userId, createdAt, latencyMs)
+/// - `ReputationEvent` / `InteractionLog` — insert-if-missing by Fluent `serverId` only
+///   (rows without `id` are skipped — no fragile composite identity)
 /// - `EquityIdea` by `symbol` — thesis/score/factors/generatedAt (**server wins**) or insert
 enum SyncPull {
     static let defaultLimit = 500
@@ -32,12 +30,19 @@ enum SyncPull {
         client: AbbeyServerClient = .shared,
         limit: Int = defaultLimit
     ) async throws -> Counts {
-        let users = try await client.fetchUsers(limit: limit)
-        let channels = try await client.fetchChannels(limit: limit)
-        let messages = try await client.fetchMessages(limit: limit)
-        let reputation = try await client.fetchReputation(limit: limit)
-        let interactions = try await client.fetchInteractions(limit: limit)
-        let equity = try await client.fetchEquity(limit: limit)
+        async let usersTask = client.fetchUsers(limit: limit)
+        async let channelsTask = client.fetchChannels(limit: limit)
+        async let messagesTask = client.fetchMessages(limit: limit)
+        async let reputationTask = client.fetchReputation(limit: limit)
+        async let interactionsTask = client.fetchInteractions(limit: limit)
+        async let equityTask = client.fetchEquity(limit: limit)
+
+        let users = try await usersTask
+        let channels = try await channelsTask
+        let messages = try await messagesTask
+        let reputation = try await reputationTask
+        let interactions = try await interactionsTask
+        let equity = try await equityTask
 
         let context = ModelContext(container)
         let usersUpserted = try upsertUsers(users, into: context)
@@ -60,13 +65,22 @@ enum SyncPull {
 
     // MARK: - Upserts
 
+    private static func firstMatching<T: PersistentModel>(
+        _ type: T.Type,
+        predicate: Predicate<T>,
+        in context: ModelContext
+    ) throws -> T? {
+        var descriptor = FetchDescriptor<T>(predicate: predicate)
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
+    }
+
     @discardableResult
-    private static func upsertUsers(_ rows: [AbbeyServerClient.SyncUserDTO], into context: ModelContext) throws -> Int {
+    private static func upsertUsers(_ rows: [SyncDTO.User], into context: ModelContext) throws -> Int {
         var count = 0
         for row in rows {
             let key = row.compositeKey
-            let descriptor = FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
-            if let existing = try context.fetch(descriptor).first {
+            if let existing = try firstMatching(UserMemory.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
                 existing.facts = row.facts
                 existing.reputation = row.reputation
                 existing.interactionCount = row.interactionCount
@@ -89,12 +103,11 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func upsertChannels(_ rows: [AbbeyServerClient.SyncChannelDTO], into context: ModelContext) throws -> Int {
+    private static func upsertChannels(_ rows: [SyncDTO.Channel], into context: ModelContext) throws -> Int {
         var count = 0
         for row in rows {
             let key = row.compositeKey
-            let descriptor = FetchDescriptor<ChannelContext>(predicate: #Predicate { $0.compositeKey == key })
-            if let existing = try context.fetch(descriptor).first {
+            if let existing = try firstMatching(ChannelContext.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
                 existing.summary = row.summary
                 existing.messageCount = row.messageCount
                 existing.updatedAt = row.updatedAt ?? existing.updatedAt
@@ -115,12 +128,11 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func insertMissingMessages(_ rows: [AbbeyServerClient.SyncMessageDTO], into context: ModelContext) throws -> Int {
+    private static func insertMissingMessages(_ rows: [SyncDTO.Message], into context: ModelContext) throws -> Int {
         var inserted = 0
         for row in rows {
             let messageId = row.discordMessageId
-            let descriptor = FetchDescriptor<GuildMessage>(predicate: #Predicate { $0.discordMessageId == messageId })
-            if try context.fetch(descriptor).first != nil {
+            if try firstMatching(GuildMessage.self, predicate: #Predicate { $0.discordMessageId == messageId }, in: context) != nil {
                 continue
             }
             context.insert(
@@ -140,36 +152,18 @@ enum SyncPull {
 
     @discardableResult
     private static func insertMissingReputation(
-        _ rows: [AbbeyServerClient.SyncReputationDTO],
+        _ rows: [SyncDTO.Reputation],
         into context: ModelContext
     ) throws -> Int {
         var inserted = 0
         for row in rows {
-            if let serverId = row.id {
-                let descriptor = FetchDescriptor<ReputationEvent>(predicate: #Predicate { $0.serverId == serverId })
-                if try context.fetch(descriptor).first != nil {
-                    continue
-                }
-            } else {
-                let userId = row.userId
-                let guildId = row.guildId
-                let reason = row.reason
-                let createdAt = row.createdAt ?? .now
-                let descriptor = FetchDescriptor<ReputationEvent>(
-                    predicate: #Predicate {
-                        $0.userId == userId
-                            && $0.guildId == guildId
-                            && $0.reason == reason
-                            && $0.createdAt == createdAt
-                    }
-                )
-                if try context.fetch(descriptor).first != nil {
-                    continue
-                }
+            guard let serverId = row.id else { continue }
+            if try firstMatching(ReputationEvent.self, predicate: #Predicate { $0.serverId == serverId }, in: context) != nil {
+                continue
             }
             context.insert(
                 ReputationEvent(
-                    serverId: row.id,
+                    serverId: serverId,
                     userId: row.userId,
                     guildId: row.guildId,
                     delta: row.delta,
@@ -184,36 +178,18 @@ enum SyncPull {
 
     @discardableResult
     private static func insertMissingInteractions(
-        _ rows: [AbbeyServerClient.SyncInteractionDTO],
+        _ rows: [SyncDTO.Interaction],
         into context: ModelContext
     ) throws -> Int {
         var inserted = 0
         for row in rows {
-            if let serverId = row.id {
-                let descriptor = FetchDescriptor<InteractionLog>(predicate: #Predicate { $0.serverId == serverId })
-                if try context.fetch(descriptor).first != nil {
-                    continue
-                }
-            } else {
-                let commandName = row.commandName
-                let userId = row.userId
-                let createdAt = row.createdAt ?? .now
-                let latencyMs = row.latencyMs
-                let descriptor = FetchDescriptor<InteractionLog>(
-                    predicate: #Predicate {
-                        $0.commandName == commandName
-                            && $0.userId == userId
-                            && $0.createdAt == createdAt
-                            && $0.latencyMs == latencyMs
-                    }
-                )
-                if try context.fetch(descriptor).first != nil {
-                    continue
-                }
+            guard let serverId = row.id else { continue }
+            if try firstMatching(InteractionLog.self, predicate: #Predicate { $0.serverId == serverId }, in: context) != nil {
+                continue
             }
             context.insert(
                 InteractionLog(
-                    serverId: row.id,
+                    serverId: serverId,
                     commandName: row.commandName,
                     userId: row.userId,
                     guildId: row.guildId,
@@ -229,14 +205,13 @@ enum SyncPull {
 
     @discardableResult
     private static func upsertEquity(
-        _ rows: [AbbeyServerClient.SyncEquityDTO],
+        _ rows: [SyncDTO.Equity],
         into context: ModelContext
     ) throws -> Int {
         var count = 0
         for row in rows {
             let symbol = row.symbol
-            let descriptor = FetchDescriptor<EquityIdea>(predicate: #Predicate { $0.symbol == symbol })
-            if let existing = try context.fetch(descriptor).first {
+            if let existing = try firstMatching(EquityIdea.self, predicate: #Predicate { $0.symbol == symbol }, in: context) {
                 existing.thesisSummary = row.thesisSummary
                 existing.syntheticScore = row.syntheticScore
                 existing.factorBreakdown = row.factorBreakdown

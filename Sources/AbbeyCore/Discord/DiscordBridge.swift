@@ -41,8 +41,18 @@ public actor DiscordBridge {
     public func connect(
         token: String,
         hooks: DiscordEventHooks,
-        presenceActivityName: String = "AbbeyBot"
+        presenceActivityName: String = "AbbeyBot",
+        dryRun: Bool = AppConfig.shared.dryRun
     ) async {
+        if dryRun {
+            await disconnect()
+            state = .connected
+            lastError = nil
+            botUserId = "dry-run"
+            logger.info("dry-run: would connect (presenceActivity=\(presenceActivityName)); gateway skipped")
+            await hooks.onReady("dry-run")
+            return
+        }
         guard !token.isEmpty else {
             state = .failed
             lastError = "DISCORD_BOT_TOKEN is empty"
@@ -98,11 +108,11 @@ public actor DiscordBridge {
     /// Appear in a voice channel via gateway `Voice State Update` (self-mute + self-deaf).
     /// DiscordBM has no Opus/UDP — this is presence only, not audio.
     @discardableResult
-    public func joinVoice(guildId: String, channelId: String) async -> Bool {
-        guard let gateway else { return false }
+    public func joinVoice(guildId: String, channelId: String) async -> VoiceUpdateResult {
+        guard let gateway else { return .gatewayUnavailable }
         let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedGuild.isEmpty, !trimmedChannel.isEmpty else { return false }
+        guard !trimmedGuild.isEmpty, !trimmedChannel.isEmpty else { return .invalidIdentifiers }
         await gateway.updateVoiceState(
             payload: VoiceStateUpdate(
                 guildId: GuildSnowflake(trimmedGuild),
@@ -113,16 +123,16 @@ public actor DiscordBridge {
         )
         voiceGuildId = trimmedGuild
         voiceChannelId = trimmedChannel
-        return true
+        return .requested
     }
 
     /// Leave voice by sending `channel_id: null` for the guild (defaults to tracked guild).
     @discardableResult
-    public func leaveVoice(guildId: String? = nil) async -> Bool {
-        guard let gateway else { return false }
+    public func leaveVoice(guildId: String? = nil) async -> VoiceUpdateResult {
+        guard let gateway else { return .gatewayUnavailable }
         let trimmed = (guildId ?? voiceGuildId)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.isEmpty else { return .invalidIdentifiers }
         await gateway.updateVoiceState(
             payload: VoiceStateUpdate(
                 guildId: GuildSnowflake(trimmed),
@@ -136,7 +146,7 @@ public actor DiscordBridge {
             voiceGuildId = nil
             voiceChannelId = nil
         }
-        return true
+        return .requested
     }
 
     func noteReady(userId: String) {

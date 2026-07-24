@@ -66,6 +66,11 @@ public final class AppConfig: @unchecked Sendable {
         didSet { TokenStore.set(syncAPIToken, account: Keys.syncAPIToken) }
     }
 
+    /// When true, Discord gateway connect is skipped (`dry-run: would connect`).
+    public var dryRun: Bool {
+        didSet { defaults.set(dryRun, forKey: Keys.dryRun) }
+    }
+
     private enum Keys {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
@@ -80,6 +85,7 @@ public final class AppConfig: @unchecked Sendable {
         static let autoConnectOnLaunch = "ABBEY_DISCORD_AUTO_CONNECT"
         static let syncServerURL = "ABBEY_SYNC_SERVER_URL"
         static let syncAPIToken = "ABBEY_SYNC_API_TOKEN"
+        static let dryRun = "ABBEY_DRY_RUN"
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -118,6 +124,14 @@ public final class AppConfig: @unchecked Sendable {
         self.syncAPIToken = TokenStore.get(account: Keys.syncAPIToken)
             ?? ProcessInfo.processInfo.environment["ABBEY_SYNC_API_TOKEN"]
             ?? ""
+        if let envDry = ProcessInfo.processInfo.environment["ABBEY_DRY_RUN"] {
+            let normalized = envDry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            self.dryRun = ["1", "true", "yes", "on"].contains(normalized)
+        } else if let stored = defaults.object(forKey: Keys.dryRun) as? Bool {
+            self.dryRun = stored
+        } else {
+            self.dryRun = false
+        }
     }
 }
 
