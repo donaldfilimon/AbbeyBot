@@ -2,66 +2,48 @@ import Foundation
 import SwiftData
 import AbbeyCore
 
-/// Reputation engine. Ported from the Vapor/Fluent version (references/brain.md) onto
-/// SwiftData: instead of taking a `Database` parameter per call, this actor owns a
-/// private `ModelContext` constructed from the shared `ModelContainer` — `ModelContext`
-/// isn't `Sendable` and isn't meant to be shared across concurrency domains, so each
-/// actor/background task that needs one creates its own from the same container
-/// (this is the documented pattern, not a shortcut).
-///
-/// The reputation-persistence bug category noted in memory (/areas/discord-abbey-skill.md)
-/// was upstream Fluent model wiring, not a SwiftData-specific issue; this rewrite keeps
-/// the same "cache first, persist async, tolerate write failure" shape as the reference
-/// but no longer swallows persistence failures silently — see `lastPersistenceError`.
-public actor SocialBrain {
+/// Reputation engine backed by SwiftData. Algorithm lives in `ReputationMath`.
+actor SocialBrain {
     private let modelContainer: ModelContainer
     private let eventBus: EventBus
     private let decay: @Sendable () -> Double
-
-    /// In-memory cache, authoritative for reads within this process. Backed by
-    /// `ReputationEvent` rows for audit history and cross-launch reconstruction.
     private var scores: [String: Double] = [:]
-    public private(set) var lastPersistenceError: (any Error)?
+    private(set) var lastPersistenceError: (any Error)?
 
-    public init(modelContainer: ModelContainer, eventBus: EventBus, decay: @escaping @Sendable () -> Double) {
+    init(modelContainer: ModelContainer, eventBus: EventBus, decay: @escaping @Sendable () -> Double) {
         self.modelContainer = modelContainer
         self.eventBus = eventBus
         self.decay = decay
     }
 
-    public func reputation(userId: String, guildId: String) -> Double {
-        scores[key(userId, guildId)] ?? 0.5
+    func reputation(userId: String, guildId: String) -> Double {
+        scores[ReputationMath.cacheKey(userId: userId, guildId: guildId)] ?? ReputationMath.defaultScore
     }
 
-    /// Loads cached scores from the most recent `UserMemory.reputation` per user/guild,
-    /// so a relaunch doesn't reset everyone to the 0.5 default. Call once at startup.
-    public func warmCache() async {
+    func warmCache() async {
         let context = ModelContext(modelContainer)
         let descriptor = FetchDescriptor<UserMemory>()
         guard let records = try? context.fetch(descriptor) else { return }
         for record in records {
-            scores[key(record.discordUserId, record.guildId)] = record.reputation
+            scores[ReputationMath.cacheKey(userId: record.discordUserId, guildId: record.guildId)] = record.reputation
         }
     }
 
-    public func recordInteraction(userId: String, guildId: String, quality: Double, reason: String = "interaction") async {
-        let k = key(userId, guildId)
-        let current = scores[k] ?? 0.5
-        let alpha = decay()
-        let updated = current * alpha + quality * (1 - alpha)
+    func recordInteraction(userId: String, guildId: String, quality: Double, reason: String = "interaction") async {
+        let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+        let current = scores[k] ?? ReputationMath.defaultScore
+        let updated = ReputationMath.blend(current: current, quality: quality, decay: decay())
         scores[k] = updated
-
         await persist(userId: userId, guildId: guildId, newValue: updated, delta: updated - current, reason: reason)
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
-    public func penalize(userId: String, guildId: String, reason: String) async {
-        let k = key(userId, guildId)
-        let current = scores[k] ?? 0.5
-        let updated = max(0, current - 0.1)
+    func penalize(userId: String, guildId: String, reason: String) async {
+        let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+        let current = scores[k] ?? ReputationMath.defaultScore
+        let updated = ReputationMath.penalize(current: current)
         scores[k] = updated
-
-        await persist(userId: userId, guildId: guildId, newValue: updated, delta: -0.1, reason: reason)
+        await persist(userId: userId, guildId: guildId, newValue: updated, delta: -ReputationMath.penaltyDelta, reason: reason)
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
@@ -86,6 +68,4 @@ public actor SocialBrain {
             lastPersistenceError = error
         }
     }
-
-    private func key(_ userId: String, _ guildId: String) -> String { "\(guildId):\(userId)" }
 }

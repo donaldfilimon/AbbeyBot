@@ -3,7 +3,7 @@ import Fluent
 import Foundation
 import Vapor
 
-/// Fluent-backed reputation engine mirroring Desktop `SocialBrain`.
+/// Fluent-backed reputation engine. Algorithm lives in `ReputationMath`.
 actor FluentSocialBrain {
     private let db: any Database
     private let eventBus: EventBus
@@ -18,14 +18,14 @@ actor FluentSocialBrain {
     }
 
     func reputation(userId: String, guildId: String) -> Double {
-        scores[key(userId, guildId)] ?? 0.5
+        scores[ReputationMath.cacheKey(userId: userId, guildId: guildId)] ?? ReputationMath.defaultScore
     }
 
     func warmCache() async {
         do {
             let records = try await UserMemory.query(on: db).all()
             for record in records {
-                scores[key(record.discordUserId, record.guildId)] = record.reputation
+                scores[ReputationMath.cacheKey(userId: record.discordUserId, guildId: record.guildId)] = record.reputation
             }
             lastPersistenceError = nil
         } catch {
@@ -34,27 +34,26 @@ actor FluentSocialBrain {
     }
 
     func recordInteraction(userId: String, guildId: String, quality: Double, reason: String = "interaction") async {
-        let k = key(userId, guildId)
-        let current = scores[k] ?? 0.5
-        let alpha = decay()
-        let updated = current * alpha + quality * (1 - alpha)
+        let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+        let current = scores[k] ?? ReputationMath.defaultScore
+        let updated = ReputationMath.blend(current: current, quality: quality, decay: decay())
         scores[k] = updated
         await persist(userId: userId, guildId: guildId, newValue: updated, delta: updated - current, reason: reason)
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
     func penalize(userId: String, guildId: String, reason: String) async {
-        let k = key(userId, guildId)
-        let current = scores[k] ?? 0.5
-        let updated = max(0, current - 0.1)
+        let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+        let current = scores[k] ?? ReputationMath.defaultScore
+        let updated = ReputationMath.penalize(current: current)
         scores[k] = updated
-        await persist(userId: userId, guildId: guildId, newValue: updated, delta: -0.1, reason: reason)
+        await persist(userId: userId, guildId: guildId, newValue: updated, delta: -ReputationMath.penaltyDelta, reason: reason)
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
     private func persist(userId: String, guildId: String, newValue: Double, delta: Double, reason: String) async {
         do {
-            let composite = "\(guildId):\(userId)"
+            let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
             if let existing = try await UserMemory.query(on: db)
                 .filter(\.$compositeKey == composite)
                 .first()
@@ -78,6 +77,4 @@ actor FluentSocialBrain {
             lastPersistenceError = error
         }
     }
-
-    private func key(_ userId: String, _ guildId: String) -> String { "\(guildId):\(userId)" }
 }

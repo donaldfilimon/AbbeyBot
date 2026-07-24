@@ -157,15 +157,11 @@ actor BotRuntime {
 
             let intent = IntentClassifier.classify(content)
             if intent == .memoryStore {
-                let fact = content
-                    .replacingOccurrences(of: #"(?i)^(remember|note that)\s*"#, with: "", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let fact = MemoryFactText.extract(from: content)
                 try await MemoryRepository.appendFact(userId: authorId, guildId: guildId, fact: fact, on: app.db)
             }
             if intent == .personaSwitch {
-                let name = content.lowercased().contains("aviva") ? "Aviva"
-                    : content.lowercased().contains("abi") ? "Abi" : "Abbey"
-                await personaRouter.setPersona(named: name)
+                await personaRouter.setPersona(named: PersonaName.resolve(content))
             }
 
             await eventBus.publish(.messageIngested(channelId: channelId, guildId: guildId, authorId: authorId))
@@ -181,34 +177,23 @@ actor BotRuntime {
                 on: app.db
             )
 
-            let fullState = SentimentAnalyzer.analyze(
-                text: content,
-                authorReputation: reputationBefore,
-                recentReactionCount: 0,
-                mentionsSomeone: content.contains("@"),
-                isReply: false,
-                timestamp: .now,
-                channelMessageCountInWindow: channelActivity,
+            let scored = await IngestScorer.scoreAndLearn(
+                content: content,
+                guildId: guildId,
+                reputationBefore: reputationBefore,
                 authorInteractionCount: authorInteractionCount,
-                isDirectMessage: guildId == "DM"
+                channelMessageCount: channelActivity,
+                dqnAgent: dqnAgent,
+                intent: intent
             )
-            let state = SentimentAnalyzer.projectToNetworkInput(fullState)
-            let action = await dqnAgent.selectAction(state: state)
-            await dqnAgent.remember(
-                Experience(state: state, action: action, reward: Float(intent.quality), nextState: state, done: true)
-            )
-            await dqnAgent.learn()
-            await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: intent.quality)
+            await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
 
-            let elapsed = started.duration(to: .now)
-            let latencyMs = Double(elapsed.components.seconds) * 1000
-                + Double(elapsed.components.attoseconds) / 1e15
             try await InteractionRepository.log(
                 commandName: "ingestMessage",
                 userId: authorId,
                 guildId: guildId,
                 succeeded: true,
-                latencyMs: latencyMs,
+                latencyMs: IngestScorer.latencyMilliseconds(since: started),
                 on: app.db
             )
         } catch {
@@ -273,53 +258,57 @@ actor BotRuntime {
     private func makeInteractionRouter() -> InteractionRouter {
         InteractionRouter(
             ask: { [weak self] question, userId, guildId, channelId in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let persona = await self.personaRouter.currentPersona()
                 let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
                 return await persona.respond(to: question, context: context, inference: self.inferenceRouter).text
             },
             rep: { [weak self] userId, guildId in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let value = await self.socialBrain.reputation(userId: userId, guildId: guildId)
-                return "Reputation for \(userId): \(String(format: "%.3f", value))"
+                return DiscordCopy.reputation(userId: userId, value: value)
             },
             remember: { [weak self] userId, guildId, fact in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 do {
                     try await MemoryRepository.appendFact(userId: userId, guildId: guildId, fact: fact, on: self.app.db)
-                    return "Remembered for \(userId)."
+                    return DiscordCopy.remembered(userId: userId)
                 } catch {
-                    return "Failed to remember: \(error)"
+                    return DiscordCopy.rememberFailed(error)
                 }
             },
             forget: { [weak self] userId, guildId, index in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 do {
-                    return try await MemoryRepository.forgetFact(
+                    try await MemoryRepository.forgetFact(
                         userId: userId,
                         guildId: guildId,
                         index: index,
                         on: self.app.db
                     )
+                    return DiscordCopy.forgot(index: index)
+                } catch MemoryForgetError.noMemory {
+                    return DiscordCopy.noMemory
+                } catch MemoryForgetError.invalidIndex {
+                    return DiscordCopy.invalidFactIndex
                 } catch {
-                    return "Failed to forget: \(error)"
+                    return DiscordCopy.forgetFailed(error)
                 }
             },
             context: { [weak self] channelId, guildId in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let summary = (try? await ChannelRepository.summary(
                     channelId: channelId,
                     guildId: guildId,
                     on: self.app.db
                 )) ?? ""
-                return summary.isEmpty ? "No channel summary yet." : summary
+                return summary.isEmpty ? DiscordCopy.noChannelSummary : summary
             },
             persona: { [weak self] name in
-                guard let self else { return "Engine unavailable." }
-                let mapped = name.lowercased().hasPrefix("av") ? "Aviva"
-                    : name.lowercased().hasPrefix("abi") ? "Abi" : "Abbey"
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let mapped = PersonaName.resolve(name)
                 await self.personaRouter.setPersona(named: mapped)
-                return "Switched to \(mapped)."
+                return DiscordCopy.switchedPersona(mapped)
             }
         )
     }

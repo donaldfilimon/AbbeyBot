@@ -48,21 +48,12 @@ public func configure(_ app: Application) async throws {
 }
 
 struct BotLifecycleHandler: LifecycleHandler {
-    func didBoot(_ app: Application) throws {
-        let runtime = app.botRuntime
-        Task {
-            await runtime.start()
-        }
+    func didBootAsync(_ app: Application) async throws {
+        await app.botRuntime.start()
     }
 
-    func shutdown(_ app: Application) {
-        let runtime = app.botRuntime
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            await runtime.stop()
-            semaphore.signal()
-        }
-        _ = semaphore.wait(timeout: .now() + 5)
+    func shutdownAsync(_ app: Application) async {
+        await app.botRuntime.stop()
     }
 }
 

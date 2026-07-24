@@ -1,12 +1,18 @@
+import AbbeyCore
 import Fluent
 import Foundation
 import Vapor
+
+enum MemoryForgetError: Error, Equatable {
+    case noMemory
+    case invalidIndex
+}
 
 enum MemoryRepository {
     static func appendFact(userId: String, guildId: String, fact: String, on db: any Database) async throws {
         let trimmed = fact.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let composite = "\(guildId):\(userId)"
+        let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         if let existing = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() {
             if !existing.facts.contains(trimmed) {
                 existing.facts.append(trimmed)
@@ -18,27 +24,36 @@ enum MemoryRepository {
         }
     }
 
-    static func forgetFact(userId: String, guildId: String, index: Int, on db: any Database) async throws -> String {
-        let composite = "\(guildId):\(userId)"
+    static func forgetFact(userId: String, guildId: String, index: Int, on db: any Database) async throws {
+        let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         guard let memory = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() else {
-            return "No memory for that user."
+            throw MemoryForgetError.noMemory
         }
         let idx = index - 1
-        guard memory.facts.indices.contains(idx) else { return "Invalid fact index." }
+        guard memory.facts.indices.contains(idx) else {
+            throw MemoryForgetError.invalidIndex
+        }
         memory.facts.remove(at: idx)
         try await memory.save(on: db)
-        return "Forgot fact #\(index)."
     }
 
     static func facts(userId: String, guildId: String, on db: any Database) async throws -> [String] {
-        let composite = "\(guildId):\(userId)"
+        let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         return try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first()?.facts ?? []
+    }
+
+    static func recent(limit: Int, on db: any Database) async throws -> [UserMemory] {
+        try await UserMemory.query(on: db).sort(\.$updatedAt, .descending).limit(limit).all()
+    }
+
+    static func count(on db: any Database) async throws -> Int {
+        try await UserMemory.query(on: db).count()
     }
 }
 
 enum ChannelRepository {
     static func bump(channelId: String, guildId: String, on db: any Database) async throws {
-        let composite = "\(guildId):\(channelId)"
+        let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         if let existing = try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first() {
             existing.messageCount += 1
             try await existing.save(on: db)
@@ -49,13 +64,21 @@ enum ChannelRepository {
     }
 
     static func summary(channelId: String, guildId: String, on db: any Database) async throws -> String {
-        let composite = "\(guildId):\(channelId)"
+        let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.summary ?? ""
     }
 
     static func messageCount(channelId: String, guildId: String, on db: any Database) async throws -> Int {
-        let composite = "\(guildId):\(channelId)"
+        let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.messageCount ?? 0
+    }
+
+    static func recent(limit: Int, on db: any Database) async throws -> [ChannelContext] {
+        try await ChannelContext.query(on: db).sort(\.$updatedAt, .descending).limit(limit).all()
+    }
+
+    static func count(on db: any Database) async throws -> Int {
+        try await ChannelContext.query(on: db).count()
     }
 }
 
@@ -139,17 +162,6 @@ enum InteractionRepository {
     }
 }
 
-enum StatusRepository {
-    static func counts(on db: any Database) async throws -> (users: Int, channels: Int, messages: Int, reputationEvents: Int, equityIdeas: Int) {
-        let users = try await UserMemory.query(on: db).count()
-        let channels = try await ChannelContext.query(on: db).count()
-        let messages = try await MessageRepository.count(on: db)
-        let reputationEvents = try await ReputationRepository.count(on: db)
-        let equityIdeas = try await EquityRepository.count(on: db)
-        return (users, channels, messages, reputationEvents, equityIdeas)
-    }
-}
-
 enum EquityRepository {
     static func recent(limit: Int, on db: any Database) async throws -> [EquityIdea] {
         try await EquityIdea.query(on: db)
@@ -160,5 +172,30 @@ enum EquityRepository {
 
     static func count(on db: any Database) async throws -> Int {
         try await EquityIdea.query(on: db).count()
+    }
+}
+
+struct StatusCounts: Content {
+    var users: Int
+    var channels: Int
+    var messages: Int
+    var reputationEvents: Int
+    var equityIdeas: Int
+}
+
+enum StatusRepository {
+    static func counts(on db: any Database) async throws -> StatusCounts {
+        async let users = MemoryRepository.count(on: db)
+        async let channels = ChannelRepository.count(on: db)
+        async let messages = MessageRepository.count(on: db)
+        async let reputationEvents = ReputationRepository.count(on: db)
+        async let equityIdeas = EquityRepository.count(on: db)
+        return try await StatusCounts(
+            users: users,
+            channels: channels,
+            messages: messages,
+            reputationEvents: reputationEvents,
+            equityIdeas: equityIdeas
+        )
     }
 }

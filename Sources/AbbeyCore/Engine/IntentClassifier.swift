@@ -15,26 +15,19 @@ public struct IntentClassifier {
         }
     }
 
-    /// OPEN DECISION (flagged, not silently resolved — see /areas/discord-abbey-skill.md):
-    /// `.unknown` is unreachable in this function as written, because `.smallTalk` is
-    /// the unconditional fallback for anything that doesn't match an earlier branch.
-    /// That means every message SocialBrain scores gets at least 0.5 quality
-    /// (`.smallTalk`'s value) even when the classifier genuinely has no signal — so
-    /// `.unknown`'s 0.2 quality value is dead code, and reputation never gets
-    /// discounted for genuinely ambiguous input.
-    ///
-    /// Two ways to resolve this, deliberately NOT chosen here:
-    ///   (a) Make `.smallTalk` require a *positive* signal (min length, recognizable
-    ///       conversational shape) and fall back to `.unknown` otherwise — tightens
-    ///       what counts as "small talk" but will reclassify some currently-smallTalk
-    ///       messages as unknown, changing their reputation contribution.
-    ///   (b) Leave classification as-is and treat `.unknown` as reserved for a future
-    ///       input type (e.g. non-text content) rather than a text-classification
-    ///       outcome at all — i.e. the branch isn't a bug, it's headroom.
-    /// `classifyStrict(_:)` below implements (a) as an opt-in alternate path so both
-    /// options exist in code; `classify(_:)` itself is unchanged from the reference
-    /// draft's behavior.
+    /// Default path: lexical rules, then strict small-talk gate so empty / emoji-only
+    /// messages score as `.unknown` (0.2 quality) instead of automatic `.smallTalk`.
     public static func classify(_ text: String) -> Intent {
+        let result = classifyLoose(text)
+        guard result == .smallTalk else { return result }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasLetters = trimmed.contains { $0.isLetter }
+        guard trimmed.count >= 2, hasLetters else { return .unknown }
+        return .smallTalk
+    }
+
+    /// Legacy lenient path — everything unmatched becomes `.smallTalk`.
+    public static func classifyLoose(_ text: String) -> Intent {
         let lower = text.lowercased()
         if lower.hasPrefix("!") || lower.hasPrefix("/") { return .command }
         if lower.contains("kick") || lower.contains("ban") || lower.contains("purge")
@@ -47,16 +40,9 @@ public struct IntentClassifier {
         return .smallTalk
     }
 
-    /// Opt-in variant implementing resolution (a) above: `.smallTalk` requires a
-    /// minimum length and at least one alphabetic character; anything shorter or
-    /// purely symbolic/emoji falls through to `.unknown` instead.
+    /// Alias of `classify` (strict small-talk gate).
     public static func classifyStrict(_ text: String) -> Intent {
-        let result = classify(text)
-        guard result == .smallTalk else { return result }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasLetters = trimmed.contains { $0.isLetter }
-        guard trimmed.count >= 2, hasLetters else { return .unknown }
-        return .smallTalk
+        classify(text)
     }
 
     public static func suggestCompletions(for partial: String) -> [String] {

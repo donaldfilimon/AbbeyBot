@@ -48,16 +48,16 @@ docker compose up -d db          # Postgres 16
 # without Docker: DATABASE_URL=sqlite://${TMPDIR}/abbey.sqlite …
 ```
 
-Routes: `GET /health`, `GET /api/metrics`, `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
+Routes: `GET /health`, `GET /api/metrics`, `GET /api/status`, `POST /api/ingest`, `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
 
 Deploy: `Dockerfile` (`swift:6.0-bookworm`, copies `AbbeyServer_*.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`.
 
-Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health` and `/api/messages`.
+Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, `/api/status`, `POST /api/ingest`, and `/api/messages`.
 
-## Phase 2
+## Shared core (finalized)
 
-Shipped: Vapor HTTP, Fluent/Postgres, Leaf status, Docker/systemd, macOS 27 desktop APIs.
+`AbbeyCore` owns `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, and strict-by-default `IntentClassifier`. Desktop `AbbeyEngine` and server `BotRuntime` keep persistence adapters only.
 
-## Phase 3a / 3b
+## Deferred
 
-Shipped: richer `/api/*` list endpoints + Leaf dialect/counts + `/api/equity`. Still deferred: React SPA, Voice, SwiftData↔Postgres sync.
+React dashboard SPA, Discord Voice, SwiftData↔Postgres sync.

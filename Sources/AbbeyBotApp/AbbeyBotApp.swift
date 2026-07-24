@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import AppKit
 import AbbeyCore
 
 /// Root entry point for AbbeyBot desktop — SwiftUI + SwiftData + DiscordBM.
@@ -16,6 +17,11 @@ struct AbbeyBotApp: App {
         WindowGroup {
             ContentView()
                 .environment(engine)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    Task { @MainActor in
+                        await engine.shutdown()
+                    }
+                }
         }
         .modelContainer(engine.modelContainer)
         .windowToolbarStyle(.unified(showsTitle: true))

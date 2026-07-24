@@ -3,9 +3,9 @@ import Fluent
 import Foundation
 import Vapor
 
-/// Reply cooldown + channel summary consolidation for the headless server.
+/// Reply cooldown + channel consolidation for the headless server.
 actor FluentScheduler {
-    private var lastReplyAt: [String: Date] = [:]
+    private var cooldown = ReplyCooldownTracker()
     private var consolidationTask: Task<Void, Never>?
     private let db: any Database
     private let logger: Logger
@@ -31,12 +31,11 @@ actor FluentScheduler {
     }
 
     func isCoolingDown(userId: String, guildId: String) -> Bool {
-        guard let last = lastReplyAt[key(userId, guildId)] else { return false }
-        return Date.now.timeIntervalSince(last) < cooldownSeconds()
+        cooldown.isCoolingDown(userId: userId, guildId: guildId, cooldownSeconds: cooldownSeconds())
     }
 
     func markReplied(userId: String, guildId: String) {
-        lastReplyAt[key(userId, guildId)] = .now
+        cooldown.markReplied(userId: userId, guildId: guildId)
     }
 
     func start() {
@@ -69,8 +68,10 @@ actor FluentScheduler {
                     on: db
                 )
                 guard !recent.isEmpty else { continue }
-                let summaryLines = recent.reversed().map { "\($0.authorId): \($0.content.prefix(120))" }
-                channel.summary = summaryLines.joined(separator: "\n")
+                let lines = recent.reversed().map {
+                    ChannelSummaryBuilder.Line(authorId: $0.authorId, content: $0.content)
+                }
+                channel.summary = ChannelSummaryBuilder.summarize(lines)
                 channel.messageCount = recent.count
                 try await channel.save(on: db)
                 await eventBus.publish(
@@ -82,6 +83,4 @@ actor FluentScheduler {
             logger.warning("Channel consolidation failed: \(String(reflecting: error))")
         }
     }
-
-    private func key(_ userId: String, _ guildId: String) -> String { "\(guildId):\(userId)" }
 }

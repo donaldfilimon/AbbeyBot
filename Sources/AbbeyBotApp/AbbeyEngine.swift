@@ -3,11 +3,7 @@ import SwiftData
 import Observation
 import AbbeyCore
 
-/// The single object the SwiftUI layer talks to. Owns the `ModelContainer` and every
-/// actor described in the Engine/ and Inference/ folders, and exposes them either
-/// directly (for views that just need to pass them to a subview) or through small
-/// `@MainActor`-hopping convenience methods views can call straight from a `Button`
-/// action or `.task {}` modifier.
+/// SwiftUI façade over SwiftData + AbbeyCore actors.
 @Observable
 @MainActor
 final class AbbeyEngine {
@@ -24,10 +20,6 @@ final class AbbeyEngine {
     let inferenceRouter: InferenceRouter
     var equityEngine = EquityResearchEngine()
 
-    /// Most recent event received, so SwiftUI views can just observe this property
-    /// instead of each subscribing to the raw `AsyncStream` — trades a little
-    /// granularity for a much simpler view-layer API. Views that need the full
-    /// history should query the relevant SwiftData model directly instead.
     private(set) var lastEvent: AbbeyEvent?
     private(set) var lastDQNAction: Int?
     private(set) var discordState: DiscordConnectionState = .disconnected
@@ -38,7 +30,6 @@ final class AbbeyEngine {
     let discordBridge = DiscordBridge()
     let moderationClient = ModerationClient()
     private var eventListenerTask: Task<Void, Never>?
-    private var discordStatusTask: Task<Void, Never>?
 
     init(modelContainer: ModelContainer, storeDegraded: Bool = false) {
         self.modelContainer = modelContainer
@@ -104,16 +95,12 @@ final class AbbeyEngine {
             metrics.recordDestructiveAction(confirmed: false)
         case .inferenceProviderFailed(_, let message):
             metrics.recordInferenceFailureMessage(message)
-        case .channelContextConsolidated:
-            break
         default:
             break
         }
     }
 
-    /// Ingests one message end-to-end: persists it, upserts channel/user memory,
-    /// scores sentiment, records a DQN experience (projected to 8 lanes), and nudges
-    /// SocialBrain's reputation for the author.
+    /// Persist message, run shared ingest scoring, update reputation.
     func ingestMessage(
         content: String,
         channelId: String,
@@ -140,9 +127,7 @@ final class AbbeyEngine {
             appendMemoryFact(in: context, authorId: authorId, guildId: guildId, content: content)
         }
         if intent == .personaSwitch {
-            let name = content.lowercased().contains("aviva") ? "Aviva"
-                : content.lowercased().contains("abi") ? "Abi" : "Abbey"
-            await personaRouter.setPersona(named: name)
+            await personaRouter.setPersona(named: PersonaName.resolve(content))
         }
         try? context.save()
 
@@ -156,41 +141,31 @@ final class AbbeyEngine {
             FetchDescriptor<ChannelContext>(predicate: #Predicate { $0.channelId == channelId && $0.guildId == guildId })
         ).first?.messageCount) ?? 0
 
-        let fullState = SentimentAnalyzer.analyze(
-            text: content,
-            authorReputation: reputationBefore,
-            recentReactionCount: 0,
-            mentionsSomeone: content.contains("@"),
-            isReply: false,
-            timestamp: .now,
-            channelMessageCountInWindow: channelActivity,
+        let scored = await IngestScorer.scoreAndLearn(
+            content: content,
+            guildId: guildId,
+            reputationBefore: reputationBefore,
             authorInteractionCount: authorInteractionCount,
-            isDirectMessage: false
+            channelMessageCount: channelActivity,
+            dqnAgent: dqnAgent,
+            intent: intent
         )
-        let state = SentimentAnalyzer.projectToNetworkInput(fullState)
-        let action = await dqnAgent.selectAction(state: state)
-        lastDQNAction = action
-        await dqnAgent.remember(Experience(state: state, action: action, reward: Float(intent.quality), nextState: state, done: true))
-        await dqnAgent.learn()
-        await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: intent.quality)
+        lastDQNAction = scored.action
+        await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
 
-        let elapsed = started.duration(to: .now)
-        let latencyMs = Double(elapsed.components.seconds) * 1000
-            + Double(elapsed.components.attoseconds) / 1e15
         logInteraction(
             commandName: "ingestMessage",
             userId: authorId,
             guildId: guildId,
             succeeded: true,
-            latencyMs: latencyMs
+            latencyMs: IngestScorer.latencyMilliseconds(since: started)
         )
     }
 
-    /// Builds a `PersonaContext` from the local SwiftData store for the given author/channel.
     func personaContext(authorId: String, guildId: String, channelId: String) async -> PersonaContext {
         let context = ModelContext(modelContainer)
-        let channelKey = "\(guildId):\(channelId)"
-        let userKey = "\(guildId):\(authorId)"
+        let channelKey = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
+        let userKey = ReputationMath.cacheKey(userId: authorId, guildId: guildId)
         let summary = (try? context.fetch(
             FetchDescriptor<ChannelContext>(predicate: #Predicate { $0.compositeKey == channelKey })
         ).first?.summary) ?? ""
@@ -213,8 +188,6 @@ final class AbbeyEngine {
         try? context.save()
     }
 
-    /// Routes a destructive moderation action through `ConfirmationGate` before doing
-    /// anything. `perform` only runs if the gate resolves `true`.
     func performDestructiveAction(
         _ kind: DestructiveAction,
         targetUserId: String,
@@ -228,7 +201,7 @@ final class AbbeyEngine {
     }
 
     private func upsertChannelContext(in context: ModelContext, channelId: String, guildId: String) {
-        let key = "\(guildId):\(channelId)"
+        let key = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         let descriptor = FetchDescriptor<ChannelContext>(predicate: #Predicate { $0.compositeKey == key })
         if let existing = try? context.fetch(descriptor).first {
             existing.messageCount += 1
@@ -239,10 +212,8 @@ final class AbbeyEngine {
     }
 
     private func appendMemoryFact(in context: ModelContext, authorId: String, guildId: String, content: String) {
-        let key = "\(guildId):\(authorId)"
-        let fact = content
-            .replacingOccurrences(of: #"(?i)^(remember|note that)\s*"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = ReputationMath.cacheKey(userId: authorId, guildId: guildId)
+        let fact = MemoryFactText.extract(from: content)
         guard !fact.isEmpty else { return }
         let descriptor = FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
         if let existing = try? context.fetch(descriptor).first {
@@ -290,6 +261,14 @@ final class AbbeyEngine {
     func disconnectDiscord() async {
         await discordBridge.disconnect()
         await refreshDiscordStatus()
+    }
+
+    /// Cancel listeners, stop consolidation, disconnect Discord.
+    func shutdown() async {
+        eventListenerTask?.cancel()
+        eventListenerTask = nil
+        await scheduler.stop()
+        await disconnectDiscord()
     }
 
     func refreshDiscordStatus() async {
@@ -379,46 +358,46 @@ final class AbbeyEngine {
     private func makeInteractionRouter() -> InteractionRouter {
         InteractionRouter(
             ask: { [weak self] question, userId, guildId, channelId in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let persona = await self.personaRouter.currentPersona()
                 let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
                 return await persona.respond(to: question, context: context, inference: self.inferenceRouter).text
             },
             rep: { [weak self] userId, guildId in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let value = await self.socialBrain.reputation(userId: userId, guildId: guildId)
-                return "Reputation for \(userId): \(String(format: "%.3f", value))"
+                return DiscordCopy.reputation(userId: userId, value: value)
             },
             remember: { [weak self] userId, guildId, fact in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 await self.ingestMessage(content: "remember \(fact)", channelId: "slash", guildId: guildId, authorId: userId)
-                return "Remembered for \(userId)."
+                return DiscordCopy.remembered(userId: userId)
             },
             forget: { [weak self] userId, guildId, index in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let context = ModelContext(self.modelContainer)
-                let key = "\(guildId):\(userId)"
+                let key = ReputationMath.cacheKey(userId: userId, guildId: guildId)
                 guard let memory = try? context.fetch(FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })).first else {
-                    return "No memory for that user."
+                    return DiscordCopy.noMemory
                 }
                 let idx = index - 1
-                guard memory.facts.indices.contains(idx) else { return "Invalid fact index." }
+                guard memory.facts.indices.contains(idx) else { return DiscordCopy.invalidFactIndex }
                 memory.facts.remove(at: idx)
                 try? context.save()
-                return "Forgot fact #\(index)."
+                return DiscordCopy.forgot(index: index)
             },
             context: { [weak self] channelId, guildId in
-                guard let self else { return "Engine unavailable." }
+                guard let self else { return DiscordCopy.engineUnavailable }
                 let context = ModelContext(self.modelContainer)
-                let key = "\(guildId):\(channelId)"
+                let key = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
                 let summary = (try? context.fetch(FetchDescriptor<ChannelContext>(predicate: #Predicate { $0.compositeKey == key })).first?.summary) ?? ""
-                return summary.isEmpty ? "No channel summary yet." : summary
+                return summary.isEmpty ? DiscordCopy.noChannelSummary : summary
             },
             persona: { [weak self] name in
-                guard let self else { return "Engine unavailable." }
-                let mapped = name.lowercased().hasPrefix("av") ? "Aviva" : name.lowercased().hasPrefix("abi") ? "Abi" : "Abbey"
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let mapped = PersonaName.resolve(name)
                 await self.personaRouter.setPersona(named: mapped)
-                return "Switched to \(mapped)."
+                return DiscordCopy.switchedPersona(mapped)
             }
         )
     }

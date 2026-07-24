@@ -7,7 +7,7 @@ BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.server.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 COMPOSE=(docker compose)
 
-echo "======== 1/5 build AbbeyServer ========"
+echo "======== 1/6 build AbbeyServer ========"
 "${SWIFT[@]}" build --product AbbeyServer --build-path "$BUILD_PATH"
 
 BIN="$BUILD_PATH/debug/AbbeyServer"
@@ -18,7 +18,7 @@ test -x "$BIN"
 
 USE_SQLITE=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  echo "======== 2/5 postgres (docker compose) ========"
+  echo "======== 2/6 postgres (docker compose) ========"
   "${COMPOSE[@]}" up -d db
   echo "Waiting for Postgres..."
   for _ in $(seq 1 30); do
@@ -30,7 +30,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   "${COMPOSE[@]}" exec -T db pg_isready -U abbey -d abbeybot
   export DATABASE_URL="${DATABASE_URL:-postgres://abbey:abbey@127.0.0.1:5432/abbeybot}"
 else
-  echo "======== 2/5 postgres unavailable — sqlite file smoke ========"
+  echo "======== 2/6 postgres unavailable — sqlite file smoke ========"
   USE_SQLITE=1
   SQLITE_PATH="${TMPDIR:-/tmp}/abbeyserver-smoke.sqlite"
   rm -f "$SQLITE_PATH"
@@ -41,7 +41,7 @@ export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
 export HTTP_HOSTNAME=127.0.0.1
 export HTTP_PORT=18080
 
-echo "======== 3/5 boot server (db=$DATABASE_URL) ========"
+echo "======== 3/6 boot server (db=$DATABASE_URL) ========"
 "$BIN" serve --hostname "$HTTP_HOSTNAME" --port "$HTTP_PORT" >/tmp/abbeyserver-smoke.log 2>&1 &
 PID=$!
 cleanup() {
@@ -70,13 +70,24 @@ if [[ "$ok" != "1" ]]; then
   exit 1
 fi
 
-echo "======== 4/5 assert /health ========"
+echo "======== 4/6 assert /health ========"
 cat /tmp/abbeyserver-health.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-health.json")); assert d.get("status")=="ok", d'
 
-echo "======== 5/5 assert /api/messages + /api/equity ========"
+echo "======== 5/6 assert /api/status + ingest ========"
+curl -sf "http://127.0.0.1:${HTTP_PORT}/api/status" >/tmp/abbeyserver-status.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-status.json")); assert "databaseDialect" in d and d.get("messages", -1) >= 0, d'
+echo "status_ok dialect=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-status.json")).get("databaseDialect"))')"
+curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/ingest" \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"hello abbey smoke","channelId":"smoke","guildId":"smoke","authorId":"smoke-user"}' \
+  >/tmp/abbeyserver-ingest.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-ingest.json")); assert d.get("ok") is True and d.get("discordMessageId"), d'
+echo "ingest_ok id=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-ingest.json")).get("discordMessageId"))')"
+
+echo "======== 6/6 assert /api/messages + /api/equity ========"
 curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=10" >/tmp/abbeyserver-messages.json
-python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-messages.json")); assert isinstance(d, list), d'
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-messages.json")); assert isinstance(d, list) and len(d) >= 1, d'
 echo "messages_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-messages.json"))))')"
 curl -sf "http://127.0.0.1:${HTTP_PORT}/api/equity?limit=10" >/tmp/abbeyserver-equity.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-equity.json")); assert isinstance(d, list), d'
