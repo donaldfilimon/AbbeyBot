@@ -13,6 +13,30 @@ public enum AbbeyEvent: Sendable {
     case destructiveActionCancelled(kind: DestructiveAction, targetUserId: String)
     case equityIdeaGenerated(symbol: String)
     case inferenceProviderFailed(mode: InferenceMode, message: String)
+
+    /// Operator-facing one-liner for dashboards (not `String(describing:)`).
+    public var displayDescription: String {
+        switch self {
+        case .messageIngested(let channelId, let guildId, let authorId):
+            return "Ingested message from \(authorId) in #\(channelId) (\(guildId))"
+        case .reputationChanged(let userId, _, let newValue, let reason):
+            return "Reputation \(userId) → \(String(format: "%.2f", newValue)) (\(reason))"
+        case .channelContextConsolidated(let channelId, let messageCount):
+            return "Consolidated #\(channelId) (\(messageCount) msgs)"
+        case .personaSwitched(let name):
+            return "Persona → \(name)"
+        case .destructiveActionRequested(let kind, let targetUserId, _):
+            return "Confirm \(kind.rawValue) for \(targetUserId)?"
+        case .destructiveActionConfirmed(let kind, let targetUserId, _):
+            return "Confirmed \(kind.rawValue) for \(targetUserId)"
+        case .destructiveActionCancelled(let kind, let targetUserId):
+            return "Cancelled \(kind.rawValue) for \(targetUserId)"
+        case .equityIdeaGenerated(let symbol):
+            return "Equity idea \(symbol)"
+        case .inferenceProviderFailed(let mode, let message):
+            return "Inference failed (\(mode.rawValue)): \(message)"
+        }
+    }
 }
 
 public enum DestructiveAction: String, Sendable, CaseIterable {

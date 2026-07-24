@@ -6,7 +6,7 @@ struct DashboardView: View {
     @Environment(AbbeyEngine.self) private var engine
     @Query private var messages: [GuildMessage]
     @Query private var users: [UserMemory]
-    @Query private var interactions: [InteractionLog]
+    @Query(sort: \InteractionLog.createdAt, order: .reverse) private var interactions: [InteractionLog]
 
     @State private var draftChannelId = "general"
     @State private var draftGuildId = "dev-guild"
@@ -22,6 +22,7 @@ struct DashboardView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 180))], spacing: 12) {
                     MetricCard(title: "Messages (all-time)", value: "\(messages.count)")
                     MetricCard(title: "Users tracked", value: "\(users.count)")
+                    MetricCard(title: "Interactions", value: "\(interactions.count)")
                     MetricCard(title: "Messages this session", value: "\(engine.metrics.messagesIngestedThisSession)")
                     MetricCard(title: "Reputation events this session", value: "\(engine.metrics.reputationEventsThisSession)")
                     MetricCard(title: "Inference calls", value: "\(engine.metrics.totalInferenceCalls)")
@@ -29,7 +30,7 @@ struct DashboardView: View {
                     MetricCard(title: "Destructive confirmed", value: "\(engine.metrics.destructiveActionsConfirmed)")
                     MetricCard(title: "Destructive cancelled", value: "\(engine.metrics.destructiveActionsCancelled)")
                     MetricCard(title: "Live Discord ingests", value: "\(engine.liveIngestCount)")
-                    MetricCard(title: "Discord state", value: engine.discordState.rawValue)
+                    MetricCard(title: "Discord state", value: engine.discordState.displayName)
                     if let action = engine.lastDQNAction {
                         MetricCard(title: "Last DQN action", value: dqnLabel(action))
                     }
@@ -52,6 +53,8 @@ struct DashboardView: View {
                         .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 }
 
+                recentInteractions
+
                 Divider()
 
                 ingestForm
@@ -60,17 +63,64 @@ struct DashboardView: View {
         }
         .navigationTitle("Dashboard")
         .navigationSubtitle(
-            "Mode: \(engine.config.operatingMode.rawValue) · Inference: \(engine.config.inferenceMode.rawValue)"
+            "Mode: \(operatingModeLabel) · Inference: \(inferenceModeLabel)"
         )
+    }
+
+    private var operatingModeLabel: String {
+        switch engine.config.operatingMode {
+        case .standalone: return "Standalone"
+        case .liveDiscord: return "Live Discord"
+        }
+    }
+
+    private var inferenceModeLabel: String {
+        switch engine.config.inferenceMode {
+        case .deterministicFloor: return "Deterministic floor"
+        case .onDevice: return "On-device"
+        case .remoteCompatible: return "Remote"
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let event = engine.lastEvent {
-                Text("Last event: \(String(describing: event))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                Text("Last event: \(event.displayDescription)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .lineLimit(2)
+            } else {
+                Text("Waiting for activity…")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var recentInteractions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent interactions").font(.headline)
+            if interactions.isEmpty {
+                Text("No slash-command interactions logged yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(interactions.prefix(5)) { row in
+                    HStack {
+                        Image(systemName: row.succeeded ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(row.succeeded ? .green : .red)
+                            .font(.caption)
+                        Text("/\(row.commandName)")
+                            .font(.caption.monospaced())
+                        Text(row.userId)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(row.createdAt, style: .relative)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
             }
         }
     }
