@@ -24,10 +24,10 @@ public enum DiscordCopy: Sendable {
     }
 
     public static func forgetFailed(_ error: any Error) -> String {
-        "Failed to forget: \(error)"
+        "Failed to forget: \(OperatorFacingError.message(error))"
     }
 
     public static func rememberFailed(_ error: any Error) -> String {
-        "Failed to remember: \(error)"
+        "Failed to remember: \(OperatorFacingError.message(error))"
     }
 }

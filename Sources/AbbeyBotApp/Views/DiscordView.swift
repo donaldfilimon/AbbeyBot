@@ -10,14 +10,14 @@ struct DiscordView: View {
     var body: some View {
         Form {
             Section("Connection") {
-                SecureField("DISCORD_BOT_TOKEN", text: $config.discordBotToken)
+                SecureField("Bot token", text: $config.discordBotToken)
                     .textFieldStyle(.roundedBorder)
-                Text("Token is stored in Keychain (service com.donaldfilimon.AbbeyBot).")
+                Text("Stored in Keychain (service com.donaldfilimon.AbbeyBot). Env: DISCORD_BOT_TOKEN")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 LabeledContent("State") {
-                    Text(engine.discordState.rawValue)
+                    Text(stateLabel)
                         .foregroundStyle(stateColor)
                 }
                 if let botId = engine.discordBotUserId {
@@ -52,6 +52,9 @@ struct DiscordView: View {
             Section("Slash commands") {
                 TextField("Dev guild ID (optional, instant register)", text: $config.discordDevGuildId)
                     .textFieldStyle(.roundedBorder)
+                Text("Env: DISCORD_DEV_GUILD_ID — leave empty for global registration (slower).")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Button("Register slash commands") {
                     Task {
                         isBusy = true
@@ -59,7 +62,7 @@ struct DiscordView: View {
                             try await engine.registerSlashCommands()
                             statusMessage = "Commands registered."
                         } catch {
-                            statusMessage = String(describing: error)
+                            statusMessage = OperatorFacingError.message(error)
                         }
                         isBusy = false
                     }
@@ -95,6 +98,10 @@ struct DiscordView: View {
         }
     }
 
+    private var stateLabel: String {
+        engine.discordState.displayName
+    }
+
     private var stateColor: Color {
         switch engine.discordState {
         case .connected: return .green
@@ -103,4 +110,5 @@ struct DiscordView: View {
         case .disconnected: return .secondary
         }
     }
+
 }

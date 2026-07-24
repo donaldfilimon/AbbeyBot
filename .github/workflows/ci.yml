@@ -21,6 +21,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+
+      - name: Build dashboard SPA
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Assert SPA assets present for SPM Resources
+        run: test -f Sources/AbbeyServer/Resources/Public/index.html
+
       - name: Pull Swift toolchain image
         run: docker pull "$SWIFT_IMAGE"
 

@@ -17,7 +17,7 @@ public struct FoundationModelsProvider: InferenceProvider {
         case .available:
             break
         case .unavailable(let reason):
-            throw InferenceError.onDeviceUnavailable(String(describing: reason))
+            throw InferenceError.onDeviceUnavailable(availabilityReasonDescription(reason))
         @unknown default:
             throw InferenceError.providerUnavailable(.onDevice)
         }
@@ -35,10 +35,27 @@ public struct FoundationModelsProvider: InferenceProvider {
             let response = try await session.respond(to: prompt)
             return InferenceResult(text: response.content, mode: .onDevice)
         } catch {
-            throw InferenceError.onDeviceRequestFailed(String(describing: error))
+            throw InferenceError.onDeviceRequestFailed(error.localizedDescription)
         }
         #else
         throw InferenceError.providerUnavailable(.onDevice)
         #endif
     }
 }
+
+#if canImport(FoundationModels)
+private func availabilityReasonDescription(
+    _ reason: SystemLanguageModel.Availability.UnavailableReason
+) -> String {
+    switch reason {
+    case .deviceNotEligible:
+        return "this Mac is not eligible for Apple Intelligence"
+    case .appleIntelligenceNotEnabled:
+        return "Apple Intelligence is not enabled"
+    case .modelNotReady:
+        return "on-device model is not ready yet"
+    @unknown default:
+        return "unavailable"
+    }
+}
+#endif

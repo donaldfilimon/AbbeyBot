@@ -15,28 +15,43 @@ struct UsersView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedUser) {
-                ForEach(sections, id: \.guildId) { section in
-                    Section(section.guildId) {
-                        ForEach(section.users) { user in
-                            VStack(alignment: .leading) {
-                                Text(user.discordUserId).font(.headline)
-                                Text("rep: \(String(format: "%.2f", user.reputation))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+        // HSplitView (not NavigationSplitView) — parent ContentView already owns the sidebar split.
+        HSplitView {
+            Group {
+                if users.isEmpty {
+                    ContentUnavailableView(
+                        "No users tracked",
+                        systemImage: "person.2",
+                        description: Text("Ingest a message or connect Discord to populate reputation.")
+                    )
+                } else {
+                    List(selection: $selectedUser) {
+                        ForEach(sections, id: \.guildId) { section in
+                            Section(section.guildId) {
+                                ForEach(section.users) { user in
+                                    VStack(alignment: .leading) {
+                                        Text(user.discordUserId).font(.headline)
+                                        Text("rep: \(String(format: "%.2f", user.reputation))")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .tag(user)
+                                }
                             }
-                            .tag(user)
                         }
                     }
                 }
             }
-        } detail: {
-            if let user = selectedUser {
-                UserDetailView(user: user)
-            } else {
-                ContentUnavailableView("Select a user", systemImage: "person")
+            .frame(minWidth: 220, idealWidth: 280, maxWidth: 360)
+
+            Group {
+                if let user = selectedUser {
+                    UserDetailView(user: user)
+                } else {
+                    ContentUnavailableView("Select a user", systemImage: "person")
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Users")
     }

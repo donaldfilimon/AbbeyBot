@@ -47,8 +47,29 @@ public struct RemoteOpenAICompatibleProvider: InferenceProvider {
             }
             return InferenceResult(text: text, mode: .remoteCompatible)
         } catch let decodingError as DecodingError {
-            throw InferenceError.decodingFailed(String(describing: decodingError))
+            throw InferenceError.decodingFailed(briefDecodingError(decodingError))
         }
+    }
+}
+
+private func briefDecodingError(_ error: DecodingError) -> String {
+    switch error {
+    case .keyNotFound(let key, let context):
+        let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty
+            ? "missing key '\(key.stringValue)'"
+            : "missing key '\(key.stringValue)' at \(path)"
+    case .typeMismatch(_, let context):
+        let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty ? "type mismatch" : "type mismatch at \(path)"
+    case .valueNotFound(_, let context):
+        let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty ? "missing value" : "missing value at \(path)"
+    case .dataCorrupted(let context):
+        let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty ? "corrupt response" : "corrupt response at \(path)"
+    @unknown default:
+        return error.localizedDescription
     }
 }
 

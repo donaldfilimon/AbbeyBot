@@ -331,7 +331,7 @@ final class AbbeyEngine {
             }
             await socialBrain.penalize(userId: targetUserId, guildId: guildId, reason: "\(kind.rawValue): \(reason)")
         } catch {
-            discordLastError = String(describing: error)
+            discordLastError = OperatorFacingError.message(error)
         }
     }
 

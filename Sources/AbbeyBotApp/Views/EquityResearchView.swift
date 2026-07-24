@@ -17,6 +17,24 @@ struct EquityResearchView: View {
                     systemImage: "chart.line.uptrend.xyaxis",
                     description: Text("Enable ABBEY_EQUITY_MODULE_ENABLED in Settings to generate synthetic ideas.")
                 )
+            } else if ideas.isEmpty {
+                VStack {
+                    ContentUnavailableView(
+                        "No ideas yet",
+                        systemImage: "chart.line.uptrend.xyaxis",
+                        description: Text("Generate synthetic instruments below. \(EquityIdea.disclaimer)")
+                    )
+                    HStack {
+                        Button("Generate one idea") {
+                            generate(count: 1)
+                        }
+                        Button("Generate 5 ideas") {
+                            generate(count: 5)
+                        }
+                        Spacer()
+                    }
+                    .padding()
+                }
             } else {
                 List(ideas) { idea in
                     IdeaRow(idea: idea)

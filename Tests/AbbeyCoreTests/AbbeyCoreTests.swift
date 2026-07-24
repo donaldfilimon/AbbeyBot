@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import AbbeyCore
 
@@ -28,6 +29,22 @@ struct AbbeyCoreTests {
         struct SampleError: Error {}
         #expect(DiscordCopy.forgetFailed(SampleError()).contains("Failed to forget:"))
         #expect(DiscordCopy.rememberFailed(SampleError()).contains("Failed to remember:"))
+    }
+
+    @Test func operatorFacingErrorPrefersLocalizedDescription() {
+        struct Plain: Error {}
+        struct Localized: Error, LocalizedError {
+            var errorDescription: String? { "localized boom" }
+        }
+        #expect(OperatorFacingError.message(Localized()) == "localized boom")
+        #expect(!OperatorFacingError.message(Plain()).isEmpty)
+    }
+
+    @Test func interactionCommandLabelFormatting() {
+        #expect(InteractionCommandLabel.format("remember") == "/remember")
+        #expect(InteractionCommandLabel.format("persona.abbey") == "persona.abbey")
+        #expect(InteractionCommandLabel.format("ingestMessage") == "ingestMessage")
+        #expect(InteractionCommandLabel.format("/voice") == "/voice")
     }
 
     @Test func intentQualityAndSuggestions() {

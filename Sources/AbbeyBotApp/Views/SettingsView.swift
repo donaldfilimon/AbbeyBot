@@ -4,31 +4,39 @@ import AbbeyCore
 struct SettingsView: View {
     @Environment(AbbeyEngine.self) private var engine
     @Bindable private var config = AppConfig.shared
+    private var syncStatus = SyncStatus.shared
 
     var body: some View {
         Form {
-            Section("Operating mode") {
-                Picker("ABBEY_OPERATING_MODE", selection: $config.operatingMode) {
-                    ForEach(OperatingMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
+            Section {
+                Picker("Operating mode", selection: $config.operatingMode) {
+                    Text("Standalone").tag(OperatingMode.standalone)
+                    Text("Live Discord").tag(OperatingMode.liveDiscord)
                 }
                 Text(config.operatingMode == .standalone
-                     ? "Local SwiftData only — no Discord gateway."
-                     : "Live Discord via DiscordBM gateway when connected from the Discord tab.")
+                     ? "Local SwiftData only — no Discord gateway. Env: ABBEY_OPERATING_MODE"
+                     : "Live Discord via DiscordBM gateway when connected from the Discord tab. Env: ABBEY_OPERATING_MODE")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } header: {
+                Text("Operating mode")
             }
 
             Section("Inference") {
-                Picker("ABBEY_INFERENCE_MODE", selection: $config.inferenceMode) {
+                Picker("Inference mode", selection: $config.inferenceMode) {
                     ForEach(InferenceMode.allCases) { mode in
                         Text(label(for: mode)).tag(mode)
                     }
                 }
+                Text("Env: ABBEY_INFERENCE_MODE")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 if config.inferenceMode == .remoteCompatible {
-                    TextField("ABBEY_REMOTE_ENDPOINT", text: $config.remoteEndpoint, prompt: Text("https://your-endpoint/v1/chat/completions"))
+                    TextField("Remote endpoint", text: $config.remoteEndpoint, prompt: Text("https://your-endpoint/v1/chat/completions"))
                         .textFieldStyle(.roundedBorder)
+                    Text("Env: ABBEY_REMOTE_ENDPOINT")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
                 if config.inferenceMode == .onDevice {
                     Text("Falls back to the deterministic floor automatically if Foundation Models is unavailable on this machine.")
@@ -38,55 +46,72 @@ struct SettingsView: View {
             }
 
             Section("Timing") {
-                LabeledContent("ABBEY_REPLY_COOLDOWN_SECONDS") {
+                LabeledContent("Reply cooldown") {
                     Stepper(value: $config.replyCooldownSeconds, in: 0...120, step: 1) {
                         Text("\(Int(config.replyCooldownSeconds)) s")
                     }
                 }
-                LabeledContent("ABBEY_MEMORY_CONSOLIDATION_INTERVAL_MIN") {
+                Text("Env: ABBEY_REPLY_COOLDOWN_SECONDS")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                LabeledContent("Memory consolidation") {
                     Stepper(value: $config.memoryConsolidationIntervalMinutes, in: 1...240, step: 1) {
                         Text("\(Int(config.memoryConsolidationIntervalMinutes)) min")
                     }
                 }
+                Text("Env: ABBEY_MEMORY_CONSOLIDATION_INTERVAL_MIN")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Button("Restart consolidation loop with current interval") {
                     Task { await engine.scheduler.start() }
                 }
             }
 
             Section("Reputation") {
-                LabeledContent("ABBEY_REPUTATION_DECAY") {
+                LabeledContent("Decay") {
                     Slider(value: $config.reputationDecay, in: 0.5...0.99, step: 0.01) {
                         Text("Decay")
                     }
                 }
-                Text("EMA weight applied to the existing score — higher means reputation moves more slowly. Current: \(String(format: "%.2f", config.reputationDecay))")
+                Text("EMA weight on the existing score — higher means reputation moves more slowly. Current: \(String(format: "%.2f", config.reputationDecay)). Env: ABBEY_REPUTATION_DECAY")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Safety") {
-                Toggle("ABBEY_CONFIRMATION_REQUIRED", isOn: $config.confirmationRequiredForDestructiveActions)
-                Text("Gates purge/kick/ban behind an explicit confirmation sheet. Turning this off means destructive actions execute immediately.")
+                Toggle("Require confirmation for destructive actions", isOn: $config.confirmationRequiredForDestructiveActions)
+                Text("Gates purge/kick/ban behind an explicit confirmation sheet. Env: ABBEY_CONFIRMATION_REQUIRED")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Modules") {
-                Toggle("ABBEY_EQUITY_MODULE_ENABLED", isOn: $config.equityModuleEnabled)
-                Text("Synthetic-instrument idea generation. Not investment advice — see the Equity Research tab's disclaimer.")
+                Toggle("Equity research module", isOn: $config.equityModuleEnabled)
+                Text("Synthetic-instrument idea generation. Not investment advice — see the Equity Research tab. Env: ABBEY_EQUITY_MODULE_ENABLED")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Server sync") {
-                TextField("ABBEY_SYNC_SERVER_URL", text: $config.syncServerURL, prompt: Text("https://your-abbeyserver-host"))
+                TextField("Server URL", text: $config.syncServerURL, prompt: Text("https://your-abbeyserver-host"))
                     .textFieldStyle(.roundedBorder)
-                SecureField("ABBEY_SYNC_API_TOKEN", text: $config.syncAPIToken)
+                Text("Env: ABBEY_SYNC_SERVER_URL")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                SecureField("API token (optional)", text: $config.syncAPIToken)
+                Text("Env: ABBEY_SYNC_API_TOKEN")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Text(config.syncServerURL.isEmpty
                      ? "Sync is off — local SwiftData stays the only source of truth."
-                     : "Best-effort mirrors ingests, remembers, and forgets to AbbeyServer at \(config.syncServerURL). Failures are logged, never block the local write.")
+                     : "Best-effort mirrors ingests, remembers, and forgets to AbbeyServer. Failures never block the local write.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if !config.syncServerURL.isEmpty {
+                    Text(syncStatus.summary)
+                        .font(.caption)
+                        .foregroundStyle(syncStatus.lastError == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                }
             }
         }
         .formStyle(.grouped)

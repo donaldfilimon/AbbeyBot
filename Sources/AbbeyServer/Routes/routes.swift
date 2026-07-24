@@ -65,10 +65,7 @@ func routes(_ app: Application) throws {
     }
 
     app.get("dashboard") { req async throws -> Response in
-        let publicDir = (Bundle.module.resourceURL ?? Bundle.module.bundleURL)
-            .appendingPathComponent("Resources")
-            .appendingPathComponent("Public")
-        let indexPath = publicDir.appendingPathComponent("index.html").path
+        let indexPath = resourcesPublicDirectory().appendingPathComponent("index.html").path
         guard FileManager.default.fileExists(atPath: indexPath) else {
             throw Abort(.notFound, reason: "Dashboard not built — run `bun run build` (or npm) in web/ first")
         }
@@ -190,10 +187,12 @@ func routes(_ app: Application) throws {
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
+        let indexPath = resourcesPublicDirectory().appendingPathComponent("index.html").path
+        let dashboardAvailable = FileManager.default.fileExists(atPath: indexPath)
         return try await req.view.render(
             "status",
             [
-                "discordState": metrics.discordState,
+                "discordState": leafDiscordStateLabel(metrics.discordState),
                 "botUserId": metrics.discordBotUserId,
                 "databaseDialect": req.application.databaseDialect,
                 "messagesIngested": "\(metrics.messagesIngested)",
@@ -204,8 +203,14 @@ func routes(_ app: Application) throws {
                 "channelCount": "\(counts.channels)",
                 "messageCount": "\(counts.messages)",
                 "reputationEventCount": "\(counts.reputationEvents)",
-                "equityIdeaCount": "\(counts.equityIdeas)"
+                "equityIdeaCount": "\(counts.equityIdeas)",
+                "dashboardAvailable": dashboardAvailable ? "true" : ""
             ]
         )
     }
+}
+
+/// Leaf-only title case for Discord wire states (`connected` → `Connected`).
+private func leafDiscordStateLabel(_ raw: String) -> String {
+    DiscordConnectionState(rawValue: raw)?.displayName ?? raw.capitalized
 }
