@@ -17,6 +17,7 @@ Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN). Swift 6.4 lang
 unset TOOLCHAINS
 bash Scripts/run-smoke.sh          # desktop build/test/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
+bash Scripts/verify-all.sh         # both gates
 ```
 
 Launch wrappers (Xcode toolchain):
@@ -48,7 +49,7 @@ docker compose up -d db          # Postgres 16
 # without Docker: DATABASE_URL=sqlite://${TMPDIR}/abbey.sqlite …
 ```
 
-Routes: `GET /health`, `GET /api/metrics`, `GET /api/status`, `POST /api/ingest`, `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
+Routes: `GET /health`, `GET /api/metrics`, `GET /api/status`, `POST /api/ingest` (optional `ABBEY_API_TOKEN`), `GET /api/users`, `GET /api/channels`, `GET /api/messages`, `GET /api/reputation`, `GET /api/interactions`, `GET /api/equity`, `GET /` (Leaf). Optional `?limit=` (default 100, max 500) on list endpoints.
 
 Deploy: `Dockerfile` (`swift:6.0-bookworm`, copies `AbbeyServer_*.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`.
 

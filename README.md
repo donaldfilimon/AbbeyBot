@@ -34,6 +34,7 @@ Or full stack: `docker compose up --build`.
 ```bash
 bash Scripts/run-smoke.sh
 bash Scripts/run-server-smoke.sh   # Postgres via compose, or sqlite file if Docker missing
+bash Scripts/verify-all.sh         # both
 ```
 
 ## Discord
@@ -60,7 +61,7 @@ Dockerfile / docker-compose.yml
 - `GET /health` — liveness + Discord state
 - `GET /api/metrics` — session counters
 - `GET /api/status` — dialect + table counts + session metrics (JSON)
-- `POST /api/ingest` — headless ingest (`content`, `channelId`, `guildId`, `authorId`, optional `discordMessageId`)
+- `POST /api/ingest` — headless ingest (`content`, `channelId`, `guildId`, `authorId`, optional `discordMessageId`); when `ABBEY_API_TOKEN` is set, require `Authorization: Bearer …` or `X-Abbey-Token`
 - `GET /api/users` / `GET /api/channels` — Fluent rows (`?limit=`)
 - `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`)
 - `GET /` — Leaf status (dialect + table counts)

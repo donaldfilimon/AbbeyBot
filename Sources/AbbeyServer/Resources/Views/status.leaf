@@ -38,6 +38,7 @@
   </dl>
   <nav>
     <a href="/health">/health</a> ·
+    <a href="/api/status">/api/status</a> ·
     <a href="/api/metrics">/api/metrics</a> ·
     <a href="/api/users">/api/users</a> ·
     <a href="/api/channels">/api/channels</a> ·
@@ -46,5 +47,6 @@
     <a href="/api/interactions">/api/interactions</a> ·
     <a href="/api/equity">/api/equity</a>
   </nav>
+  <p style="margin-top:1.5rem;font-size:0.9rem;">POST /api/ingest accepts JSON; set <code>ABBEY_API_TOKEN</code> in production.</p>
 </body>
 </html>

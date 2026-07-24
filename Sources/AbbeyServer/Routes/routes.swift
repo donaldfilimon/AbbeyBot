@@ -83,6 +83,7 @@ func routes(_ app: Application) throws {
     }
 
     app.post("api", "ingest") { req async throws -> IngestResponseDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
         let body = try req.content.decode(IngestRequestDTO.self)
         let content = body.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else {
