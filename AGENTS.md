@@ -36,8 +36,11 @@ bash Scripts/run-server.sh   # server (loads .env if present)
 bash Scripts/run-abbey.sh    # abbey CLI (loads .env if present)
 ```
 
-Bare `swift run` works when using the Xcode toolchain and `--build-path "${TMPDIR}/AbbeyBot.build"` (Desktop trees otherwise hit iCloud xattr codesign failures). Do not use PATH swiftly for the GUI.
-Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
+Bare `swift run` fails when `TOOLCHAINS=swift` (swiftly / DEVELOPMENT-SNAPSHOT) is exported — SwiftData `@Query` / `\.modelContext` break. Prefer `bash Scripts/run.sh` or `bash Scripts/swift-run.sh` (both `unset TOOLCHAINS` + Xcode). Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
+
+## Browserbase Functions (`functions/`)
+
+Optional serverless browser automation (not part of `verify-all`). Bun package; starter scrapes HN. Setup: `cd functions && cp .env.example .env` (fill `BROWSERBASE_*` from https://browserbase.com/settings), then `bun run dev` / `bun run deploy`. See `functions/README.md`.
 
 CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run swiftlang/swift:nightly-6.4.x-bookworm` — official `library/swift:6.4-*` not published yet) builds `web/` (bun), runs dashboard SPA tests, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`. Desktop job disabled (`if: false`) pending a self-hosted macOS 27 runner — GitHub-hosted `macos-*` runners don't satisfy the pin.
 
@@ -186,6 +189,6 @@ Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` 
 
 ## Learned Workspace Facts
 
-- Do not commit secrets (`.env`, tokens) or local scratch (`.cursor/hooks/`, `functions/`).
-- Do not commit `node_modules` — dashboard deps live under `web/node_modules` (`web/.gitignore`); local scratch may also create `functions/node_modules`.
+- Do not commit secrets (`.env`, tokens) or local scratch (`.cursor/hooks/`). Optional `functions/` Browserbase scaffold is tracked; keep `functions/.env` / `functions/node_modules` untracked (see `functions/.gitignore`).
+- Do not commit `node_modules` — dashboard deps live under `web/node_modules` (`web/.gitignore`); Browserbase deps under `functions/node_modules`.
 - Dashboard SPA build output packs into `Sources/AbbeyServer/Resources/Public/` (gitignored unless intentionally shipping built assets).

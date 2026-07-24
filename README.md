@@ -16,14 +16,13 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 One executable product (`AbbeyBot`). Bare `swift run` launches the **desktop** app (macOS / Xcode).
 
 ```bash
-unset TOOLCHAINS
-swift run                         # desktop (Xcode toolchain; not swiftly)
-swift run AbbeyBot serve          # AbbeyServer
-swift run AbbeyBot cli            # abbey REPL
-# or wrappers:
-bash Scripts/run.sh
-bash Scripts/run-server.sh
-bash Scripts/run-abbey.sh
+unset TOOLCHAINS                  # required if your shell exports TOOLCHAINS=swift
+bash Scripts/run.sh               # desktop (preferred — Xcode + safe build path)
+bash Scripts/swift-run.sh         # same, raw SPM-style args (serve|cli|help)
+bash Scripts/run-server.sh        # AbbeyServer
+bash Scripts/run-abbey.sh         # abbey REPL
+# or after unset TOOLCHAINS:
+# swift run --build-path "${TMPDIR}/AbbeyBot.build"
 ```
 
 Swiftly / DEVELOPMENT-SNAPSHOT **cannot** build the desktop target. For server/CLI under swiftly:
