@@ -42,8 +42,12 @@ public enum MemoryRepository {
         return try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first()?.facts ?? []
     }
 
-    public static func recent(limit: Int, on db: any Database) async throws -> [UserMemory] {
-        try await UserMemory.query(on: db).sort(\.$updatedAt, .descending).limit(limit).all()
+    public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [UserMemory] {
+        var query = UserMemory.query(on: db)
+        if let since {
+            query = query.filter(\.$updatedAt > since)
+        }
+        return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -73,8 +77,12 @@ public enum ChannelRepository {
         return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.messageCount ?? 0
     }
 
-    public static func recent(limit: Int, on db: any Database) async throws -> [ChannelContext] {
-        try await ChannelContext.query(on: db).sort(\.$updatedAt, .descending).limit(limit).all()
+    public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [ChannelContext] {
+        var query = ChannelContext.query(on: db)
+        if let since {
+            query = query.filter(\.$updatedAt > since)
+        }
+        return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -110,8 +118,12 @@ public enum MessageRepository {
             .all()
     }
 
-    public static func recent(limit: Int, on db: any Database) async throws -> [GuildMessage] {
-        try await GuildMessage.query(on: db)
+    public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [GuildMessage] {
+        var query = GuildMessage.query(on: db)
+        if let since {
+            query = query.filter(\.$createdAt > since)
+        }
+        return try await query
             .sort(\.$createdAt, .descending)
             .limit(limit)
             .all()
@@ -123,8 +135,12 @@ public enum MessageRepository {
 }
 
 public enum ReputationRepository {
-    public static func recent(limit: Int, on db: any Database) async throws -> [ReputationEvent] {
-        try await ReputationEvent.query(on: db)
+    public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [ReputationEvent] {
+        var query = ReputationEvent.query(on: db)
+        if let since {
+            query = query.filter(\.$createdAt > since)
+        }
+        return try await query
             .sort(\.$createdAt, .descending)
             .limit(limit)
             .all()
@@ -154,8 +170,12 @@ public enum InteractionRepository {
         try await row.create(on: db)
     }
 
-    public static func recent(limit: Int, on db: any Database) async throws -> [InteractionLog] {
-        try await InteractionLog.query(on: db)
+    public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [InteractionLog] {
+        var query = InteractionLog.query(on: db)
+        if let since {
+            query = query.filter(\.$createdAt > since)
+        }
+        return try await query
             .sort(\.$createdAt, .descending)
             .limit(limit)
             .all()
@@ -163,8 +183,12 @@ public enum InteractionRepository {
 }
 
 public enum EquityRepository {
-    public static func recent(limit: Int, on db: any Database) async throws -> [EquityIdea] {
-        try await EquityIdea.query(on: db)
+    public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [EquityIdea] {
+        var query = EquityIdea.query(on: db)
+        if let since {
+            query = query.filter(\.$generatedAt > since)
+        }
+        return try await query
             .sort(\.$generatedAt, .descending)
             .limit(limit)
             .all()
@@ -172,6 +196,35 @@ public enum EquityRepository {
 
     public static func count(on db: any Database) async throws -> Int {
         try await EquityIdea.query(on: db).count()
+    }
+}
+
+public enum SyncStatusRepository {
+    /// Upserts the single sync-status row (there is exactly one per server).
+    public static func report(
+        lastPullAt: Date?,
+        lastPullError: String?,
+        lastPushAt: Date?,
+        lastPushError: String?,
+        pendingPushCount: Int,
+        on db: any Database
+    ) async throws {
+        let record = try await SyncStatusRecord.query(on: db).first() ?? SyncStatusRecord()
+        record.lastPullAt = lastPullAt
+        record.lastPullError = lastPullError
+        record.lastPushAt = lastPushAt
+        record.lastPushError = lastPushError
+        record.pendingPushCount = pendingPushCount
+        if record.id == nil {
+            try await record.create(on: db)
+        } else {
+            try await record.save(on: db)
+        }
+    }
+
+    /// The current sync status, or an empty (never-reported) default if no report has landed yet.
+    public static func current(on db: any Database) async throws -> SyncStatusRecord {
+        try await SyncStatusRecord.query(on: db).first() ?? SyncStatusRecord(pendingPushCount: 0)
     }
 }
 

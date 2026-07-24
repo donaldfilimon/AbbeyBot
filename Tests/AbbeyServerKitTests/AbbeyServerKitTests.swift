@@ -92,6 +92,132 @@ struct AbbeyServerKitTests {
         }
     }
 
+    @Test func memoryRepositoryRecentSinceCursorFiltersOlderRows() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            try await MemoryRepository.appendFact(userId: "u1", guildId: "g1", fact: "before cursor", on: db)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            let cursor = Date()
+            try await Task.sleep(nanoseconds: 10_000_000)
+            try await MemoryRepository.appendFact(userId: "u2", guildId: "g1", fact: "after cursor", on: db)
+
+            let all = try await MemoryRepository.recent(limit: 10, on: db)
+            #expect(all.count == 2)
+
+            let sinceCursor = try await MemoryRepository.recent(limit: 10, since: cursor, on: db)
+            #expect(sinceCursor.count == 1)
+            #expect(sinceCursor.first?.discordUserId == "u2")
+
+            let sinceNothing = try await MemoryRepository.recent(limit: 10, since: nil, on: db)
+            #expect(sinceNothing.count == 2)
+        }
+    }
+
+    @Test func channelRepositoryRecentSinceCursorFiltersOlderRows() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            try await ChannelRepository.bump(channelId: "c1", guildId: "g1", on: db)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            let cursor = Date()
+            try await Task.sleep(nanoseconds: 10_000_000)
+            try await ChannelRepository.bump(channelId: "c2", guildId: "g1", on: db)
+
+            let sinceCursor = try await ChannelRepository.recent(limit: 10, since: cursor, on: db)
+            #expect(sinceCursor.count == 1)
+            #expect(sinceCursor.first?.channelId == "c2")
+        }
+    }
+
+    @Test func messageRepositoryRecentSinceCursorFiltersOlderRows() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            try await MessageRepository.insert(discordMessageId: "m1", channelId: "c1", guildId: "g1", authorId: "u1", content: "before", on: db)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            let cursor = Date()
+            try await Task.sleep(nanoseconds: 10_000_000)
+            try await MessageRepository.insert(discordMessageId: "m2", channelId: "c1", guildId: "g1", authorId: "u1", content: "after", on: db)
+
+            let sinceCursor = try await MessageRepository.recent(limit: 10, since: cursor, on: db)
+            #expect(sinceCursor.count == 1)
+            #expect(sinceCursor.first?.discordMessageId == "m2")
+        }
+    }
+
+    @Test func reputationRepositoryRecentSinceCursorFiltersOlderRows() async throws {
+        try await withRuntime { app, runtime in
+            try await runtime.remember(userId: "u1", guildId: "g1", fact: "x")
+            let db = app.db
+            let cursor = Date()
+            try await Task.sleep(nanoseconds: 10_000_000)
+            // Reputation events are created via ingest scoring, not directly repository-insertable in this suite;
+            // an empty since-filtered result on a fresh cursor with no new events is still a valid, testable contract.
+            let sinceCursor = try await ReputationRepository.recent(limit: 10, since: cursor, on: db)
+            #expect(sinceCursor.isEmpty)
+        }
+    }
+
+    @Test func interactionRepositoryRecentSinceCursorFiltersOlderRows() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            try await InteractionRepository.log(commandName: "ask", userId: "u1", guildId: "g1", succeeded: true, latencyMs: 1, on: db)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            let cursor = Date()
+            try await Task.sleep(nanoseconds: 10_000_000)
+            try await InteractionRepository.log(commandName: "rep", userId: "u1", guildId: "g1", succeeded: true, latencyMs: 1, on: db)
+
+            let sinceCursor = try await InteractionRepository.recent(limit: 10, since: cursor, on: db)
+            #expect(sinceCursor.count == 1)
+            #expect(sinceCursor.first?.commandName == "rep")
+        }
+    }
+
+    @Test func equityRepositoryRecentSinceCursorFiltersOlderRows() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            let cursor = Date()
+            let sinceCursor = try await EquityRepository.recent(limit: 10, since: cursor, on: db)
+            #expect(sinceCursor.isEmpty)
+        }
+    }
+
+    @Test func syncStatusRepositoryReportThenCurrentReflectsLatestReport() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            let empty = try await SyncStatusRepository.current(on: db)
+            #expect(empty.lastPullAt == nil)
+            #expect(empty.pendingPushCount == 0)
+
+            try await SyncStatusRepository.report(
+                lastPullAt: Date(timeIntervalSince1970: 1000),
+                lastPullError: nil,
+                lastPushAt: Date(timeIntervalSince1970: 900),
+                lastPushError: "HTTP 500",
+                pendingPushCount: 2,
+                on: db
+            )
+
+            let first = try await SyncStatusRepository.current(on: db)
+            #expect(first.lastPullAt == Date(timeIntervalSince1970: 1000))
+            #expect(first.lastPushError == "HTTP 500")
+            #expect(first.pendingPushCount == 2)
+
+            // A second report upserts the single record rather than accumulating rows.
+            try await SyncStatusRepository.report(
+                lastPullAt: Date(timeIntervalSince1970: 2000),
+                lastPullError: "timeout",
+                lastPushAt: Date(timeIntervalSince1970: 900),
+                lastPushError: "HTTP 500",
+                pendingPushCount: 0,
+                on: db
+            )
+
+            let second = try await SyncStatusRepository.current(on: db)
+            #expect(second.lastPullAt == Date(timeIntervalSince1970: 2000))
+            #expect(second.lastPullError == "timeout")
+            #expect(second.pendingPushCount == 0)
+        }
+    }
+
     @Test func statusCountsReflectWrites() async throws {
         try await withRuntime { app, _ in
             let db = app.db

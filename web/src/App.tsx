@@ -15,11 +15,13 @@ import {
   fetchMetrics,
   fetchReputation,
   fetchStatus,
+  fetchSyncStatus,
   fetchUsers,
 } from "./api";
 import { HealthStrip } from "./components/HealthStrip";
 import { ListView } from "./components/ListView";
 import { StatTiles } from "./components/StatTiles";
+import { SyncStatusView } from "./components/SyncStatusView";
 import { formatCommandName } from "./formatCommandName";
 import { usePolling } from "./usePolling";
 
@@ -34,7 +36,8 @@ type Tab =
   | "messages"
   | "reputation"
   | "interactions"
-  | "equity";
+  | "equity"
+  | "sync";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -44,6 +47,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "reputation", label: "Reputation" },
   { id: "interactions", label: "Interactions" },
   { id: "equity", label: "Equity" },
+  { id: "sync", label: "Sync" },
 ];
 
 function formatDate(value: string | null): string {
@@ -58,6 +62,7 @@ function App() {
   const health = usePolling(fetchHealth, POLL_INTERVAL_MS);
   const metrics = usePolling(fetchMetrics, POLL_INTERVAL_MS);
   const status = usePolling(fetchStatus, POLL_INTERVAL_MS);
+  const syncStatus = usePolling(fetchSyncStatus, POLL_INTERVAL_MS);
 
   const usersFetcher = useCallback((limit: number) => fetchUsers(limit), []);
   const channelsFetcher = useCallback((limit: number) => fetchChannels(limit), []);
@@ -203,6 +208,9 @@ function App() {
               ]}
             />
           </>
+        )}
+        {tab === "sync" && (
+          <SyncStatusView status={syncStatus.data} error={syncStatus.error} />
         )}
       </main>
     </div>

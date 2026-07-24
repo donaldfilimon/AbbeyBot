@@ -15,9 +15,22 @@ struct AbbeyServerClient: Sendable {
     static let shared = AbbeyServerClient()
 
     private let session: URLSession
+    private let outbox: PendingPushQueue?
 
     init(session: URLSession = .shared) {
         self.session = session
+        self.outbox = try? PendingPushQueue(url: PendingPushQueue.defaultURL())
+    }
+
+    /// Resend everything in the durable outbox (pushes that failed to reach the server
+    /// last time). Best-effort like every other push here — never throws. Call this
+    /// opportunistically whenever the app has reason to believe connectivity may have
+    /// returned (e.g. before/after a sync pull).
+    func flushPendingPushes() async -> Int {
+        guard let outbox else { return 0 }
+        return (try? await outbox.drain { path, bodyJSON in
+            await self.postRaw(path: path, bodyJSON: bodyJSON)
+        }) ?? 0
     }
 
     // MARK: - Public API (push)
@@ -57,6 +70,33 @@ struct AbbeyServerClient: Sendable {
             "index": .int(index)
         ]
         await post(path: "/api/state/forget", body: body)
+    }
+
+    /// Reports the desktop's current sync outcome so the operator dashboard's Sync tab
+    /// can show it. Best-effort like every other push — benefits from the same durable
+    /// outbox retry as ingest/remember/forget.
+    func reportSyncStatus(
+        lastPullAt: Date?,
+        lastPullError: String?,
+        lastPushAt: Date?,
+        lastPushError: String?,
+        pendingPushCount: Int
+    ) async {
+        // Matches Vapor's default Content date strategy (ISO 8601), so the server decoding
+        // SyncStatusReportDTO's Date? fields with the default JSONDecoder round-trips cleanly.
+        let iso8601 = ISO8601DateFormatter()
+        var body: [String: JSONValue] = ["pendingPushCount": .int(pendingPushCount)]
+        if let lastPullAt { body["lastPullAt"] = .string(iso8601.string(from: lastPullAt)) }
+        if let lastPullError { body["lastPullError"] = .string(lastPullError) }
+        if let lastPushAt { body["lastPushAt"] = .string(iso8601.string(from: lastPushAt)) }
+        if let lastPushError { body["lastPushError"] = .string(lastPushError) }
+        await post(path: "/api/state/sync-status", body: body)
+    }
+
+    /// Number of pushes currently queued for retry in the durable outbox.
+    func pendingPushCount() -> Int {
+        guard let outbox else { return 0 }
+        return (try? outbox.pendingCount()) ?? 0
     }
 
     // MARK: - Public API (pull)
@@ -129,30 +169,46 @@ struct AbbeyServerClient: Sendable {
     }
 
     private func post(path: String, jsonObjectBody: [String: Any]) async {
+        let bodyJSON: Data
+        do {
+            bodyJSON = try JSONSerialization.data(withJSONObject: jsonObjectBody)
+        } catch {
+            print("[sync] failed to encode body for \(path): \(error)")
+            await recordFailure(path: path, message: "encode failed")
+            return
+        }
+
+        let succeeded = await postRaw(path: path, bodyJSON: bodyJSON)
+        if !succeeded {
+            // Encode failures above are permanent and never enqueued; network/HTTP
+            // failures here are — a later flushPendingPushes() (or app relaunch) retries them.
+            try? outbox?.enqueue(path: path, jsonObjectBody: jsonObjectBody)
+        }
+    }
+
+    /// Send pre-encoded JSON to `path`, recording success/failure on `SyncStatus`.
+    /// Returns whether it reached the server with a 2xx — never throws.
+    private func postRaw(path: String, bodyJSON: Data) async -> Bool {
         do {
             var request = try makeRequest(path: path, method: "POST")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            do {
-                request.httpBody = try JSONSerialization.data(withJSONObject: jsonObjectBody)
-            } catch {
-                print("[sync] failed to encode body for \(path): \(error)")
-                await recordFailure(path: path, message: "encode failed")
-                return
-            }
+            request.httpBody = bodyJSON
 
             let (_, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 print("[sync] \(path) returned status \(http.statusCode)")
                 await recordFailure(path: path, message: "HTTP \(http.statusCode)")
-            } else {
-                await recordSuccess(path: path)
+                return false
             }
+            await recordSuccess(path: path)
+            return true
         } catch SyncClientError.notConfigured {
-            // Sync is unconfigured — silently no-op.
-            return
+            // Sync is unconfigured — silently no-op, not a failure worth retrying.
+            return true
         } catch {
             print("[sync] \(path) failed: \(error)")
             await recordFailure(path: path, message: OperatorFacingError.message(error))
+            return false
         }
     }
 

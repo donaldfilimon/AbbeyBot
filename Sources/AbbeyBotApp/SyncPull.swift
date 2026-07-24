@@ -4,8 +4,11 @@ import SwiftData
 /// Pulls AbbeyServer list endpoints into local SwiftData (sync pull MVP).
 ///
 /// Upsert rules:
-/// - `UserMemory` by `compositeKey` — facts, reputation, interactionCount, updatedAt (**server wins**)
-/// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (**server wins**)
+/// - `UserMemory` by `compositeKey` — facts, reputation, interactionCount, updatedAt
+///   (**last-write-wins by `updatedAt`**: an unsynced local edit newer than the remote row
+///   survives a pull instead of being clobbered; caveat — this compares each side's own wall
+///   clock, so it's not resilient to significant clock skew between desktop and server)
+/// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (same last-write-wins rule)
 /// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing
 /// - `ReputationEvent` / `InteractionLog` — insert-if-missing by Fluent `serverId` only
 ///   (rows without `id` are skipped — no fragile composite identity)
@@ -76,11 +79,17 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func upsertUsers(_ rows: [SyncDTO.User], into context: ModelContext) throws -> Int {
+    static func upsertUsers(_ rows: [SyncDTO.User], into context: ModelContext) throws -> Int {
         var count = 0
         for row in rows {
             let key = row.compositeKey
             if let existing = try firstMatching(UserMemory.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
+                // Last-write-wins: only apply the remote row if it's at least as new as the
+                // local one, so an unsynced local edit made since the last pull survives.
+                if let remoteUpdatedAt = row.updatedAt, remoteUpdatedAt < existing.updatedAt {
+                    count += 1
+                    continue
+                }
                 existing.facts = row.facts
                 existing.reputation = row.reputation
                 existing.interactionCount = row.interactionCount
@@ -103,11 +112,17 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func upsertChannels(_ rows: [SyncDTO.Channel], into context: ModelContext) throws -> Int {
+    static func upsertChannels(_ rows: [SyncDTO.Channel], into context: ModelContext) throws -> Int {
         var count = 0
         for row in rows {
             let key = row.compositeKey
             if let existing = try firstMatching(ChannelContext.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
+                // Last-write-wins: only apply the remote row if it's at least as new as the
+                // local one, so an unsynced local edit made since the last pull survives.
+                if let remoteUpdatedAt = row.updatedAt, remoteUpdatedAt < existing.updatedAt {
+                    count += 1
+                    continue
+                }
                 existing.summary = row.summary
                 existing.messageCount = row.messageCount
                 existing.updatedAt = row.updatedAt ?? existing.updatedAt

@@ -48,6 +48,14 @@ struct ForgetRequestDTO: Content {
     var index: Int
 }
 
+struct SyncStatusReportDTO: Content {
+    var lastPullAt: Date?
+    var lastPullError: String?
+    var lastPushAt: Date?
+    var lastPushError: String?
+    var pendingPushCount: Int
+}
+
 struct OkDTO: Content {
     var ok: Bool
 }
@@ -55,6 +63,12 @@ struct OkDTO: Content {
 private func clampedLimit(_ req: Request, default defaultLimit: Int = 100, max maxLimit: Int = 500) -> Int {
     let raw = req.query[Int.self, at: "limit"] ?? defaultLimit
     return min(max(raw, 1), maxLimit)
+}
+
+/// Incremental-sync cursor: `?since=<unix epoch seconds>`. Absent/unparseable → nil (full scan, existing behavior).
+private func sinceParam(_ req: Request) -> Date? {
+    guard let raw = req.query[Double.self, at: "since"] else { return nil }
+    return Date(timeIntervalSince1970: raw)
 }
 
 func routes(_ app: Application) throws {
@@ -161,34 +175,53 @@ func routes(_ app: Application) throws {
         }
     }
 
+    app.post("api", "state", "sync-status") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(SyncStatusReportDTO.self)
+        try await SyncStatusRepository.report(
+            lastPullAt: body.lastPullAt,
+            lastPullError: body.lastPullError,
+            lastPushAt: body.lastPushAt,
+            lastPushError: body.lastPushError,
+            pendingPushCount: body.pendingPushCount,
+            on: req.db
+        )
+        return OkDTO(ok: true)
+    }
+
+    app.get("api", "sync-status") { req async throws -> SyncStatusRecord in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return try await SyncStatusRepository.current(on: req.db)
+    }
+
     app.get("api", "users") { req async throws -> [UserMemory] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await MemoryRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await MemoryRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "channels") { req async throws -> [ChannelContext] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await ChannelRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await ChannelRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "messages") { req async throws -> [GuildMessage] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await MessageRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await MessageRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "reputation") { req async throws -> [ReputationEvent] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await ReputationRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await ReputationRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "interactions") { req async throws -> [InteractionLog] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await InteractionRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await InteractionRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get("api", "equity") { req async throws -> [EquityIdea] in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await EquityRepository.recent(limit: clampedLimit(req), on: req.db)
+        return try await EquityRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
     }
 
     app.get { req async throws -> View in

@@ -153,6 +153,12 @@ final class AbbeyEngine {
         guard !url.isEmpty else { return }
         guard SyncStatus.shared.beginPull() else { return }
 
+        // A pull attempt means we believe the server may be reachable again — resend
+        // anything a prior network blip left in the durable outbox first, so the pull
+        // below can observe their server-side effects (e.g. reputation re-derived from
+        // a flushed ingest).
+        _ = await AbbeyServerClient.shared.flushPendingPushes()
+
         do {
             let counts = try await SyncPull.run(into: modelContainer)
             SyncStatus.shared.recordPullSuccess(
@@ -168,6 +174,21 @@ final class AbbeyEngine {
             print("[sync] pull failed: \(error)")
             SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
         }
+
+        await reportSyncStatusToServer()
+    }
+
+    /// Best-effort report of this session's sync outcome for the operator dashboard's
+    /// Sync tab. Never throws; failures just don't update the dashboard's view of us.
+    private func reportSyncStatusToServer() async {
+        let status = SyncStatus.shared
+        await AbbeyServerClient.shared.reportSyncStatus(
+            lastPullAt: status.lastPullSuccessAt,
+            lastPullError: status.lastPullError,
+            lastPushAt: status.lastSuccessAt,
+            lastPushError: status.lastError,
+            pendingPushCount: AbbeyServerClient.shared.pendingPushCount()
+        )
     }
 
     private func startEventListener() {
