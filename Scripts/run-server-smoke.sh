@@ -85,13 +85,22 @@ curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/ingest" \
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-ingest.json")); assert d.get("ok") is True and d.get("discordMessageId"), d'
 echo "ingest_ok id=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-ingest.json")).get("discordMessageId"))')"
 
-echo "======== 6/6 assert /api/messages + /api/equity ========"
+echo "======== 6/6 assert list APIs after ingest ========"
 curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=10" >/tmp/abbeyserver-messages.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-messages.json")); assert isinstance(d, list) and len(d) >= 1, d'
 echo "messages_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-messages.json"))))')"
+# Ingest bumps channel, creates UserMemory + ReputationEvent, and logs InteractionLog.
+for path in users channels reputation interactions; do
+  curl -sf "http://127.0.0.1:${HTTP_PORT}/api/${path}?limit=10" >"/tmp/abbeyserver-${path}.json"
+  python3 -c "import json; d=json.load(open('/tmp/abbeyserver-${path}.json')); assert isinstance(d, list) and len(d) >= 1, d"
+  echo "${path}_ok count=$(python3 -c "import json; print(len(json.load(open('/tmp/abbeyserver-${path}.json'))))")"
+done
 curl -sf "http://127.0.0.1:${HTTP_PORT}/api/equity?limit=10" >/tmp/abbeyserver-equity.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-equity.json")); assert isinstance(d, list), d'
 echo "equity_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-equity.json"))))')"
+curl -sf "http://127.0.0.1:${HTTP_PORT}/api/metrics" >/tmp/abbeyserver-metrics.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-metrics.json")); assert "messagesIngested" in d and d.get("messagesIngested", -1) >= 0, d'
+echo "metrics_ok messagesIngested=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-metrics.json")).get("messagesIngested"))')"
 
 if [[ "$USE_SQLITE" == "1" ]]; then
   echo "(note: smoke used sqlite file because Docker/Postgres was unavailable)"

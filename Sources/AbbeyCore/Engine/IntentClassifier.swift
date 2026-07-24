@@ -34,7 +34,12 @@ public struct IntentClassifier {
             || lower.contains("timeout") || lower.contains("mod ") { return .modRequest }
         if lower.contains("remember") || lower.contains("note that") { return .memoryStore }
         if lower.contains("rep") || lower.contains("reputation") { return .repQuery }
-        if lower.contains("switch") || lower.contains("be aviva") { return .personaSwitch }
+        // Align with PersonaName.resolve — "be abi/abbey" must switch, not only "be aviva".
+        if lower.contains("switch")
+            || lower.range(of: #"\bbe\s+(aviva|abi|abbey)\b"#, options: .regularExpression) != nil
+        {
+            return .personaSwitch
+        }
         if lower.hasSuffix("?") || lower.hasPrefix("what") || lower.hasPrefix("how") { return .question }
         if ["hi", "hey", "yo", "sup", "hello"].contains(where: { lower.hasPrefix($0) }) { return .greeting }
         return .smallTalk
