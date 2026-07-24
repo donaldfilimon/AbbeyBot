@@ -63,10 +63,11 @@ struct AbbeyBotApp: App {
             return (container, false)
         } catch {
             // Lightweight migration cannot rewrite attribute types (e.g. EquityIdea.factorBreakdown
-            // Binary Data → Codable). Wipe the on-disk store once and retry before degrading.
-            NSLog("AbbeyBot: persistent store open failed (%@); resetting %@",
+            // Binary Data → Codable). Move the on-disk store aside (not delete — keeps it available
+            // for manual recovery/inspection) and retry with a fresh store before degrading.
+            NSLog("AbbeyBot: persistent store open failed (%@); backing up %@",
                   String(describing: error), configuration.url.path)
-            Self.removeStoreFiles(at: configuration.url)
+            Self.backUpStoreFiles(at: configuration.url)
             do {
                 let container = try ModelContainer(for: schema, configurations: [configuration])
                 return (container, false)
@@ -82,19 +83,23 @@ struct AbbeyBotApp: App {
         }
     }
 
-    /// Removes the SQLite store and its `-wal`/`-shm` sidecars so SwiftData can recreate a fresh schema.
-    private static func removeStoreFiles(at url: URL) {
+    /// Renames the SQLite store and its `-wal`/`-shm` sidecars aside (timestamped `.bak-<epoch>`
+    /// suffix) so SwiftData can recreate a fresh schema, without discarding the old data — it stays
+    /// on disk next to the live store for manual recovery/inspection.
+    private static func backUpStoreFiles(at url: URL) {
         let fm = FileManager.default
+        let suffix = ".bak-\(Int(Date().timeIntervalSince1970))"
         let candidates = [
             url,
             URL(fileURLWithPath: url.path + "-wal"),
             URL(fileURLWithPath: url.path + "-shm")
         ]
         for file in candidates where fm.fileExists(atPath: file.path) {
+            let backupURL = URL(fileURLWithPath: file.path + suffix)
             do {
-                try fm.removeItem(at: file)
+                try fm.moveItem(at: file, to: backupURL)
             } catch {
-                NSLog("AbbeyBot: failed to remove store file %@: %@", file.path, String(describing: error))
+                NSLog("AbbeyBot: failed to back up store file %@: %@", file.path, String(describing: error))
             }
         }
     }
