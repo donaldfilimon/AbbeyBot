@@ -99,4 +99,87 @@ struct SyncPullTests {
         #expect(stored?.summary == "local summary")
         #expect(stored?.messageCount == 10)
     }
+
+    // MARK: - Equity
+    //
+    // Equity ideas are regenerated rather than hand-edited, so `generatedAt` is the
+    // comparable timestamp: the more recently *generated* idea for a symbol wins.
+
+    @Test func upsertEquityPreservesNewerLocalIdeaOverOlderRemote() throws {
+        let context = try makeContext()
+        let local = EquityIdea(
+            symbol: "QX-4471",
+            thesisSummary: "fresh local thesis",
+            syntheticScore: 0.9,
+            factorBreakdown: ["momentum": 0.9],
+            generatedAt: Date()
+        )
+        context.insert(local)
+        try context.save()
+
+        let remote = SyncDTO.Equity(
+            id: UUID(),
+            symbol: "QX-4471",
+            thesisSummary: "stale remote thesis",
+            syntheticScore: 0.1,
+            factorBreakdown: ["momentum": 0.1],
+            generatedAt: Date().addingTimeInterval(-100)
+        )
+
+        try SyncPull.upsertEquity([remote], into: context)
+
+        let symbol = "QX-4471"
+        let descriptor = FetchDescriptor<EquityIdea>(predicate: #Predicate { $0.symbol == symbol })
+        let stored = try context.fetch(descriptor).first
+        #expect(stored?.thesisSummary == "fresh local thesis")
+        #expect(stored?.syntheticScore == 0.9)
+    }
+
+    @Test func upsertEquityAppliesNewerRemoteIdeaOverOlderLocal() throws {
+        let context = try makeContext()
+        let local = EquityIdea(
+            symbol: "QX-4471",
+            thesisSummary: "stale local thesis",
+            syntheticScore: 0.1,
+            factorBreakdown: ["momentum": 0.1],
+            generatedAt: Date().addingTimeInterval(-100)
+        )
+        context.insert(local)
+        try context.save()
+
+        let remote = SyncDTO.Equity(
+            id: UUID(),
+            symbol: "QX-4471",
+            thesisSummary: "fresh remote thesis",
+            syntheticScore: 0.9,
+            factorBreakdown: ["momentum": 0.9],
+            generatedAt: Date()
+        )
+
+        try SyncPull.upsertEquity([remote], into: context)
+
+        let symbol = "QX-4471"
+        let descriptor = FetchDescriptor<EquityIdea>(predicate: #Predicate { $0.symbol == symbol })
+        let stored = try context.fetch(descriptor).first
+        #expect(stored?.thesisSummary == "fresh remote thesis")
+        #expect(stored?.syntheticScore == 0.9)
+    }
+
+    @Test func upsertEquityInsertsUnseenSymbol() throws {
+        let context = try makeContext()
+        let remote = SyncDTO.Equity(
+            id: UUID(),
+            symbol: "QX-9999",
+            thesisSummary: "new idea",
+            syntheticScore: 0.5,
+            factorBreakdown: ["value": 0.5],
+            generatedAt: Date()
+        )
+
+        try SyncPull.upsertEquity([remote], into: context)
+
+        let symbol = "QX-9999"
+        let descriptor = FetchDescriptor<EquityIdea>(predicate: #Predicate { $0.symbol == symbol })
+        #expect(try context.fetch(descriptor).first?.thesisSummary == "new idea")
+    }
 }

@@ -26,16 +26,21 @@ if [[ ! -x "$BIN" ]]; then
   BIN="$(find "$BUILD_PATH" -name AbbeyBot -type f -perm +111 | head -1)"
 fi
 test -x "$BIN"
-"$BIN" >/tmp/abbeybot-launch.log 2>&1 &
+# Isolate UserDefaults from host Settings (e.g. remoteCompatible without endpoint).
+SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/abbey-smoke-home.XXXXXX")"
+mkdir -p "$SMOKE_HOME/Library/Preferences"
+HOME="$SMOKE_HOME" ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor "$BIN" >/tmp/abbeybot-launch.log 2>&1 &
 PID=$!
 sleep 2
 if kill -0 "$PID" 2>/dev/null; then
   echo "LAUNCH_OK pid=$PID"
   kill "$PID" 2>/dev/null || true
   wait "$PID" 2>/dev/null || true
+  rm -rf "$SMOKE_HOME"
 else
   echo "LAUNCH_FAILED"
   cat /tmp/abbeybot-launch.log || true
+  rm -rf "$SMOKE_HOME"
   exit 1
 fi
 

@@ -18,6 +18,8 @@ public enum InferenceMode: String, CaseIterable, Codable, Identifiable, Sendable
 }
 
 /// Process configuration for AbbeyBot. Token: Keychain on Apple platforms, env/UserDefaults elsewhere.
+/// Process env knobs (`ABBEY_INFERENCE_MODE`, `ABBEY_REMOTE_ENDPOINT`, `ABBEY_DRY_RUN`, …) override
+/// UserDefaults when set so headless CLI/server boots stay hermetic.
 @Observable
 public final class AppConfig: @unchecked Sendable {
     public static let shared = AppConfig()
@@ -114,7 +116,13 @@ public final class AppConfig: @unchecked Sendable {
         static let decentralizationEnabled = "ABBEY_DECENTRALIZATION_ENABLED"
     }
 
-    public init(defaults: UserDefaults = .standard) {
+    /// - Parameter environment: process env; when a key is present it wins over UserDefaults
+    ///   for process knobs (`ABBEY_INFERENCE_MODE`, `ABBEY_REMOTE_ENDPOINT`, `ABBEY_DRY_RUN`, …)
+    ///   so CLI/server smokes are not blocked by desktop GUI leftovers.
+    public init(
+        defaults: UserDefaults = .standard,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
         self.defaults = defaults
         let modeRaw = defaults.string(forKey: Keys.operatingMode) ?? ""
         if modeRaw == "mirror" {
@@ -122,13 +130,22 @@ public final class AppConfig: @unchecked Sendable {
         } else {
             self.operatingMode = OperatingMode(rawValue: modeRaw) ?? .standalone
         }
-        let inferenceModeRaw = defaults.string(forKey: Keys.inferenceMode)
-            ?? ProcessInfo.processInfo.environment["ABBEY_INFERENCE_MODE"]
-            ?? ""
-        self.inferenceMode = InferenceMode(rawValue: inferenceModeRaw) ?? .deterministicFloor
-        self.remoteEndpoint = defaults.string(forKey: Keys.remoteEndpoint)
-            ?? ProcessInfo.processInfo.environment["ABBEY_REMOTE_ENDPOINT"]
-            ?? ""
+        // Env wins (same as dryRun): hermetic CLI/server must override desktop UserDefaults.
+        if let envInference = environment["ABBEY_INFERENCE_MODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envInference.isEmpty,
+           let parsed = InferenceMode(rawValue: envInference)
+        {
+            self.inferenceMode = parsed
+        } else {
+            let inferenceModeRaw = defaults.string(forKey: Keys.inferenceMode) ?? ""
+            self.inferenceMode = InferenceMode(rawValue: inferenceModeRaw) ?? .deterministicFloor
+        }
+        if let envEndpoint = environment["ABBEY_REMOTE_ENDPOINT"] {
+            self.remoteEndpoint = envEndpoint
+        } else {
+            self.remoteEndpoint = defaults.string(forKey: Keys.remoteEndpoint) ?? ""
+        }
         let cooldown = defaults.double(forKey: Keys.replyCooldownSeconds)
         self.replyCooldownSeconds = cooldown > 0 ? cooldown : 8.0
         let interval = defaults.double(forKey: Keys.consolidationInterval)
@@ -138,19 +155,19 @@ public final class AppConfig: @unchecked Sendable {
         self.confirmationRequiredForDestructiveActions = defaults.object(forKey: Keys.confirmationRequired) as? Bool ?? true
         self.equityModuleEnabled = defaults.object(forKey: Keys.equityModuleEnabled) as? Bool ?? true
         self.discordBotToken = TokenStore.get(account: Keys.discordBotToken)
-            ?? ProcessInfo.processInfo.environment["DISCORD_BOT_TOKEN"]
+            ?? environment["DISCORD_BOT_TOKEN"]
             ?? ""
         self.discordDevGuildId = defaults.string(forKey: Keys.discordDevGuildId)
-            ?? ProcessInfo.processInfo.environment["DISCORD_DEV_GUILD_ID"]
+            ?? environment["DISCORD_DEV_GUILD_ID"]
             ?? ""
         self.autoConnectOnLaunch = defaults.object(forKey: Keys.autoConnectOnLaunch) as? Bool ?? false
         self.syncServerURL = defaults.string(forKey: Keys.syncServerURL)
-            ?? ProcessInfo.processInfo.environment["ABBEY_SYNC_SERVER_URL"]
+            ?? environment["ABBEY_SYNC_SERVER_URL"]
             ?? ""
         self.syncAPIToken = TokenStore.get(account: Keys.syncAPIToken)
-            ?? ProcessInfo.processInfo.environment["ABBEY_SYNC_API_TOKEN"]
+            ?? environment["ABBEY_SYNC_API_TOKEN"]
             ?? ""
-        if let envDry = ProcessInfo.processInfo.environment["ABBEY_DRY_RUN"] {
+        if let envDry = environment["ABBEY_DRY_RUN"] {
             let normalized = envDry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             self.dryRun = ["1", "true", "yes", "on"].contains(normalized)
         } else if let stored = defaults.object(forKey: Keys.dryRun) as? Bool {
@@ -159,18 +176,18 @@ public final class AppConfig: @unchecked Sendable {
             self.dryRun = false
         }
         self.twitchOAuthToken = TokenStore.get(account: Keys.twitchOAuthToken)
-            ?? ProcessInfo.processInfo.environment["TWITCH_OAUTH_TOKEN"]
+            ?? environment["TWITCH_OAUTH_TOKEN"]
             ?? ""
         self.twitchBotLogin = defaults.string(forKey: Keys.twitchBotLogin)
-            ?? ProcessInfo.processInfo.environment["TWITCH_BOT_LOGIN"]
+            ?? environment["TWITCH_BOT_LOGIN"]
             ?? ""
         self.twitchChannel = defaults.string(forKey: Keys.twitchChannel)
-            ?? ProcessInfo.processInfo.environment["TWITCH_CHANNEL"]
+            ?? environment["TWITCH_CHANNEL"]
             ?? ""
         let industryRaw = defaults.string(forKey: Keys.industryProfile)
-            ?? ProcessInfo.processInfo.environment["ABBEY_INDUSTRY_PROFILE"]
+            ?? environment["ABBEY_INDUSTRY_PROFILE"]
         self.industryProfile = IndustryProfile.resolve(industryRaw)
-        if let envDec = ProcessInfo.processInfo.environment["ABBEY_DECENTRALIZATION_ENABLED"] {
+        if let envDec = environment["ABBEY_DECENTRALIZATION_ENABLED"] {
             let normalized = envDec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             self.decentralizationEnabled = ["1", "true", "yes", "on"].contains(normalized)
         } else if let stored = defaults.object(forKey: Keys.decentralizationEnabled) as? Bool {
