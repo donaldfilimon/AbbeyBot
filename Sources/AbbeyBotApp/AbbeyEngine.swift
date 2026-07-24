@@ -25,6 +25,8 @@ final class AbbeyEngine {
     private(set) var discordState: DiscordConnectionState = .disconnected
     private(set) var discordLastError: String?
     private(set) var discordBotUserId: String?
+    private(set) var discordVoiceChannelId: String?
+    private(set) var discordVoiceGuildId: String?
     private(set) var liveIngestCount: Int = 0
 
     let discordBridge = DiscordBridge()
@@ -66,8 +68,34 @@ final class AbbeyEngine {
             await scheduler.start()
         }
 
+        if !config.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Non-blocking pull MVP — failures land in SyncStatus only.
+            Task { await self.pullFromServer() }
+        }
+
         if config.operatingMode == .liveDiscord, config.autoConnectOnLaunch, !config.discordBotToken.isEmpty {
             Task { await self.connectDiscord() }
+        }
+    }
+
+    /// Best-effort pull from AbbeyServer list endpoints into SwiftData.
+    /// Failures never throw to callers; they are recorded on `SyncStatus`.
+    func pullFromServer() async {
+        let url = config.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else { return }
+
+        SyncStatus.shared.beginPull()
+        do {
+            let counts = try await SyncPull.run(into: modelContainer)
+            SyncStatus.shared.recordPullSuccess(
+                users: counts.usersUpserted,
+                channels: counts.channelsUpserted,
+                messages: counts.messagesInserted
+            )
+            await socialBrain.warmCache()
+        } catch {
+            print("[sync] pull failed: \(error)")
+            SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
         }
     }
 
@@ -288,6 +316,25 @@ final class AbbeyEngine {
         discordState = await discordBridge.state
         discordLastError = await discordBridge.lastError
         discordBotUserId = await discordBridge.botUserId
+        discordVoiceChannelId = await discordBridge.voiceChannelId
+        discordVoiceGuildId = await discordBridge.voiceGuildId
+    }
+
+    /// Gateway voice presence only (muted/deafened; no Opus/UDP audio).
+    @discardableResult
+    func joinVoice(guildId: String, channelId: String) async -> String {
+        let message = await performVoice(.join(channelId: channelId), guildId: guildId)
+        await refreshDiscordStatus()
+        return message
+    }
+
+    /// Leave tracked (or given) guild voice presence.
+    @discardableResult
+    func leaveVoice(guildId: String? = nil) async -> String {
+        let gid = guildId ?? discordVoiceGuildId ?? ""
+        let message = await performVoice(.leave, guildId: gid)
+        await refreshDiscordStatus()
+        return message
     }
 
     func registerSlashCommands() async throws {
@@ -414,7 +461,32 @@ final class AbbeyEngine {
                 let mapped = PersonaName.resolve(name)
                 await self.personaRouter.setPersona(named: mapped)
                 return DiscordCopy.switchedPersona(mapped)
+            },
+            voice: { [weak self] action, guildId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let message = await self.performVoice(action, guildId: guildId)
+                await self.refreshDiscordStatus()
+                return message
             }
         )
+    }
+
+    private func performVoice(_ action: VoiceAction, guildId: String) async -> String {
+        let state = await discordBridge.state
+        guard state == .connected else { return DiscordCopy.voiceNotConnected }
+        let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedGuild.isEmpty, trimmedGuild != "DM" else {
+            return DiscordCopy.voiceMissingGuild
+        }
+        switch action {
+        case .join(let channelId):
+            let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedChannel.isEmpty else { return DiscordCopy.voiceMissingChannel }
+            let ok = await discordBridge.joinVoice(guildId: trimmedGuild, channelId: trimmedChannel)
+            return ok ? DiscordCopy.voiceJoined(channelId: trimmedChannel) : DiscordCopy.voiceNotConnected
+        case .leave:
+            let ok = await discordBridge.leaveVoice(guildId: trimmedGuild)
+            return ok ? DiscordCopy.voiceLeft(guildId: trimmedGuild) : DiscordCopy.voiceMissingGuild
+        }
     }
 }

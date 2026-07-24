@@ -104,10 +104,17 @@ struct SettingsView: View {
                     .foregroundStyle(.tertiary)
                 Text(config.syncServerURL.isEmpty
                      ? "Sync is off — local SwiftData stays the only source of truth."
-                     : "Best-effort mirrors ingests, remembers, and forgets to AbbeyServer. Failures never block the local write.")
+                     : "Push mirrors ingest/remember/forget; pull upserts users/channels and inserts missing messages. Failures never block local writes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !config.syncServerURL.isEmpty {
+                    Button("Pull now") {
+                        Task { await engine.pullFromServer() }
+                    }
+                    .disabled(syncStatus.isPulling)
+                    Text(syncStatus.pullSummary)
+                        .font(.caption)
+                        .foregroundStyle(syncStatus.lastPullError == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
                     Text(syncStatus.summary)
                         .font(.caption)
                         .foregroundStyle(syncStatus.lastError == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))

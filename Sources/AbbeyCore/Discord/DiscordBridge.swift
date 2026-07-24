@@ -24,6 +24,9 @@ public actor DiscordBridge {
     public private(set) var state: DiscordConnectionState = .disconnected
     public private(set) var lastError: String?
     public private(set) var botUserId: String?
+    /// Current voice-channel presence (gateway update only; no Opus/UDP audio).
+    public private(set) var voiceChannelId: String?
+    public private(set) var voiceGuildId: String?
 
     private var gateway: BotGatewayManager?
     private var eventTask: Task<Void, Never>?
@@ -61,7 +64,8 @@ public actor DiscordBridge {
                 .messageContent,
                 .guildMembers,
                 .directMessages,
-                .guildMessageReactions
+                .guildMessageReactions,
+                .guildVoiceStates
             ]
         )
         self.gateway = bot
@@ -78,12 +82,58 @@ public actor DiscordBridge {
     }
 
     public func disconnect() async {
+        if let guildId = voiceGuildId {
+            _ = await leaveVoice(guildId: guildId)
+        }
         eventTask?.cancel()
         eventTask = nil
         // BotGatewayManager has no explicit disconnect API in all versions — drop reference.
         gateway = nil
         state = .disconnected
         botUserId = nil
+        voiceChannelId = nil
+        voiceGuildId = nil
+    }
+
+    /// Appear in a voice channel via gateway `Voice State Update` (self-mute + self-deaf).
+    /// DiscordBM has no Opus/UDP — this is presence only, not audio.
+    @discardableResult
+    public func joinVoice(guildId: String, channelId: String) async -> Bool {
+        guard let gateway else { return false }
+        let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedGuild.isEmpty, !trimmedChannel.isEmpty else { return false }
+        await gateway.updateVoiceState(
+            payload: VoiceStateUpdate(
+                guildId: GuildSnowflake(trimmedGuild),
+                channelId: ChannelSnowflake(trimmedChannel),
+                selfMute: true,
+                selfDeaf: true
+            )
+        )
+        voiceGuildId = trimmedGuild
+        voiceChannelId = trimmedChannel
+        return true
+    }
+
+    /// Leave voice by sending `channel_id: null` for the guild (defaults to tracked guild).
+    @discardableResult
+    public func leaveVoice(guildId: String? = nil) async -> Bool {
+        guard let gateway else { return false }
+        let trimmed = (guildId ?? voiceGuildId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return false }
+        await gateway.updateVoiceState(
+            payload: VoiceStateUpdate(
+                guildId: GuildSnowflake(trimmed),
+                channelId: nil,
+                selfMute: true,
+                selfDeaf: true
+            )
+        )
+        voiceGuildId = nil
+        voiceChannelId = nil
+        return true
     }
 
     func noteReady(userId: String) {

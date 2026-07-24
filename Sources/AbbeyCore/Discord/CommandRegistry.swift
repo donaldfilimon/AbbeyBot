@@ -8,7 +8,12 @@ public enum CommandRegistry {
             .init(name: "remember", description: "Store a fact about a user", options: [userOption, factOption]),
             .init(name: "forget", description: "Remove a stored fact", options: [userOption, factIndexOption]),
             .init(name: "context", description: "Show channel memory summary"),
-            .init(name: "persona", description: "Switch active persona", options: [personaOption])
+            .init(name: "persona", description: "Switch active persona", options: [personaOption]),
+            .init(
+                name: "voice",
+                description: "Join or leave voice (presence only — no audio)",
+                options: [voiceJoinSubcommand, voiceLeaveSubcommand]
+            )
         ]
     }
 
@@ -31,6 +36,24 @@ public enum CommandRegistry {
             .init(name: "Aviva", value: .string("aviva")),
             .init(name: "Abi", value: .string("abi"))
         ]
+    )
+    public static let voiceChannelOption = ApplicationCommand.Option(
+        type: .channel,
+        name: "channel",
+        description: "Voice channel to appear in",
+        required: true,
+        channel_types: [.guildVoice, .guildStageVoice]
+    )
+    public static let voiceJoinSubcommand = ApplicationCommand.Option(
+        type: .subCommand,
+        name: "join",
+        description: "Appear in a voice channel (muted/deafened; no audio)",
+        options: [voiceChannelOption]
+    )
+    public static let voiceLeaveSubcommand = ApplicationCommand.Option(
+        type: .subCommand,
+        name: "leave",
+        description: "Leave voice (presence only — no audio)"
     )
 
     public static func register(client: any DiscordClient, guildId: String?) async throws {
