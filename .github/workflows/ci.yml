@@ -5,31 +5,33 @@ on:
     branches: [main, "cursor/**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   linux:
-    # Covers AbbeyCore, AbbeyServerKit, AbbeyServer, AbbeyCLI — none of these import
-    # AppKit/SwiftUI/SwiftData, so they build on Linux (same toolchain as Dockerfile).
-    # AbbeyBotApp (desktop) is excluded: it hard-requires macOS 27 + AppKit/SwiftUI, which
-    # no GitHub-hosted runner currently satisfies. See "macos-desktop" job below.
+    # AbbeyCore / AbbeyServerKit / AbbeyServer / AbbeyCLI only (no AppKit/SwiftUI/SwiftData).
+    # Prefer docker run over job-level `container:` so a bad/missing image is a step failure,
+    # not an Actions startup_failure with zero jobs.
     runs-on: ubuntu-latest
-    container: swift:6.4-bookworm
+    env:
+      SWIFT_IMAGE: swiftlang/swift:nightly-6.4.x-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache SwiftPM
-        uses: actions/cache@v4
-        with:
-          path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+      - name: Pull Swift toolchain image
+        run: docker pull "$SWIFT_IMAGE"
 
       - name: Resolve dependencies
-        run: swift package resolve
+        run: >
+          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          swift package resolve
 
       - name: Build (server + CLI + core)
         run: >
+          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift build
           --target AbbeyCore
           --target AbbeyServerKit
@@ -37,26 +39,18 @@ jobs:
           --target AbbeyCLI
 
       - name: Test AbbeyCoreTests
-        run: swift test --filter AbbeyCoreTests
+        run: >
+          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          swift test --filter AbbeyCoreTests
 
       - name: Test AbbeyCLITests
-        run: swift test --filter AbbeyCLITests
+        run: >
+          docker run --rm -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          swift test --filter AbbeyCLITests
 
       - name: Test AbbeyServerKitTests
         env:
           DATABASE_URL: sqlite://memory
-        run: swift test --filter AbbeyServerKitTests
-
-  macos-desktop:
-    # AbbeyBotApp needs a macOS 27 + Xcode host, which GitHub-hosted macos-* runners do
-    # not currently provide (they lag the newest macOS release by months). This job is a
-    # placeholder for a self-hosted runner registered against this repo — see AGENTS.md.
-    # Until one is confirmed, this job is disabled rather than failing CI on every push.
-    if: false
-    runs-on: [self-hosted, macOS]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Desktop smoke
-        run: |
-          unset TOOLCHAINS
-          bash Scripts/run-smoke.sh
+        run: >
+          docker run --rm -e DATABASE_URL -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          swift test --filter AbbeyServerKitTests
