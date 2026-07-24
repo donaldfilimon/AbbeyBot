@@ -105,6 +105,10 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 
 **Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
 
+**Live dispatch:** `AbbeyEngine` and `BotRuntime` call `ABIRouter.route(intent:)` (via `IntentClassifier`) on message ingress `craftReply` and slash `/ask` — not only `currentPersona()`.
+
+**Roles reference:** `research_mlai.md` (Abbey-Aviva-Abi framework §2) is the role/policy source of truth only; do not port WDBX throughput, Python stack, or industry pilot claims as AbbeyBot product features.
+
 **Not shipped (do not claim as product features):** Python persona framework, TensorFlow/PyTorch stack, blockchain decentralization, industry healthcare/finance pilots, GDPR certification, or HIPAA compliance modules.
 
 ## Learning & Safety Policy
