@@ -12,7 +12,8 @@ import SwiftData
 /// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing
 /// - `ReputationEvent` / `InteractionLog` — insert-if-missing by Fluent `serverId` only
 ///   (rows without `id` are skipped — no fragile composite identity)
-/// - `EquityIdea` by `symbol` — thesis/score/factors/generatedAt (**server wins**) or insert
+/// - `EquityIdea` by `symbol` — thesis/score/factors (**last-write-wins by `generatedAt`**:
+///   ideas are regenerated rather than edited, so the more recently generated idea wins) or insert
 enum SyncPull {
     static let defaultLimit = 500
 
@@ -228,7 +229,7 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func upsertEquity(
+    static func upsertEquity(
         _ rows: [SyncDTO.Equity],
         into context: ModelContext
     ) throws -> Int {
@@ -236,6 +237,13 @@ enum SyncPull {
         for row in rows {
             let symbol = row.symbol
             if let existing = try firstMatching(EquityIdea.self, predicate: #Predicate { $0.symbol == symbol }, in: context) {
+                // Last-write-wins by generation time: equity ideas are regenerated rather than
+                // edited, so the more recently generated idea for a symbol wins. Keeps a locally
+                // generated idea from being clobbered by a staler one the server still holds.
+                if let remoteGeneratedAt = row.generatedAt, remoteGeneratedAt < existing.generatedAt {
+                    count += 1
+                    continue
+                }
                 existing.thesisSummary = row.thesisSummary
                 existing.syntheticScore = row.syntheticScore
                 existing.factorBreakdown = row.factorBreakdown

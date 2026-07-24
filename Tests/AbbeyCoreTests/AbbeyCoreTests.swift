@@ -318,6 +318,24 @@ struct AbbeyCoreTests {
         try config.validateForStartup()
     }
 
+    @Test func appConfigEnvOverridesUserDefaultsInference() throws {
+        let suite = "AbbeyCoreTests.envInference.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(InferenceMode.remoteCompatible.rawValue, forKey: "ABBEY_INFERENCE_MODE")
+        defaults.set("", forKey: "ABBEY_REMOTE_ENDPOINT")
+        let config = AppConfig(
+            defaults: defaults,
+            environment: [
+                "ABBEY_INFERENCE_MODE": "deterministicFloor",
+                "ABBEY_REMOTE_ENDPOINT": "https://env.example/v1",
+            ]
+        )
+        #expect(config.inferenceMode == .deterministicFloor)
+        #expect(config.remoteEndpoint == "https://env.example/v1")
+        try config.validateForStartup(scope: .headless)
+    }
+
     @Test func dqnCheckpointRoundTripPreservesGreedyAction() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("abbey-dqn-\(UUID().uuidString)", isDirectory: true)

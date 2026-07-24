@@ -23,7 +23,9 @@ test -x "$BIN"
 echo "======== 2/3 boot cli with temp sqlite (dry-run) ========"
 OUT=/tmp/abbey-cli-smoke.log
 # `env` must wrap the binary (right side of the pipe), not printf.
-printf '/exit\n' | env ABBEY_DRY_RUN=1 DATABASE_URL="sqlite://${SQLITE_PATH}" \
+# Pin inference mode so desktop UserDefaults (e.g. remoteCompatible without endpoint) cannot block smoke.
+printf '/exit\n' | env ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
+  DATABASE_URL="sqlite://${SQLITE_PATH}" \
   "$BIN" cli >"$OUT" 2>&1 || {
   echo "CLI_SMOKE_FAIL: binary exit nonzero"
   cat "$OUT" || true
@@ -52,6 +54,7 @@ OUT2=/tmp/abbey-cli-smoke-gate.log
   # Pin temp sqlite so smoke does not touch the operator's ~/.abbey DB.
   export DATABASE_URL="sqlite://${SQLITE_PATH}.isolated"
   export ABBEY_DRY_RUN=1
+  export ABBEY_INFERENCE_MODE=deterministicFloor
   printf '/exit\n' | "$BIN" cli
 ) >"$OUT2" 2>&1 || {
   echo "CLI_SMOKE_FAIL: isolation boot failed"
