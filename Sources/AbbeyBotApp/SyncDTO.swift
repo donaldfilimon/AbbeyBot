@@ -37,6 +37,7 @@ enum SyncDTO {
         var authorId: String
         var content: String
         var createdAt: Date?
+        var deletedAt: Date? = nil
     }
 
     /// Insert-if-missing keyed by Fluent `id` (`serverId` locally). Rows without `id` are skipped.
@@ -47,6 +48,7 @@ enum SyncDTO {
         var delta: Double
         var reason: String
         var createdAt: Date?
+        var deletedAt: Date? = nil
     }
 
     /// Insert-if-missing keyed by Fluent `id` (`serverId` locally). Rows without `id` are skipped.
@@ -58,6 +60,7 @@ enum SyncDTO {
         var succeeded: Bool
         var latencyMs: Double
         var createdAt: Date?
+        var deletedAt: Date? = nil
     }
 
     struct Equity: Decodable, Sendable {
@@ -67,5 +70,6 @@ enum SyncDTO {
         var syntheticScore: Double
         var factorBreakdown: [String: Double]
         var generatedAt: Date?
+        var deletedAt: Date? = nil
     }
 }

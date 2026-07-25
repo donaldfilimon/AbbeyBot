@@ -310,4 +310,25 @@ struct AbbeyServerKitTests {
             #expect(live.first?.deletedAt == nil)
         }
     }
+
+    @Test func messageTombstoneHidesFromFullListAndSurfacesOnSince() async throws {
+        try await withRuntime { app, runtime in
+            try await MessageRepository.insert(
+                discordMessageId: "m-tomb",
+                channelId: "c1",
+                guildId: "g1",
+                authorId: "u1",
+                content: "bye",
+                on: app.db
+            )
+            let before = Date().addingTimeInterval(-1)
+            try await runtime.tombstoneMessage(discordMessageId: "m-tomb")
+
+            #expect(try await MessageRepository.recent(limit: 10, on: app.db).isEmpty)
+            let since = try await MessageRepository.recent(limit: 10, since: before, on: app.db)
+            #expect(since.count == 1)
+            #expect(since.first?.deletedAt != nil)
+            #expect(try await MessageRepository.count(on: app.db) == 0)
+        }
+    }
 }

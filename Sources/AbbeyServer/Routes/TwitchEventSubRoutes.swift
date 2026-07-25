@@ -4,9 +4,9 @@ import Vapor
 
 /// Webhook receiver for Twitch EventSub. Verifies the HMAC-SHA256 signature Twitch attaches
 /// to every delivery (`Twitch-Eventsub-Message-Signature`), then handles callback verification
-/// (`challenge` echo), dedupes by `Twitch-Eventsub-Message-Id`, and logs notification/revocation
-/// payloads. See AGENTS.md for what's still deferred (per-event-type business logic,
-/// auto-subscribe, PubSub).
+/// (`challenge` echo), dedupes by `Twitch-Eventsub-Message-Id`, and dispatches per message type
+/// via `TwitchEventSubHandler`. Still deferred: auto-subscribe on boot, PubSub, live Helix
+/// wiring, and product side-effects per subscription type.
 struct TwitchEventSubWebhookDTO: Content {
     var challenge: String?
     var subscription: TwitchEventSubSubscriptionDTO?
@@ -22,6 +22,7 @@ struct TwitchEventSubAckDTO: Content {
     var ok: Bool
     var handled: Bool
     var duplicate: Bool?
+    var outcome: String?
 }
 
 enum TwitchEventSubRoutes {
@@ -74,18 +75,39 @@ enum TwitchEventSubRoutes {
                 req.logger.info(
                     "Twitch EventSub webhook: duplicate messageId=\(messageId); acking without reprocessing"
                 )
-                return try await TwitchEventSubAckDTO(ok: true, handled: false, duplicate: true)
-                    .encodeResponse(for: req)
+                return try await TwitchEventSubAckDTO(
+                    ok: true, handled: false, duplicate: true, outcome: "duplicate"
+                ).encodeResponse(for: req)
             }
 
             let messageType = req.headers.first(name: "Twitch-Eventsub-Message-Type") ?? "unknown"
-            let subscriptionType = body.subscription?.type ?? "unknown"
-            req.logger.info(
-                "Twitch EventSub webhook: messageType=\(messageType) subscriptionType=\(subscriptionType) verified=ok; per-event handling deferred"
+            let outcome = TwitchEventSubHandler.handle(
+                messageType: messageType,
+                subscriptionType: body.subscription?.type,
+                subscriptionStatus: body.subscription?.status
             )
+            req.logger.info("\(TwitchEventSubHandler.logLine(for: outcome))")
 
-            return try await TwitchEventSubAckDTO(ok: true, handled: false, duplicate: false)
-                .encodeResponse(for: req)
+            let handled: Bool
+            let outcomeLabel: String
+            switch outcome {
+            case .challenge:
+                handled = true
+                outcomeLabel = "challenge"
+            case .revocation:
+                handled = true
+                outcomeLabel = "revocation"
+            case .notificationAcknowledged:
+                handled = false
+                outcomeLabel = "notification"
+            case .ignored:
+                handled = false
+                outcomeLabel = "ignored"
+            }
+
+            return try await TwitchEventSubAckDTO(
+                ok: true, handled: handled, duplicate: false, outcome: outcomeLabel
+            ).encodeResponse(for: req)
         }
     }
 }

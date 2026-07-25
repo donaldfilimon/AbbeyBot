@@ -12,11 +12,13 @@ import SwiftData
 ///   `updatedAt`, the local SwiftData row is **hard-deleted** (tombstone application).
 /// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (same last-write-wins
 ///   and tombstone rules)
-/// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing
+/// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing;
+///   remote `deletedAt` hard-deletes the local row
 /// - `ReputationEvent` / `InteractionLog` — insert-if-missing by Fluent `serverId` only
-///   (rows without `id` are skipped — no fragile composite identity)
+///   (rows without `id` are skipped — no fragile composite identity); remote `deletedAt` hard-deletes
 /// - `EquityIdea` by `symbol` — thesis/score/factors (**last-write-wins by `generatedAt`**:
-///   ideas are regenerated rather than edited, so the more recently generated idea wins) or insert
+///   ideas are regenerated rather than edited, so the more recently generated idea wins) or insert;
+///   remote `deletedAt` hard-deletes when `deletedAt` ≥ local `generatedAt`
 enum SyncPull {
     static let defaultLimit = 500
 
@@ -184,13 +186,16 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func insertMissingMessages(_ rows: [SyncDTO.Message], into context: ModelContext) throws -> Int {
+    static func insertMissingMessages(_ rows: [SyncDTO.Message], into context: ModelContext) throws -> Int {
         var inserted = 0
         for row in rows {
             let messageId = row.discordMessageId
-            if try firstMatching(GuildMessage.self, predicate: #Predicate { $0.discordMessageId == messageId }, in: context) != nil {
+            let existing = try firstMatching(GuildMessage.self, predicate: #Predicate { $0.discordMessageId == messageId }, in: context)
+            if row.deletedAt != nil {
+                if let existing { context.delete(existing) }
                 continue
             }
+            if existing != nil { continue }
             context.insert(
                 GuildMessage(
                     discordMessageId: row.discordMessageId,
@@ -214,9 +219,12 @@ enum SyncPull {
         var inserted = 0
         for row in rows {
             guard let serverId = row.id else { continue }
-            if try firstMatching(ReputationEvent.self, predicate: #Predicate { $0.serverId == serverId }, in: context) != nil {
+            let existing = try firstMatching(ReputationEvent.self, predicate: #Predicate { $0.serverId == serverId }, in: context)
+            if row.deletedAt != nil {
+                if let existing { context.delete(existing) }
                 continue
             }
+            if existing != nil { continue }
             context.insert(
                 ReputationEvent(
                     serverId: serverId,
@@ -240,9 +248,12 @@ enum SyncPull {
         var inserted = 0
         for row in rows {
             guard let serverId = row.id else { continue }
-            if try firstMatching(InteractionLog.self, predicate: #Predicate { $0.serverId == serverId }, in: context) != nil {
+            let existing = try firstMatching(InteractionLog.self, predicate: #Predicate { $0.serverId == serverId }, in: context)
+            if row.deletedAt != nil {
+                if let existing { context.delete(existing) }
                 continue
             }
+            if existing != nil { continue }
             context.insert(
                 InteractionLog(
                     serverId: serverId,
@@ -267,7 +278,18 @@ enum SyncPull {
         var count = 0
         for row in rows {
             let symbol = row.symbol
-            if let existing = try firstMatching(EquityIdea.self, predicate: #Predicate { $0.symbol == symbol }, in: context) {
+            let existing = try firstMatching(EquityIdea.self, predicate: #Predicate { $0.symbol == symbol }, in: context)
+
+            if let deletedAt = row.deletedAt {
+                // Tombstone stamp is `deletedAt` (soft-delete does not bump `generatedAt`).
+                if let existing, deletedAt >= existing.generatedAt {
+                    context.delete(existing)
+                }
+                count += 1
+                continue
+            }
+
+            if let existing {
                 // Last-write-wins by generation time: equity ideas are regenerated rather than
                 // edited, so the more recently generated idea for a symbol wins. Keeps a locally
                 // generated idea from being clobbered by a staler one the server still holds.
