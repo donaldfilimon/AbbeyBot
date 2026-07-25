@@ -22,7 +22,34 @@ public actor TwitchBridge {
     private var isDryRun = false
     private let logger = Logger(label: "AbbeyBot.TwitchBridge")
 
-    public init() {}
+    /// Reconnect-with-backoff state. `reconnectParams` doubles as "should we even try to
+    /// reconnect" — `disconnect()` clears it, so a stale in-flight backoff sleep becomes a
+    /// no-op once it wakes (on top of the sleep itself being cancelled).
+    private var reconnectParams: ConnectionParams?
+    private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
+    private let reconnectBaseDelay: TimeInterval
+    private let reconnectMaxDelay: TimeInterval
+    /// ±20% jitter so many bot instances dropped by the same Twitch-side event don't all
+    /// retry in lockstep.
+    private static let reconnectJitterFraction = 0.2
+
+    private struct ConnectionParams: Sendable {
+        var oauthToken: String
+        var login: String
+        var channel: String
+        var hooks: TwitchEventHooks
+        var host: String
+        var port: Int
+    }
+
+    /// - Parameters:
+    ///   - reconnectBaseDelay/reconnectMaxDelay: real-world defaults (2s / 60s); overridable so
+    ///     tests can exercise the backoff loop without waiting through real-world delays.
+    public init(reconnectBaseDelay: TimeInterval = 2, reconnectMaxDelay: TimeInterval = 60) {
+        self.reconnectBaseDelay = reconnectBaseDelay
+        self.reconnectMaxDelay = reconnectMaxDelay
+    }
 
     /// Send a channel PRIVMSG. Dry-run logs only; no-op if disconnected.
     public func sendPrivmsg(channel: String, text: String) async {
@@ -97,21 +124,45 @@ public actor TwitchBridge {
             return
         }
 
+        // Clean slate first: cancels any prior readTask/reconnectTask and clears the old
+        // reconnectParams, so the params set right after aren't immediately wiped out.
         await disconnect()
-        self.hooks = hooks
+        let params = ConnectionParams(oauthToken: oauthToken, login: nick, channel: chan, hooks: hooks, host: host, port: port)
+        reconnectParams = params
+        reconnectAttempt = 0
+        await openConnection(params)
+    }
+
+    public func disconnect() async {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectParams = nil
+        readTask?.cancel()
+        readTask = nil
+        if let connection {
+            await connection.close()
+        }
+        connection = nil
+        state = .disconnected
+        loginNick = nil
+    }
+
+    private func openConnection(_ params: ConnectionParams) async {
+        self.hooks = params.hooks
         state = .connecting
         lastError = nil
 
         do {
-            let conn = try await TwitchIRCConnection.connect(host: host, port: port)
-            let pass = oauthToken.hasPrefix("oauth:") ? oauthToken : "oauth:\(oauthToken)"
+            let conn = try await TwitchIRCConnection.connect(host: params.host, port: params.port)
+            let pass = params.oauthToken.hasPrefix("oauth:") ? params.oauthToken : "oauth:\(params.oauthToken)"
             try await conn.send("PASS \(pass)")
-            try await conn.send("NICK \(nick)")
-            try await conn.send("JOIN #\(chan)")
+            try await conn.send("NICK \(params.login)")
+            try await conn.send("JOIN #\(params.channel)")
             connection = conn
-            loginNick = nick
+            loginNick = params.login
             state = .connected
-            logger.info("Twitch IRC connected nick=\(nick) channel=#\(chan)")
+            reconnectAttempt = 0
+            logger.info("Twitch IRC connected nick=\(params.login) channel=#\(params.channel)")
 
             readTask = Task { [weak self] in
                 guard let self else { return }
@@ -123,18 +174,8 @@ public actor TwitchBridge {
             connection = nil
             loginNick = nil
             logger.error("Twitch IRC connect failed: \(lastError ?? "")")
+            scheduleReconnect()
         }
-    }
-
-    public func disconnect() async {
-        readTask?.cancel()
-        readTask = nil
-        if let connection {
-            await connection.close()
-        }
-        connection = nil
-        state = .disconnected
-        loginNick = nil
     }
 
     private func pump(_ conn: TwitchIRCConnection) async {
@@ -148,6 +189,7 @@ public actor TwitchBridge {
                         state = .failed
                         lastError = "Twitch IRC connection closed by peer"
                         logger.warning("Twitch IRC connection closed by peer")
+                        scheduleReconnect()
                     }
                     break
                 }
@@ -169,10 +211,46 @@ public actor TwitchBridge {
                     state = .failed
                     lastError = OperatorFacingError.message(error)
                     logger.error("Twitch IRC read failed: \(lastError ?? "")")
+                    scheduleReconnect()
                 }
                 break
             }
         }
+    }
+
+    /// Schedules one reconnect attempt after an exponential-backoff-with-jitter delay. A no-op
+    /// when `reconnectParams` is nil — i.e. `disconnect()` was called and we should stay down.
+    private func scheduleReconnect() {
+        guard let params = reconnectParams else { return }
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
+            await self?.attemptReconnect(after: params)
+        }
+    }
+
+    private func attemptReconnect(after params: ConnectionParams) async {
+        reconnectAttempt += 1
+        let delay = nextReconnectDelay()
+        logger.info(
+            "Twitch IRC reconnecting in \(String(format: "%.1f", delay))s (attempt \(reconnectAttempt))"
+        )
+        do {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        } catch {
+            return // cancelled — disconnect() (or a fresh connect()) ran during the wait
+        }
+        guard !Task.isCancelled, reconnectParams != nil else { return }
+        await openConnection(params)
+    }
+
+    private func nextReconnectDelay() -> TimeInterval {
+        let capped = min(
+            reconnectBaseDelay * pow(2.0, Double(reconnectAttempt - 1)),
+            reconnectMaxDelay
+        )
+        let jitterRange = capped * Self.reconnectJitterFraction
+        let jitter = Double.random(in: -jitterRange...jitterRange)
+        return max(0.5, capped + jitter)
     }
 }
 
