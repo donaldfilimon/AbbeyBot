@@ -21,7 +21,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 3. Put shared logic in `AbbeyCore` (personas, inference, DiscordBM bridge, DQN, `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, strict-by-default `IntentClassifier`). Keep Fluent-backed engine work in `AbbeyServerKit` for AbbeyServer + `abbey`. Leave desktop `AbbeyEngine` and server `BotRuntime` as persistence adapters only.
 4. **Multi-Persona (claim-honest):** `AbbeyPersona` / `AvivaPersona` / `AbiPersona` in AbbeyCore; switch via `/persona`, ingest `personaSwitch`, or desktop Personas tab (`ABIRouter.setPersona`). Framework roles: Abbey = ethical/professional interaction; Aviva = analytical/research/architecture; Abi = moderation/compliance oversight. Engines call `ABIRouter.route(intent:)` on ingest `craftReply` and `/ask` (mod/command → Abi, question → Aviva, greeting/smallTalk → Abbey). `research_mlai.md` = roles reference only — not WDBX product. DQN = strategy selection only. Do not claim Python ML stack, blockchain decentralization, healthcare/finance industry modules, GDPR/HIPAA certification, or WDBX throughput.
 5. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` call sites so desktop and server do not drift.
-6. Respect deferred scope: Discord Voice **audio** (Opus/UDP) is out — voice **presence** (`/voice join|leave`, Discord tab) is shipped. Full CRDT / cursor pagination / CLI↔desktop sync is out. Desktop server sync is best-effort **push + pull** via `AbbeyServerClient` (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`): push mirrors ingest/remember/forget; pull on launch and Settings “Pull now” (server-wins users/channels/equity; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes.
+6. Respect deferred scope: Discord Voice **audio** (Opus/UDP) is out — voice **presence** (`/voice join|leave`, Discord tab) is shipped. Full CRDT merge and CLI↔desktop sync are out. Desktop server sync is best-effort **push + pull** via `AbbeyServerClient` (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`): durable push (outbox at `~/.abbey/pending-pushes.jsonl`); pull on launch and Settings “Pull now” with persisted `?since=` via `SyncCursorStore` (stamp-at-start; last-write-wins by `updatedAt` for users/channels; equity server-wins; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes.
 7. Prefer recent improvement focus: remember/forget engine drift, package tests in verify scripts, and DiscordCopy completeness — without claiming those are done unless evidence exists.
 
 **Toolchain (hard rules):**
@@ -61,7 +61,7 @@ Prioritize **care, clarity, and competence**. Abbey learns from feedback and tes
 **Output Format:**
 - Short verdict of what you did and which gate ran.
 - Path-anchored notes for key files touched.
-- Explicit deferred/out-of-scope callouts when relevant (Voice audio, CRDT/cursor sync, Twitch, codegen validator, rollback FS).
+- Explicit deferred/out-of-scope callouts when relevant (Voice audio, CRDT merge, CLI↔desktop sync, Twitch PubSub, codegen sandbox).
 - Next step only if blocked or user action is required (token, Docker, guild ID).
 
 **Edge Cases:**
@@ -69,5 +69,5 @@ Prioritize **care, clarity, and competence**. Abbey learns from feedback and tes
 - **Bare `swift run`:** Sole executable is `AbbeyBot` (`AbbeyEntry`). Desktop default; server/CLI via `swift run AbbeyBot serve` / `cli`.
 - **Dashboard 404:** `/dashboard` may 404 if the React SPA is not built into `Sources/AbbeyServer/Resources/Public/`; server smoke may skip that assertion — do not treat as a product regression unless the SPA was expected to be present.
 - **No Discord token:** CLI/server can run local-only with a warning; desktop live Discord needs Developer Portal bot + Message Content intent + Keychain token.
-- **Ambiguous "sync":** shipped path is push + pull (launch + “Pull now”); deferred is CRDT merge, `?since=` cursors, and CLI↔desktop sync — not “push-only mirror.”
+- **Ambiguous "sync":** shipped path is push + pull (launch + “Pull now”) with persisted `?since=` cursors; deferred is CRDT merge and CLI↔desktop sync — not “push-only mirror.”
 - **Conflicting docs vs code:** prefer code + `AGENTS.md`; fix drift rather than inventing features to match outdated prose.

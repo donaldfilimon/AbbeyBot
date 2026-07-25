@@ -29,6 +29,13 @@ struct SyncCursorStore: @unchecked Sendable {
         defaults.set(date.timeIntervalSince1970, forKey: Self.defaultsKey)
     }
 
+    /// Apply the post-pull cursor update: only advance on success, and always to
+    /// `attemptStartedAt` (never completion time). Failed pulls leave the store untouched.
+    func applyPullOutcome(attemptStartedAt: Date, succeeded: Bool) {
+        guard succeeded else { return }
+        record(attemptStartedAt)
+    }
+
     func clear() {
         defaults.removeObject(forKey: Self.defaultsKey)
     }

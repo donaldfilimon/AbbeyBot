@@ -38,14 +38,21 @@ abbey_resolve_swift() {
 # swiftly DEVELOPMENT-SNAPSHOT mixed with the macOS 27 SDK. Refuse early.
 abbey_assert_desktop_toolchain() {
   local ver
-  ver="$("${ABBEY_SWIFT_BIN[@]}" --version 2>&1 | head -5)" || true
-  if [[ "$ABBEY_SWIFT_LABEL" == "swiftly" ]] \
+  if ! ver="$("${ABBEY_SWIFT_BIN[@]}" --version 2>&1 | head -5)"; then
+    ver=""
+  fi
+  if [[ -z "$ver" ]] \
+    || [[ "$ABBEY_SWIFT_LABEL" == "swiftly" ]] \
     || [[ "$ver" == *DEVELOPMENT-SNAPSHOT* ]] \
     || [[ "$ver" == *6.5-dev* ]]; then
     echo "error: desktop must use Xcode Swift 6.4, not swiftly / DEVELOPMENT-SNAPSHOT." >&2
     echo "  PATH swift resolves to: $(command -v swift 2>/dev/null || echo '?')" >&2
     echo "  Got:" >&2
-    echo "$ver" | sed 's/^/    /' >&2
+    if [[ -z "$ver" ]]; then
+      echo "    (empty — swift --version failed or produced no output)" >&2
+    else
+      echo "$ver" | sed 's/^/    /' >&2
+    fi
     echo "Fix:" >&2
     echo "  unset TOOLCHAINS" >&2
     echo "  bash Scripts/run.sh" >&2

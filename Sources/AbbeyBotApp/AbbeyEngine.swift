@@ -180,11 +180,12 @@ final class AbbeyEngine {
                 interactions: counts.interactionsInserted,
                 equity: counts.equityUpserted
             )
-            cursorStore.record(attemptStartedAt)
+            cursorStore.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: true)
             await socialBrain.warmCache()
         } catch {
             print("[sync] pull failed: \(error)")
             SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
+            cursorStore.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: false)
         }
 
         await reportSyncStatusToServer()
