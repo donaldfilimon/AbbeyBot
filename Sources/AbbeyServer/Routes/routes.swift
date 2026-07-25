@@ -34,6 +34,8 @@ struct IngestRequestDTO: Content {
 struct IngestResponseDTO: Content {
     var ok: Bool
     var discordMessageId: String
+    /// True when the id was already present and ingest was skipped (no rescore / no second row).
+    var duplicate: Bool
 }
 
 struct RememberRequestDTO: Content {
@@ -143,14 +145,14 @@ func routes(_ app: Application) throws {
         }
         let messageId = body.discordMessageId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedId = (messageId?.isEmpty == false) ? messageId! : UUID().uuidString
-        await req.application.botRuntime.ingestMessage(
+        let ingested = await req.application.botRuntime.ingestMessage(
             content: content,
             channelId: body.channelId.isEmpty ? "api" : body.channelId,
             guildId: body.guildId.isEmpty ? "api" : body.guildId,
             authorId: body.authorId.isEmpty ? "api" : body.authorId,
             discordMessageId: resolvedId
         )
-        return IngestResponseDTO(ok: true, discordMessageId: resolvedId)
+        return IngestResponseDTO(ok: true, discordMessageId: resolvedId, duplicate: !ingested)
     }
 
     // Keyed shared-state reads/writes for the desktop app's sync client. Distinct from

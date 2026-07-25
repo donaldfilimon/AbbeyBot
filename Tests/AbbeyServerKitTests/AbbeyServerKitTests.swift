@@ -324,6 +324,37 @@ struct AbbeyServerKitTests {
         }
     }
 
+    @Test func ingestMessageSkipsDuplicateDiscordMessageIdWithoutRescoring() async throws {
+        try await withRuntime { app, runtime in
+            let first = await runtime.ingestMessage(
+                content: "hello once",
+                channelId: "c-dedupe",
+                guildId: "g-dedupe",
+                authorId: "u-dedupe",
+                discordMessageId: "m-dedupe"
+            )
+            #expect(first == true)
+
+            let interactionsAfterFirst = try await InteractionLog.query(on: app.db).count()
+            let messagesAfterFirst = try await MessageRepository.count(on: app.db)
+
+            let second = await runtime.ingestMessage(
+                content: "hello again — should not land",
+                channelId: "c-dedupe",
+                guildId: "g-dedupe",
+                authorId: "u-dedupe",
+                discordMessageId: "m-dedupe"
+            )
+            #expect(second == false)
+            #expect(try await MessageRepository.count(on: app.db) == messagesAfterFirst)
+            #expect(try await InteractionLog.query(on: app.db).count() == interactionsAfterFirst)
+
+            let rows = try await MessageRepository.recent(limit: 10, on: app.db)
+            #expect(rows.contains { $0.discordMessageId == "m-dedupe" && $0.content == "hello once" })
+            #expect(!rows.contains { $0.content == "hello again — should not land" })
+        }
+    }
+
     @Test func messageTombstoneHidesFromFullListAndSurfacesOnSince() async throws {
         try await withRuntime { app, runtime in
             try await MessageRepository.insert(

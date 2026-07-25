@@ -171,6 +171,15 @@ public enum EquityTombstoneError: Error, Equatable {
 }
 
 public enum MessageRepository {
+    /// True when any row (live or soft-deleted) already owns this Discord message id.
+    /// The column is unique, so a bare `create` would throw on retry — callers that want
+    /// retry-safe ingest must check this first and skip rather than swallow a constraint error.
+    public static func exists(discordMessageId: String, on db: any Database) async throws -> Bool {
+        try await GuildMessage.query(on: db)
+            .filter(\.$discordMessageId == discordMessageId)
+            .first() != nil
+    }
+
     public static func insert(
         discordMessageId: String,
         channelId: String,

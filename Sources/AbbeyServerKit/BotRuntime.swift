@@ -262,15 +262,27 @@ public actor BotRuntime {
         discordState = .connected
     }
 
+    /// Ingest a message under the given Discord id. Returns `true` when a new row was
+    /// inserted and scored; `false` when the id already exists (live or soft-deleted) — a
+    /// retry-safe skip that does **not** re-run channel bump, scoring, or the interaction
+    /// log. Callers that surface the outcome (HTTP `/api/ingest`) should report the skip as
+    /// a duplicate rather than a bare success.
+    @discardableResult
     public func ingestMessage(
         content: String,
         channelId: String,
         guildId: String,
         authorId: String,
         discordMessageId: String
-    ) async {
+    ) async -> Bool {
         let started = ContinuousClock.now
         do {
+            if try await MessageRepository.exists(discordMessageId: discordMessageId, on: app.db) {
+                app.logger.info(
+                    "ingest skipped — discordMessageId=\(discordMessageId) already present (duplicate)"
+                )
+                return false
+            }
             try await MessageRepository.insert(
                 discordMessageId: discordMessageId,
                 channelId: channelId,
@@ -323,8 +335,10 @@ public actor BotRuntime {
                 latencyMs: IngestScorer.latencyMilliseconds(since: started),
                 on: app.db
             )
+            return true
         } catch {
             app.logger.error("ingest failed: \(error)")
+            return false
         }
     }
 
