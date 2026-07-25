@@ -53,8 +53,6 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
     app.logger.info("Database dialect: \(dialect)")
 
     app.migrations.add(CreateAll())
-    app.migrations.add(AddDeletedAtToUserAndChannel())
-    app.migrations.add(AddDeletedAtToAppendOnlyEntities())
     try await app.autoMigrate()
 
     let runtime = BotRuntime(app: app)
