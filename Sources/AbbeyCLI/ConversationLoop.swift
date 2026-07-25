@@ -89,12 +89,20 @@ final class ConversationLoop {
                     }
                 }
 
-            case .sync:
+            case .sync(nil):
                 let snapshot = await runtime.syncStatusSnapshot()
                 let shared = CLISyncStatusReport.sharesServerDatabase(
                     environment: ProcessInfo.processInfo.environment
                 )
                 print(CLISyncStatusReport.render(snapshot, sharesServerDatabase: shared))
+
+            case .sync("pull"):
+                for line in await CLISyncPull.run(runtime: runtime) {
+                    print(line)
+                }
+
+            case .sync(let argument?):
+                print("Unknown /sync argument '\(argument)'. Usage: /sync (status) or /sync pull.")
 
             case .exit:
                 break replLoop
@@ -115,6 +123,7 @@ final class ConversationLoop {
           /model [mode]    Show or set the inference mode (\(InferenceMode.allCases.map(\.rawValue).joined(separator: ", "))).
           /validate <src>  Static CodeProposalValidator (not a sandbox).
           /sync            Show the desktop-reported sync status in this database (read-only).
+          /sync pull       Pull server rows into this database (ABBEY_SYNC_SERVER_URL; cursor at ~/.abbey/cli-sync-cursor).
           /exit, /quit     Quit.
         """)
     }

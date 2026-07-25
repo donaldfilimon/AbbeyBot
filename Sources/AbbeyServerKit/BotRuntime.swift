@@ -57,7 +57,8 @@ public struct ChannelStateDTO: Content {
 }
 
 /// The desktop-reported sync outcome as stored in this runtime's database, plus the dialect
-/// it came from. Read-only: neither the server nor the CLI performs desktop-style push/pull.
+/// it came from. The server never pushes or pulls; the CLI can pull (`/sync pull`) but
+/// reporting into this row stays a desktop concern.
 public struct SyncStatusSnapshotDTO: Content, Sendable {
     public var databaseDialect: String
     public var lastPullAt: Date?
@@ -428,6 +429,12 @@ public actor BotRuntime {
 
     public func tombstoneEquity(symbol: String) async throws {
         try await EquityRepository.softDelete(symbol: symbol, on: app.db)
+    }
+
+    /// The runtime's default Fluent database — exposed for the CLI's `/sync pull`, which
+    /// applies pulled server rows via `ServerSyncApply` without opening a second connection.
+    public var database: any Database {
+        app.db
     }
 
     /// The sync-status row visible in *this* runtime's database. When the CLI runs on its own
