@@ -53,12 +53,16 @@ public actor TwitchBridge {
     ///   - channel: channel to JOIN (without `#`).
     ///   - dryRun: when true, marks connected without opening a socket.
     ///   - hooks: PRIVMSG → engine ingest callbacks.
+    ///   - host/port: real Twitch IRC by default; overridable so tests can point at a local
+    ///     listener instead of mocking `TwitchIRCConnection`.
     public func connect(
         oauthToken: String,
         login: String,
         channel: String,
         dryRun: Bool = AppConfig.shared.dryRun,
-        hooks: TwitchEventHooks = TwitchEventHooks()
+        hooks: TwitchEventHooks = TwitchEventHooks(),
+        host: String = "irc.chat.twitch.tv",
+        port: Int = 6667
     ) async {
         self.hooks = hooks
         self.isDryRun = dryRun
@@ -99,10 +103,7 @@ public actor TwitchBridge {
         lastError = nil
 
         do {
-            let conn = try await TwitchIRCConnection.connect(
-                host: "irc.chat.twitch.tv",
-                port: 6667
-            )
+            let conn = try await TwitchIRCConnection.connect(host: host, port: port)
             let pass = oauthToken.hasPrefix("oauth:") ? oauthToken : "oauth:\(oauthToken)"
             try await conn.send("PASS \(pass)")
             try await conn.send("NICK \(nick)")
@@ -139,7 +140,17 @@ public actor TwitchBridge {
     private func pump(_ conn: TwitchIRCConnection) async {
         while !Task.isCancelled {
             do {
-                guard let line = try await conn.readLine() else { break }
+                // `readLine()` returns nil on a clean peer-closed connection (normal EOF, not a
+                // read error) — that must still flip state away from .connected, or sendPrivmsg
+                // silently no-ops against a dead connection forever with no signal to anyone.
+                guard let line = try await conn.readLine() else {
+                    if !Task.isCancelled {
+                        state = .failed
+                        lastError = "Twitch IRC connection closed by peer"
+                        logger.warning("Twitch IRC connection closed by peer")
+                    }
+                    break
+                }
                 if line.hasPrefix("PING ") || line.uppercased().hasPrefix("PING ") {
                     let payload: String
                     if let idx = line.firstIndex(of: " ") {
