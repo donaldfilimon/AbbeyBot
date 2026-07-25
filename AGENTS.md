@@ -139,6 +139,8 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 `DQNAgent` in AbbeyCore drives strategy selection among allowed actions (answer, clarify, retrieve, refuse, etc.). RL improves routing among those actions; it does **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
 
+**Open gap (as of the backprop fix below):** the network's math is now correct, but `DQNAgent.selectAction`'s 3-wide output is currently consumed only for dashboard display (`AbbeyEngine.lastDQNAction`) — nothing routes a real answer/clarify/retrieve/refuse decision through it yet, and `IngestScorer`'s `remember(Experience(...))` call passes a reward independent of the chosen action with `nextState == state`/`done: true` hardcoded, so there is no action-conditioned learning signal even once dispatch exists. Real strategy dispatch is planned as follow-up work, not yet built — don't describe this as shipped until it routes an actual decision.
+
 ### Phase 1 runtime (shipped)
 
 | Principle | Behavior |
@@ -146,6 +148,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Config validate before startup | `AppConfig.validateForStartup(scope:)` — `.desktop` (GUI) enforces `liveDiscord` token unless dry-run; `.headless` (server/CLI via `configureRuntime`) skips that UserDefaults gate so HTTP can boot without a token. Also: remoteCompatible URL; sync URL http(s)+host; cooldown/decay ranges. |
 | Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge` / `TwitchBridge` skip sockets, log `dry-run: would connect`. |
 | Durable checkpoints | `DQNAgent.save/load` + `DQNCheckpointStore` default `~/.abbey/dqn-checkpoint.json`; `*.bak` before overwrite; load on engine start; save every 100 learn steps with target sync. |
+| Correct backprop + full fan-in | `NeuralNetwork.train()` previously propagated error to hidden layers by summing raw weight *values* (never multiplying by that neuron's delta) and never applied the ReLU derivative anywhere, including the output layer's own gradient — hidden layers received no gradient connected to the loss. Separately, weight vectors were fixed at 8 SIMD lanes regardless of a layer's real fan-in, so layers wider than 8 (this network's actual topology is `[8, 32, 16, 3]`; layers 1 and 2 have fan-in 32 and 16) silently discarded most of their input on every forward pass. Fixed: weight vectors are now sized to each layer's declared fan-in, and backprop computes `delta[j] = (Σᵢ weight[i][j]·delta[i])·relu'(z[j])` at every layer using pre-update weights. Verified with a numerical (finite-difference) gradient check, not just "loss goes down" — see `Tests/AbbeyCoreTests/NeuralNetworkBackpropTests.swift`. Checkpoint format changed (`weights[layer][neuron]` is now a `[Float]` sized to fan-in, not a fixed 8-lane array); a pre-fix checkpoint fails `decodeWeights` validation and is treated like any other unreadable checkpoint (`.corrupt`), not silently reinterpreted. This fixes the network's math; it does **not** make `DQNAgent` drive real action dispatch — see the open gap below. |
 
 ### Phase 2 runtime (shipped)
 
