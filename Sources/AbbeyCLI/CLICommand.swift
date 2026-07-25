@@ -6,7 +6,9 @@ enum CLICommand: Equatable {
     case clear
     case model(String?)
     case validate(String)
-    case sync
+    /// `/sync` → `.sync(nil)` (read-only status); `/sync pull` → `.sync("pull")`. Any other
+    /// argument is passed through lowercased so the REPL can print a usage line.
+    case sync(String?)
     case exit
     case chat(String)
 }
@@ -19,8 +21,9 @@ enum CLICommand: Equatable {
 /// - An empty (or whitespace-only) line parses to `.chat("")`. The parser does not treat
 ///   blank input specially; the REPL loop is responsible for skipping empty chat text so a
 ///   bare Enter press doesn't trigger an ingest/reply round-trip.
-/// - `/help`, `/clear`, `/exit`, `/quit`, `/sync` map to their fixed commands (case-insensitive);
-///   `/sync` ignores any trailing argument since it only reads status.
+/// - `/help`, `/clear`, `/exit`, `/quit` map to their fixed commands (case-insensitive);
+///   `/sync` maps to `.sync(nil)` and `/sync <arg>` to `.sync("<arg>")` lowercased ("pull"
+///   triggers a pull; anything else earns a usage line from the REPL).
 /// - `/model` with no argument maps to `.model(nil)`; `/model <arg>` maps to
 ///   `.model("<arg>")` with the argument trimmed.
 /// - An unrecognized `/something` command falls back to `.chat(<trimmed original line>)`
@@ -57,7 +60,10 @@ enum CLICommandParser {
         case "validate":
             return .validate(argument ?? "")
         case "sync":
-            return .sync
+            if let argument, !argument.isEmpty {
+                return .sync(argument.lowercased())
+            }
+            return .sync(nil)
         default:
             return .chat(trimmed)
         }

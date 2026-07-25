@@ -21,7 +21,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 3. Put shared logic in `AbbeyCore` (personas, inference, DiscordBM bridge, DQN, `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, strict-by-default `IntentClassifier`). Keep Fluent-backed engine work in `AbbeyServerKit` for AbbeyServer + `abbey`. Leave desktop `AbbeyEngine` and server `BotRuntime` as persistence adapters only.
 4. **Multi-Persona (claim-honest):** `AbbeyPersona` / `AvivaPersona` / `AbiPersona` in AbbeyCore; switch via `/persona`, ingest `personaSwitch`, or desktop Personas tab (`ABIRouter.setPersona`). Framework roles: Abbey = ethical/professional interaction; Aviva = analytical/research/architecture; Abi = moderation/compliance oversight. Engines call `ABIRouter.route(intent:)` on ingest `craftReply` and `/ask` (mod/command → Abi, question → Aviva, greeting/smallTalk → Abbey). `research_mlai.md` = roles reference only — not WDBX product. DQN = strategy selection only. Do not claim Python ML stack, blockchain decentralization, healthcare/finance industry modules, GDPR/HIPAA certification, or WDBX throughput.
 5. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` call sites so desktop and server do not drift.
-6. Respect deferred scope: Discord Voice **audio** (Opus/UDP) is out — voice **presence** (`/voice join|leave`, Discord tab) is shipped. Full CRDT merge, CLI push-pull, codegen sandbox, EventSub auto-subscribe/PubSub/live Helix product side-effects are out. Desktop server sync is best-effort **push + pull** via `AbbeyServerClient` (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`): durable push (outbox at `~/.abbey/pending-pushes.jsonl`); pull on launch and Settings “Pull now” with persisted `?since=` via `SyncCursorStore` (stamp-at-start; last-write-wins by `updatedAt` for users/channels and by `generatedAt` for equity; `deletedAt` tombstones via `POST /api/state/tombstone/{user,channel,message,reputation,interaction,equity}` applied as local hard-deletes; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes.
+6. Respect deferred/won't-ship scope: Discord Voice **audio** (Opus/UDP), CRDT merge, Twitch PubSub, and a codegen sandbox are **won't-ships** — voice **presence** (`/voice join|leave`, Discord tab), LWW + tombstones, EventSub, and the static `CodeProposalValidator` are the shipped claims. EventSub: `channel.chat.message` notifications feed `BotRuntime.handleTwitchChat` (same path as IRC); env-gated auto-subscribe on boot ships off-by-default (`ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` + full `TWITCH_*` contract), unverified live; non-chat subscription types stay log-only. Desktop server sync is best-effort **push + pull** via `AbbeyServerClient` (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`): durable push (outbox at `~/.abbey/pending-pushes.jsonl`); pull on launch and Settings “Pull now” with persisted `?since=` via `SyncCursorStore` (stamp-at-start; last-write-wins by `updatedAt` for users/channels and by `generatedAt` for equity; `deletedAt` tombstones via `POST /api/state/tombstone/{user,channel,message,reputation,interaction,equity}` applied as local hard-deletes; messages/reputation/interactions insert-if-missing; limit 500). Failures never block local SwiftData writes. The CLI ships **pull-only** `/sync pull` (`ServerSyncClient`/`ServerSyncApply`, cursor at `~/.abbey/cli-sync-cursor`); CLI push stays out.
 7. Prefer recent improvement focus: remember/forget engine drift, package tests in verify scripts, and DiscordCopy completeness — without claiming those are done unless evidence exists.
 **Toolchain (hard rules):**
 1. Always `unset TOOLCHAINS` before Swift builds/tests.
@@ -32,7 +32,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 **Workflow:**
 1. Read `AGENTS.md` (and relevant nearby sources only as needed).
 2. Locate the owning layer: AbbeyCore shared pure logic vs AbbeyEngine / BotRuntime adapters vs AbbeyServer routes / AbbeyCLI / SwiftUI.
-3. Implement the minimal change; do not expand into deferred Voice **audio**, CRDT merge, or full CLI↔desktop sync.
+3. Implement the minimal change; do not expand into won't-ship Voice **audio**, CRDT merge, PubSub, or a codegen sandbox.
 4. When an attached plan already has to-dos, execute them in order, update statuses, and do not edit the plan or recreate tasks.
 5. Verify with the narrowest honest gate:
    - Full: `unset TOOLCHAINS && bash Scripts/verify-all.sh`
@@ -49,7 +49,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 
 **Learning & Safety Policy (binding summary):**
 
-Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 **shipped**: `AppConfig.validateForStartup()`, `ABBEY_DRY_RUN` / Discord+Twitch dry-run connect, durable DQN checkpoints at `~/.abbey/dqn-checkpoint.json` (with `*.bak`). Phase 2 **shipped**: experience JSONL journal, `CodeProposalValidator` (static), `RollbackStore`, `TwitchBridge` IRC chat→ingest/reply, EventSub HMAC + replay dedup + typed handler classification (+ Helix subscribe client, not boot-wired). Verification gate: `AGENTS.md` → **Verify**. Still deferred: EventSub auto-subscribe / PubSub / live Helix product side-effects, codegen sandbox, Voice audio, CRDT. Full policy: `AGENTS.md` → Learning & Safety Policy.
+Prioritize **care, clarity, and competence**. Abbey learns from feedback and testable signals, but **never treat RL rewards as permission to ignore safety** — DQN is strategy selection only; confirmation and platform gates stay hard. Phase 1 **shipped**: `AppConfig.validateForStartup()`, `ABBEY_DRY_RUN` / Discord+Twitch dry-run connect, durable DQN checkpoints at `~/.abbey/dqn-checkpoint.json` (with `*.bak`). Phase 2 **shipped**: experience JSONL journal, `CodeProposalValidator` (static), `RollbackStore`, `TwitchBridge` IRC chat→ingest/reply, EventSub HMAC + replay dedup + typed handler classification + `channel.chat.message`→`handleTwitchChat` ingest + env-gated auto-subscribe (off by default, unverified live). Verification gate: `AGENTS.md` → **Verify**. Still deferred: EventSub side-effects for non-chat types, live Helix handshake. Won't ship: PubSub, codegen sandbox, Voice audio, CRDT. Full policy: `AGENTS.md` → Learning & Safety Policy.
 
 **Quality Standards:**
 - Claim-honest: cite real targets, scripts, env vars, and routes from `AGENTS.md` / code — no speculative APIs.
@@ -60,7 +60,7 @@ Prioritize **care, clarity, and competence**. Abbey learns from feedback and tes
 **Output Format:**
 - Short verdict of what you did and which gate ran.
 - Path-anchored notes for key files touched.
-- Explicit deferred/out-of-scope callouts when relevant (Voice audio, CRDT merge, CLI↔desktop sync, Twitch PubSub, codegen sandbox).
+- Explicit won't-ship callouts when relevant (Voice audio, CRDT merge, Twitch PubSub, codegen sandbox; CLI push).
 - Next step only if blocked or user action is required (token, Docker, guild ID).
 
 **Edge Cases:**
@@ -68,5 +68,5 @@ Prioritize **care, clarity, and competence**. Abbey learns from feedback and tes
 - **Bare `swift run`:** Sole executable is `AbbeyBot` (`AbbeyEntry`). Desktop default; server/CLI via `swift run AbbeyBot serve` / `cli`.
 - **Dashboard 404:** `/dashboard` may 404 if the React SPA is not built into `Sources/AbbeyServer/Resources/Public/`; server smoke may skip that assertion — do not treat as a product regression unless the SPA was expected to be present.
 - **No Discord token:** CLI/server can run local-only with a warning; desktop live Discord needs Developer Portal bot + Message Content intent + Keychain token.
-- **Ambiguous "sync":** shipped path is push + pull (launch + “Pull now”) with persisted `?since=` cursors; deferred is CRDT merge and CLI↔desktop sync — not “push-only mirror.”
+- **Ambiguous "sync":** shipped path is desktop push + pull (launch + “Pull now”) with persisted `?since=` cursors, plus CLI pull-only `/sync pull`; CRDT merge and CLI push are out — not “push-only mirror.”
 - **Conflicting docs vs code:** prefer code + `AGENTS.md`; fix drift rather than inventing features to match outdated prose.
