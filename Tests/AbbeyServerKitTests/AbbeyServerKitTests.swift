@@ -420,4 +420,85 @@ struct AbbeyServerKitTests {
             #expect(try await MessageRepository.count(on: app.db) == 0)
         }
     }
+
+    /// `tombstoneReputation`/`tombstoneInteraction`/`tombstoneEquity` had zero coverage —
+    /// `tombstoneUser`/`tombstoneMessage` were exercised, these three weren't at all.
+    @Test func tombstoneReputationHidesFromFullListAndSurfacesOnSince() async throws {
+        try await withRuntime { app, runtime in
+            let event = ReputationEvent(userId: "u1", guildId: "g1", delta: 1, reason: "test")
+            try await event.create(on: app.db)
+            let id = try event.requireID()
+            let before = Date().addingTimeInterval(-1)
+
+            try await runtime.tombstoneReputation(id: id)
+
+            #expect(try await ReputationRepository.recent(limit: 10, on: app.db).isEmpty)
+            let since = try await ReputationRepository.recent(limit: 10, since: before, on: app.db)
+            #expect(since.first?.deletedAt != nil)
+
+            await #expect(throws: ReputationTombstoneError.self) {
+                try await runtime.tombstoneReputation(id: id)
+            }
+        }
+    }
+
+    @Test func tombstoneInteractionHidesFromFullListAndSurfacesOnSince() async throws {
+        try await withRuntime { app, runtime in
+            try await InteractionRepository.log(
+                commandName: "ask", userId: "u1", guildId: "g1", succeeded: true, latencyMs: 10, on: app.db
+            )
+            let logged = try await InteractionRepository.recent(limit: 1, on: app.db)
+            let id = try #require(logged.first?.id)
+            let before = Date().addingTimeInterval(-1)
+
+            try await runtime.tombstoneInteraction(id: id)
+
+            #expect(try await InteractionRepository.recent(limit: 10, on: app.db).isEmpty)
+            let since = try await InteractionRepository.recent(limit: 10, since: before, on: app.db)
+            #expect(since.first?.deletedAt != nil)
+
+            await #expect(throws: InteractionTombstoneError.self) {
+                try await runtime.tombstoneInteraction(id: id)
+            }
+        }
+    }
+
+    @Test func tombstoneEquityHidesFromFullListAndSurfacesOnSince() async throws {
+        try await withRuntime { app, runtime in
+            let idea = EquityIdea(symbol: "QX-1", thesisSummary: "t", syntheticScore: 0.5, factorBreakdown: [:])
+            try await idea.create(on: app.db)
+            let before = Date().addingTimeInterval(-1)
+
+            try await runtime.tombstoneEquity(symbol: "QX-1")
+
+            #expect(try await EquityRepository.recent(limit: 10, on: app.db).isEmpty)
+            let since = try await EquityRepository.recent(limit: 10, since: before, on: app.db)
+            #expect(since.first?.deletedAt != nil)
+
+            await #expect(throws: EquityTombstoneError.self) {
+                try await runtime.tombstoneEquity(symbol: "QX-1")
+            }
+        }
+    }
+
+    /// The auditor flagged ingestMessage's dedup as a textbook check-then-insert TOCTOU race,
+    /// safe only because CreateAll declares a unique index on discord_message_id — verify that
+    /// claim empirically rather than trusting the reasoning alone.
+    @Test func concurrentIngestWithSameDiscordMessageIdNeverCreatesADuplicateRow() async throws {
+        try await withRuntime { app, runtime in
+            async let first = runtime.ingestMessage(
+                content: "race A", channelId: "c-race", guildId: "g-race", authorId: "u-race",
+                discordMessageId: "m-race"
+            )
+            async let second = runtime.ingestMessage(
+                content: "race B", channelId: "c-race", guildId: "g-race", authorId: "u-race",
+                discordMessageId: "m-race"
+            )
+            let results = await [first, second]
+
+            #expect(results.filter { $0 }.count == 1, "exactly one of the two racing ingests should have won")
+            let rows = try await MessageRepository.recent(limit: 10, on: app.db)
+            #expect(rows.filter { $0.discordMessageId == "m-race" }.count == 1)
+        }
+    }
 }
