@@ -80,12 +80,13 @@ public enum MemoryRepository {
         var query = UserMemory.query(on: db)
         if let since {
             query = query.filter(\.$updatedAt > since)
-            return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
+        } else {
+            // Full list hides tombstones at the SQL level — filtering a fetched window in
+            // Swift after the fact could silently drop live rows behind a dense run of
+            // tombstones within that window (a bug found and regression-tested for this).
+            query = query.filter(\.$deletedAt == nil)
         }
-        // Fetch a wider window then drop tombstones in-process — Fluent optional-null
-        // filters are awkward across SQLite/Postgres drivers, and list caps are small (≤500).
-        let rows = try await query.sort(\.$updatedAt, .descending).limit(limit * 2).all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
+        return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -143,10 +144,10 @@ public enum ChannelRepository {
         var query = ChannelContext.query(on: db)
         if let since {
             query = query.filter(\.$updatedAt > since)
-            return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
+        } else {
+            query = query.filter(\.$deletedAt == nil)
         }
-        let rows = try await query.sort(\.$updatedAt, .descending).limit(limit * 2).all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
+        return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -211,13 +212,13 @@ public enum MessageRepository {
     }
 
     public static func recent(channelId: String, guildId: String, limit: Int, on db: any Database) async throws -> [GuildMessage] {
-        let rows = try await GuildMessage.query(on: db)
+        try await GuildMessage.query(on: db)
             .filter(\.$channelId == channelId)
             .filter(\.$guildId == guildId)
+            .filter(\.$deletedAt == nil)
             .sort(\.$createdAt, .descending)
-            .limit(limit * 2)
+            .limit(limit)
             .all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [GuildMessage] {
@@ -227,10 +228,10 @@ public enum MessageRepository {
                 group.filter(\.$createdAt > since)
                 group.filter(\.$deletedAt > since)
             }
-            return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        } else {
+            query = query.filter(\.$deletedAt == nil)
         }
-        let rows = try await query.sort(\.$createdAt, .descending).limit(limit * 2).all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
+        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -256,10 +257,10 @@ public enum ReputationRepository {
                 group.filter(\.$createdAt > since)
                 group.filter(\.$deletedAt > since)
             }
-            return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        } else {
+            query = query.filter(\.$deletedAt == nil)
         }
-        let rows = try await query.sort(\.$createdAt, .descending).limit(limit * 2).all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
+        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -303,10 +304,10 @@ public enum InteractionRepository {
                 group.filter(\.$createdAt > since)
                 group.filter(\.$deletedAt > since)
             }
-            return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        } else {
+            query = query.filter(\.$deletedAt == nil)
         }
-        let rows = try await query.sort(\.$createdAt, .descending).limit(limit * 2).all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
+        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
     }
 }
 
@@ -328,10 +329,10 @@ public enum EquityRepository {
                 group.filter(\.$generatedAt > since)
                 group.filter(\.$deletedAt > since)
             }
-            return try await query.sort(\.$generatedAt, .descending).limit(limit).all()
+        } else {
+            query = query.filter(\.$deletedAt == nil)
         }
-        let rows = try await query.sort(\.$generatedAt, .descending).limit(limit * 2).all()
-        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
+        return try await query.sort(\.$generatedAt, .descending).limit(limit).all()
     }
 
     public static func count(on db: any Database) async throws -> Int {

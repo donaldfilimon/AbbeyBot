@@ -115,6 +115,31 @@ struct AbbeyServerKitTests {
         }
     }
 
+    /// Regression for a bug where `recent(limit:)` fetched only `limit * 2` most-recent rows
+    /// (including tombstones) then filtered tombstones out of THAT window — if tombstone
+    /// density in the window exceeded `limit`, a genuinely live older row got silently
+    /// excluded even though fewer than `limit` live rows existed in total.
+    @Test func memoryRepositoryRecentDoesNotDropLiveRowsBehindADenseTombstoneWindow() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            // Oldest: the one live row that must survive.
+            try await MemoryRepository.appendFact(userId: "survivor", guildId: "g1", fact: "still here", on: db)
+            try await Task.sleep(nanoseconds: 10_000_000)
+
+            // Two more-recent rows, both tombstoned — denser than `limit` below.
+            try await MemoryRepository.appendFact(userId: "gone1", guildId: "g1", fact: "x", on: db)
+            try await MemoryRepository.softDelete(userId: "gone1", guildId: "g1", on: db)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            try await MemoryRepository.appendFact(userId: "gone2", guildId: "g1", fact: "x", on: db)
+            try await MemoryRepository.softDelete(userId: "gone2", guildId: "g1", on: db)
+
+            let recent = try await MemoryRepository.recent(limit: 1, on: db)
+
+            #expect(recent.count == 1)
+            #expect(recent.first?.discordUserId == "survivor")
+        }
+    }
+
     @Test func channelRepositoryRecentSinceCursorFiltersOlderRows() async throws {
         try await withRuntime { app, _ in
             let db = app.db
