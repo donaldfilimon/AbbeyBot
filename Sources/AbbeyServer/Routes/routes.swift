@@ -162,6 +162,7 @@ func routes(_ app: Application) throws {
     // Keyed shared-state reads/writes for the desktop app's sync client. Distinct from
     // the "recent N" list endpoints below, which aren't keyed by a specific user/channel.
     app.get("api", "state", "user") { req async throws -> UserStateDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
         guard let guildId = req.query[String.self, at: "guildId"], !guildId.isEmpty,
               let userId = req.query[String.self, at: "userId"], !userId.isEmpty
         else {
@@ -171,6 +172,7 @@ func routes(_ app: Application) throws {
     }
 
     app.get("api", "state", "channel") { req async throws -> ChannelStateDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
         guard let guildId = req.query[String.self, at: "guildId"], !guildId.isEmpty,
               let channelId = req.query[String.self, at: "channelId"], !channelId.isEmpty
         else {

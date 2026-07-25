@@ -89,6 +89,17 @@ var packageTargets: [Target] = [
         swiftSettings: [
             .swiftLanguageMode(.v6)
         ]
+    ),
+    .testTarget(
+        name: "AbbeyServerTests",
+        dependencies: [
+            "AbbeyServer",
+            .product(name: "VaporTesting", package: "vapor")
+        ],
+        path: "Tests/AbbeyServerTests",
+        swiftSettings: [
+            .swiftLanguageMode(.v6)
+        ]
     )
 ]
 
