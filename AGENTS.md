@@ -119,7 +119,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 - Natural-language persona switch on ingest (`IntentClassifier.personaSwitch` → `PersonaName.resolve`)
 - Desktop **Personas** tab (`PersonaSwitcherView`)
 
-**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
+**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. `DQNAgent` learns a 3-wide strategy head and surfaces the chosen index for dashboard display — it does **not** yet dispatch answer/clarify/retrieve/refuse (see Learning & Safety Policy open gap). Do not claim a 10k req/s WDBX inference engine here.
 
 **Live dispatch:** `AbbeyEngine` and `BotRuntime` call `ABIRouter.route(intent:)` (via `IntentClassifier`) on message ingress `craftReply` and slash `/ask` — not only `currentPersona()`.
 
@@ -135,9 +135,9 @@ Binds the Abbey self-learning system prompt for operators, agents, and implement
 
 Operate as a safe, useful, continuously improving community assistant. Learn from explicit user feedback, moderation outcomes, retrieval success, and testable system signals. Never silently execute generated code, never bypass platform rules, and never treat reinforcement learning rewards as permission to ignore safety constraints.
 
-### Reinforcement learning (strategy only)
+### Reinforcement learning (strategy only — dispatch not shipped)
 
-`DQNAgent` in AbbeyCore drives strategy selection among allowed actions (answer, clarify, retrieve, refuse, etc.). RL improves routing among those actions; it does **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
+`DQNAgent` in AbbeyCore is the intended strategy selector among allowed actions (answer, clarify, retrieve, refuse, etc.). When that dispatch ships, RL will improve routing among those actions only — it must **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
 
 **Open gap (as of the backprop fix below):** the network's math is now correct, but `DQNAgent.selectAction`'s 3-wide output is currently consumed only for dashboard display (`AbbeyEngine.lastDQNAction`) — nothing routes a real answer/clarify/retrieve/refuse decision through it yet, and `IngestScorer`'s `remember(Experience(...))` call passes a reward independent of the chosen action with `nextState == state`/`done: true` hardcoded, so there is no action-conditioned learning signal even once dispatch exists. Real strategy dispatch is planned as follow-up work, not yet built — don't describe this as shipped until it routes an actual decision.
 
