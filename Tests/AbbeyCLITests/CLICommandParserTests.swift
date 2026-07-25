@@ -61,4 +61,10 @@ struct CLICommandParserTests {
         #expect(CLICommandParser.parse("/validate") == .validate(""))
         #expect(CLICommandParser.parse("/validate func x() {}") == .validate("func x() {}"))
     }
+
+    @Test func syncParsesAndIgnoresArguments() {
+        #expect(CLICommandParser.parse("/sync") == .sync)
+        #expect(CLICommandParser.parse("/SYNC") == .sync)
+        #expect(CLICommandParser.parse("/sync now") == .sync)
+    }
 }
