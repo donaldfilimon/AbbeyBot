@@ -46,7 +46,7 @@ CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run s
 
 **Gate of record:** `bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change). Static and security failures must pass or be documented as accepted exceptions before ship. **GitHub Actions (`abbey-ci`)** is secondary until billing is unblocked — hosted workflows currently fail at **startup** with **0 jobs** until Billing → Actions spending/quota is enabled; re-run Abbey CI after unblock.
 
-**Continuation:** “finish all”, “do all”, and equivalent requests mean run the narrowest honest gate for the scoped change plus any ship steps the user asked for — not an intermediate green alone.
+**Continuation:** “finish all”, “do all”, “continue”, “continue with all”, and equivalent requests mean run the narrowest honest gate for the scoped change plus any ship steps the user asked for — not an intermediate green alone.
 
 **Narrow smokes:** desktop → `run-smoke.sh`; server → `run-server-smoke.sh`; CLI → `run-cli-smoke.sh`.
 
@@ -195,3 +195,5 @@ CRDT (won't ship) — desktop ships **push + pull** with `?since=` incremental c
 - Do not commit secrets (`.env`, tokens) or local scratch (`.cursor/hooks/`). Optional `functions/` Browserbase scaffold is tracked; keep `functions/.env` / `functions/node_modules` untracked (see `functions/.gitignore`).
 - Do not commit `node_modules` — dashboard deps live under `web/node_modules` (`web/.gitignore`); Browserbase deps under `functions/node_modules`.
 - Dashboard SPA build output packs into `Sources/AbbeyServer/Resources/Public/` (gitignored unless intentionally shipping built assets).
+- Prefer repo launch wrappers (`Scripts/run.sh`, `run-server.sh`, `run-abbey.sh`, `swift-run.sh`) over hand-pasted multiline `xcrun`/`swift run` — terminal pastes often include editor line numbers or bare `--port` flags that fail.
+- Process env overrides UserDefaults for `AppConfig` knobs (`ABBEY_INFERENCE_MODE`, etc.); smoke scripts pin `ABBEY_INFERENCE_MODE=deterministicFloor` and isolate `HOME` so host GUI settings cannot block headless boots.
