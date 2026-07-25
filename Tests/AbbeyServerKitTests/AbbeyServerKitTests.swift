@@ -355,6 +355,26 @@ struct AbbeyServerKitTests {
         }
     }
 
+    @Test func handleTwitchStreamLifecycleFlipsLiveFlagAndLogsInteraction() async throws {
+        try await withRuntime { app, runtime in
+            #expect(await runtime.twitchStreamLive == nil)
+
+            await runtime.handleTwitchStreamLifecycle(broadcasterLogin: "somechannel", isLive: true)
+            #expect(await runtime.twitchStreamLive == true)
+            let onlineLogs = try await InteractionLog.query(on: app.db).all()
+                .filter { $0.commandName == "eventsub.stream.online" }
+            #expect(onlineLogs.count == 1)
+            #expect(onlineLogs.first?.userId == "somechannel")
+            #expect(onlineLogs.first?.guildId == "twitch")
+
+            await runtime.handleTwitchStreamLifecycle(broadcasterLogin: "somechannel", isLive: false)
+            #expect(await runtime.twitchStreamLive == false)
+            let offlineLogs = try await InteractionLog.query(on: app.db).all()
+                .filter { $0.commandName == "eventsub.stream.offline" }
+            #expect(offlineLogs.count == 1)
+        }
+    }
+
     @Test func messageTombstoneHidesFromFullListAndSurfacesOnSince() async throws {
         try await withRuntime { app, runtime in
             try await MessageRepository.insert(

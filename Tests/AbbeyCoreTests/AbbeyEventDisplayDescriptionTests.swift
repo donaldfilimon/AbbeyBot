@@ -35,6 +35,14 @@ struct AbbeyEventDisplayDescriptionTests {
                 .inferenceProviderFailed(mode: .deterministicFloor, message: "timeout"),
                 "Inference failed (deterministicFloor): timeout"
             ),
+            (
+                .twitchStreamLifecycle(broadcasterLogin: "somechannel", isLive: true),
+                "Twitch stream live: #somechannel"
+            ),
+            (
+                .twitchStreamLifecycle(broadcasterLogin: "somechannel", isLive: false),
+                "Twitch stream offline: #somechannel"
+            ),
         ]
 
         for (event, expected) in cases {

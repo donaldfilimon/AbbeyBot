@@ -21,6 +21,8 @@ struct StatusDTO: Content {
     var liveIngestCount: Int
     var inferenceCalls: Int
     var inferenceFailures: Int
+    /// Last EventSub `stream.online`/`stream.offline` observation this process; nil if never seen.
+    var twitchStreamLive: Bool?
 }
 
 struct IngestRequestDTO: Content {
@@ -120,6 +122,7 @@ func routes(_ app: Application) throws {
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
+        let twitchStreamLive = await runtime.twitchStreamLive
         return StatusDTO(
             databaseDialect: req.application.databaseDialect,
             discordState: metrics.discordState,
@@ -132,7 +135,8 @@ func routes(_ app: Application) throws {
             messagesIngested: metrics.messagesIngested,
             liveIngestCount: metrics.liveIngestCount,
             inferenceCalls: metrics.inferenceCalls,
-            inferenceFailures: metrics.inferenceFailures
+            inferenceFailures: metrics.inferenceFailures,
+            twitchStreamLive: twitchStreamLive
         )
     }
 

@@ -74,12 +74,14 @@ struct TwitchEventSubAutoSubscriberTests {
         return ClientResponse(status: status, headers: headers, body: buffer)
     }
 
-    @Test func subscribesChatMessageWithBroadcasterAndBotUserCondition() async throws {
+    @Test func subscribesChatAndStreamLifecycleTypes() async throws {
         try await withApp { app in
             let fake = QueuedClient(
                 eventLoop: app.eventLoopGroup.next(),
                 responses: [
                     jsonResponse(.ok, #"{"access_token":"tok","expires_in":3600,"token_type":"bearer"}"#, on: app),
+                    ClientResponse(status: .accepted),
+                    ClientResponse(status: .accepted),
                     ClientResponse(status: .accepted)
                 ]
             )
@@ -91,17 +93,33 @@ struct TwitchEventSubAutoSubscriberTests {
             )
 
             #expect(subscribed)
-            #expect(fake.requests.count == 2)
-            let subscribeRequest = fake.requests[1]
-            #expect(subscribeRequest.url.string == "https://api.twitch.tv/helix/eventsub/subscriptions")
-            let bodyData = subscribeRequest.body.map { Data($0.readableBytesView) } ?? Data()
-            let decoded = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
-            #expect(decoded?["type"] as? String == "channel.chat.message")
-            #expect(decoded?["version"] as? String == "1")
-            let condition = decoded?["condition"] as? [String: String]
-            #expect(condition?["broadcaster_user_id"] == "100")
-            #expect(condition?["user_id"] == "200")
-            let transport = decoded?["transport"] as? [String: String]
+            // 1 token + 3 subscriptions
+            #expect(fake.requests.count == 4)
+
+            let types = try fake.requests.dropFirst().map { request -> String in
+                let bodyData = request.body.map { Data($0.readableBytesView) } ?? Data()
+                let decoded = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
+                return decoded?["type"] as? String ?? ""
+            }
+            #expect(types == [
+                "channel.chat.message",
+                "stream.online",
+                "stream.offline"
+            ])
+
+            let chatBody = fake.requests[1].body.map { Data($0.readableBytesView) } ?? Data()
+            let chatDecoded = try JSONSerialization.jsonObject(with: chatBody) as? [String: Any]
+            let chatCondition = chatDecoded?["condition"] as? [String: String]
+            #expect(chatCondition?["broadcaster_user_id"] == "100")
+            #expect(chatCondition?["user_id"] == "200")
+
+            let onlineBody = fake.requests[2].body.map { Data($0.readableBytesView) } ?? Data()
+            let onlineDecoded = try JSONSerialization.jsonObject(with: onlineBody) as? [String: Any]
+            let onlineCondition = onlineDecoded?["condition"] as? [String: String]
+            #expect(onlineCondition?["broadcaster_user_id"] == "100")
+            #expect(onlineCondition?["user_id"] == nil)
+
+            let transport = onlineDecoded?["transport"] as? [String: String]
             #expect(transport?["callback"] == "https://abbey.example/api/twitch/eventsub")
             #expect(transport?["secret"] == "whsecret")
         }

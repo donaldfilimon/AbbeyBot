@@ -5,10 +5,10 @@ import Vapor
 /// Webhook receiver for Twitch EventSub. Verifies the HMAC-SHA256 signature Twitch attaches
 /// to every delivery (`Twitch-Eventsub-Message-Signature`), then handles callback verification
 /// (`challenge` echo), dedupes by `Twitch-Eventsub-Message-Id`, and dispatches per message type
-/// via `TwitchEventSubHandler`. `channel.chat.message` notifications feed the shared Twitch
-/// ingest/reply path (`BotRuntime.handleTwitchChat`); other notification types stay log-only.
-/// Still deferred: PubSub (Twitch-deprecated) and the live Helix handshake (needs a public
-/// HTTPS callback).
+/// via `TwitchEventSubHandler`. `channel.chat.message` feeds `BotRuntime.handleTwitchChat`;
+/// `stream.online` / `stream.offline` feed `handleTwitchStreamLifecycle`. Other notification
+/// types stay log-only. Still deferred: PubSub (Twitch-deprecated) and the live Helix
+/// handshake (needs a public HTTPS callback).
 struct TwitchEventSubWebhookDTO: Content {
     var challenge: String?
     var subscription: TwitchEventSubSubscriptionDTO?
@@ -108,6 +108,20 @@ enum TwitchEventSubRoutes {
                 )
                 handled = true
                 outcomeLabel = "notification-ingested"
+            case .notificationStreamOnline(let lifecycle):
+                await req.application.botRuntime.handleTwitchStreamLifecycle(
+                    broadcasterLogin: lifecycle.broadcasterLogin,
+                    isLive: true
+                )
+                handled = true
+                outcomeLabel = "stream-online"
+            case .notificationStreamOffline(let lifecycle):
+                await req.application.botRuntime.handleTwitchStreamLifecycle(
+                    broadcasterLogin: lifecycle.broadcasterLogin,
+                    isLive: false
+                )
+                handled = true
+                outcomeLabel = "stream-offline"
             case .notificationAcknowledged:
                 handled = false
                 outcomeLabel = "notification"
