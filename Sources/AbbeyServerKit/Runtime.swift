@@ -67,6 +67,8 @@ public struct BotLifecycleHandler: LifecycleHandler {
 
     public func didBootAsync(_ app: Application) async throws {
         await app.botRuntime.start()
+        // Env-gated, off by default; logs and skips on any missing config or Helix failure.
+        await TwitchEventSubAutoSubscriber.subscribeIfConfigured(app: app)
     }
 
     public func shutdownAsync(_ app: Application) async {
