@@ -23,6 +23,9 @@ public final class EquityIdea: Model, Content, @unchecked Sendable {
     @Timestamp(key: "generated_at", on: .create)
     public var generatedAt: Date?
 
+    @OptionalField(key: "deleted_at")
+    public var deletedAt: Date?
+
     public static let disclaimer =
         "Synthetic instrument, synthetic data. Not investment advice, not a real security."
 

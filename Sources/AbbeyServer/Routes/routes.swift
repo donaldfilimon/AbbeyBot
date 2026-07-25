@@ -58,6 +58,18 @@ struct TombstoneChannelRequestDTO: Content {
     var channelId: String
 }
 
+struct TombstoneMessageRequestDTO: Content {
+    var discordMessageId: String
+}
+
+struct TombstoneIdRequestDTO: Content {
+    var id: UUID
+}
+
+struct TombstoneEquityRequestDTO: Content {
+    var symbol: String
+}
+
 struct SyncStatusReportDTO: Content {
     var lastPullAt: Date?
     var lastPullError: String?
@@ -204,6 +216,50 @@ func routes(_ app: Application) throws {
             return OkDTO(ok: true)
         } catch ChannelTombstoneError.noChannel {
             throw Abort(.notFound, reason: "no channel context for that channel")
+        }
+    }
+
+    app.post("api", "state", "tombstone", "message") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(TombstoneMessageRequestDTO.self)
+        do {
+            try await req.application.botRuntime.tombstoneMessage(discordMessageId: body.discordMessageId)
+            return OkDTO(ok: true)
+        } catch MessageTombstoneError.noMessage {
+            throw Abort(.notFound, reason: "no message for that discordMessageId")
+        }
+    }
+
+    app.post("api", "state", "tombstone", "reputation") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(TombstoneIdRequestDTO.self)
+        do {
+            try await req.application.botRuntime.tombstoneReputation(id: body.id)
+            return OkDTO(ok: true)
+        } catch ReputationTombstoneError.noEvent {
+            throw Abort(.notFound, reason: "no reputation event for that id")
+        }
+    }
+
+    app.post("api", "state", "tombstone", "interaction") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(TombstoneIdRequestDTO.self)
+        do {
+            try await req.application.botRuntime.tombstoneInteraction(id: body.id)
+            return OkDTO(ok: true)
+        } catch InteractionTombstoneError.noLog {
+            throw Abort(.notFound, reason: "no interaction log for that id")
+        }
+    }
+
+    app.post("api", "state", "tombstone", "equity") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(TombstoneEquityRequestDTO.self)
+        do {
+            try await req.application.botRuntime.tombstoneEquity(symbol: body.symbol)
+            return OkDTO(ok: true)
+        } catch EquityTombstoneError.noIdea {
+            throw Abort(.notFound, reason: "no equity idea for that symbol")
         }
     }
 

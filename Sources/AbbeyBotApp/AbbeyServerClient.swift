@@ -90,6 +90,22 @@ struct AbbeyServerClient: Sendable {
         await post(path: "/api/state/tombstone/channel", body: body)
     }
 
+    func tombstoneMessage(discordMessageId: String) async {
+        await post(path: "/api/state/tombstone/message", body: ["discordMessageId": discordMessageId])
+    }
+
+    func tombstoneReputation(id: UUID) async {
+        await post(path: "/api/state/tombstone/reputation", body: ["id": id.uuidString])
+    }
+
+    func tombstoneInteraction(id: UUID) async {
+        await post(path: "/api/state/tombstone/interaction", body: ["id": id.uuidString])
+    }
+
+    func tombstoneEquity(symbol: String) async {
+        await post(path: "/api/state/tombstone/equity", body: ["symbol": symbol])
+    }
+
     /// Reports the desktop's current sync outcome so the operator dashboard's Sync tab
     /// can show it. Best-effort like every other push — benefits from the same durable
     /// outbox retry as ingest/remember/forget.

@@ -180,6 +180,71 @@ struct SyncPullTests {
         #expect(try context.fetch(descriptor).isEmpty)
     }
 
+    @Test func upsertEquityAppliesTombstoneByHardDeletingLocalRow() throws {
+        let context = try makeContext()
+        let local = EquityIdea(
+            symbol: "QX-DEL",
+            thesisSummary: "gone",
+            syntheticScore: 0.2,
+            factorBreakdown: ["x": 0.2],
+            generatedAt: Date().addingTimeInterval(-20)
+        )
+        context.insert(local)
+        try context.save()
+
+        // Soft-delete keeps the original generatedAt; tombstone stamp is deletedAt.
+        let generatedAt = Date().addingTimeInterval(-20)
+        let deletedAt = Date()
+        let remote = SyncDTO.Equity(
+            id: UUID(),
+            symbol: "QX-DEL",
+            thesisSummary: "gone",
+            syntheticScore: 0.2,
+            factorBreakdown: ["x": 0.2],
+            generatedAt: generatedAt,
+            deletedAt: deletedAt
+        )
+
+        try SyncPull.upsertEquity([remote], into: context)
+
+        let symbol = "QX-DEL"
+        let descriptor = FetchDescriptor<EquityIdea>(predicate: #Predicate { $0.symbol == symbol })
+        #expect(try context.fetch(descriptor).isEmpty)
+    }
+
+    @Test func insertMissingMessagesAppliesTombstoneByHardDeletingLocalRow() throws {
+        let context = try makeContext()
+        context.insert(
+            GuildMessage(
+                discordMessageId: "m-del",
+                channelId: "c1",
+                guildId: "g1",
+                authorId: "u1",
+                content: "bye",
+                createdAt: Date().addingTimeInterval(-30)
+            )
+        )
+        try context.save()
+
+        let deletedAt = Date()
+        let remote = SyncDTO.Message(
+            id: UUID(),
+            discordMessageId: "m-del",
+            channelId: "c1",
+            guildId: "g1",
+            authorId: "u1",
+            content: "bye",
+            createdAt: Date().addingTimeInterval(-30),
+            deletedAt: deletedAt
+        )
+
+        try SyncPull.insertMissingMessages([remote], into: context)
+
+        let mid = "m-del"
+        let descriptor = FetchDescriptor<GuildMessage>(predicate: #Predicate { $0.discordMessageId == mid })
+        #expect(try context.fetch(descriptor).isEmpty)
+    }
+
     // MARK: - Equity
     //
     // Equity ideas are regenerated rather than hand-edited, so `generatedAt` is the

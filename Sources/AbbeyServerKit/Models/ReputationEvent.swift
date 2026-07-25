@@ -23,6 +23,9 @@ public final class ReputationEvent: Model, Content, @unchecked Sendable {
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 
+    @OptionalField(key: "deleted_at")
+    public var deletedAt: Date?
+
     public init() {}
 
     public init(

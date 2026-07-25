@@ -406,6 +406,22 @@ public actor BotRuntime {
         try await ChannelRepository.softDelete(channelId: channelId, guildId: guildId, on: app.db)
     }
 
+    public func tombstoneMessage(discordMessageId: String) async throws {
+        try await MessageRepository.softDelete(discordMessageId: discordMessageId, on: app.db)
+    }
+
+    public func tombstoneReputation(id: UUID) async throws {
+        try await ReputationRepository.softDelete(id: id, on: app.db)
+    }
+
+    public func tombstoneInteraction(id: UUID) async throws {
+        try await InteractionRepository.softDelete(id: id, on: app.db)
+    }
+
+    public func tombstoneEquity(symbol: String) async throws {
+        try await EquityRepository.softDelete(symbol: symbol, on: app.db)
+    }
+
     /// The sync-status row visible in *this* runtime's database. When the CLI runs on its own
     /// local SQLite file this is empty — the desktop reports into the server's database, so a
     /// meaningful row only appears when `ABBEY_CLI_USE_SERVER_DATABASE=1` points both at one DB.

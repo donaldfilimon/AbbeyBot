@@ -151,6 +151,25 @@ curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10&since=${SINCE_EPOCH}"
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-users-since.json")); assert any(u.get("discordUserId")=="smoke-user" and u.get("deletedAt") for u in d), d'
 echo "users_since_includes_tombstone_ok"
 
+# Soft-delete the smoke-ingest message (from step 5); full list hides it, since includes tombstone.
+MSG_ID="$(python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-ingest.json")); print(d.get("discordMessageId",""))')"
+if [[ -n "$MSG_ID" ]]; then
+  curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/tombstone/message" \
+    -H 'Content-Type: application/json' \
+    -d "{\"discordMessageId\":\"${MSG_ID}\"}" \
+    >/tmp/abbeyserver-tombstone-message.json
+  python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-tombstone-message.json")); assert d.get("ok") is True, d'
+  echo "tombstone_message_ok"
+  curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-live.json
+  python3 -c 'import json,sys; mid=sys.argv[1]; d=json.load(open("/tmp/abbeyserver-messages-live.json")); assert isinstance(d, list) and not any(m.get("discordMessageId")==mid for m in d), d' "$MSG_ID"
+  echo "messages_live_hides_tombstone_ok"
+  curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50&since=${SINCE_EPOCH}" >/tmp/abbeyserver-messages-since.json
+  python3 -c 'import json,sys; mid=sys.argv[1]; d=json.load(open("/tmp/abbeyserver-messages-since.json")); assert any(m.get("discordMessageId")==mid and m.get("deletedAt") for m in d), d' "$MSG_ID"
+  echo "messages_since_includes_tombstone_ok"
+else
+  echo "tombstone_message_skip (no ingest discordMessageId)"
+fi
+
 if [[ "$USE_SQLITE" == "1" ]]; then
   echo "(note: smoke used sqlite file because Docker/Postgres was unavailable)"
 fi

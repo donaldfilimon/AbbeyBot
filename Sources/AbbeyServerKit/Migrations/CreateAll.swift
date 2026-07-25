@@ -12,6 +12,7 @@ public struct CreateAll: AsyncMigration {
             .field("author_id", .string, .required)
             .field("content", .string, .required)
             .field("created_at", .datetime)
+            .field("deleted_at", .datetime)
             .unique(on: "discord_message_id")
             .create()
 
@@ -47,6 +48,7 @@ public struct CreateAll: AsyncMigration {
             .field("delta", .double, .required)
             .field("reason", .string, .required)
             .field("created_at", .datetime)
+            .field("deleted_at", .datetime)
             .create()
 
         try await database.schema(InteractionLog.schema)
@@ -57,6 +59,7 @@ public struct CreateAll: AsyncMigration {
             .field("succeeded", .bool, .required)
             .field("latency_ms", .double, .required)
             .field("created_at", .datetime)
+            .field("deleted_at", .datetime)
             .create()
 
         try await database.schema(EquityIdea.schema)
@@ -66,6 +69,7 @@ public struct CreateAll: AsyncMigration {
             .field("synthetic_score", .double, .required)
             .field("factor_breakdown", .json, .required)
             .field("generated_at", .datetime)
+            .field("deleted_at", .datetime)
             .unique(on: "symbol")
             .create()
 
