@@ -122,7 +122,7 @@ curl -sf "http://127.0.0.1:${HTTP_PORT}/api/metrics" >/tmp/abbeyserver-metrics.j
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-metrics.json")); assert "messagesIngested" in d and d.get("messagesIngested", -1) >= 0, d'
 echo "metrics_ok messagesIngested=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-metrics.json")).get("messagesIngested"))')"
 
-echo "======== 8/8 assert /api/state remember + user + channel ========"
+echo "======== 8/8 assert /api/state remember + user + channel + tombstone ========"
 curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/remember" \
   -H 'Content-Type: application/json' \
   -d '{"guildId":"smoke","userId":"smoke-user","fact":"likes smoke tests"}' \
@@ -135,6 +135,21 @@ echo "state_user_ok facts=$(python3 -c 'import json; print(len(json.load(open("/
 curl -sf "http://127.0.0.1:${HTTP_PORT}/api/state/channel?guildId=smoke&channelId=smoke" >/tmp/abbeyserver-state-channel.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-state-channel.json")); assert "summary" in d, d'
 echo "state_channel_ok"
+
+# Soft-delete the smoke user; full list hides it, since=0 still returns the tombstone.
+SINCE_EPOCH="$(python3 -c 'import time; print(time.time()-30)')"
+curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/tombstone/user" \
+  -H 'Content-Type: application/json' \
+  -d '{"guildId":"smoke","userId":"smoke-user"}' \
+  >/tmp/abbeyserver-tombstone-user.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-tombstone-user.json")); assert d.get("ok") is True, d'
+echo "tombstone_user_ok"
+curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10" >/tmp/abbeyserver-users-live.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-users-live.json")); assert isinstance(d, list) and all(u.get("deletedAt") in (None, "") for u in d) and not any(u.get("discordUserId")=="smoke-user" for u in d), d'
+echo "users_live_hides_tombstone_ok"
+curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10&since=${SINCE_EPOCH}" >/tmp/abbeyserver-users-since.json
+python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-users-since.json")); assert any(u.get("discordUserId")=="smoke-user" and u.get("deletedAt") for u in d), d'
+echo "users_since_includes_tombstone_ok"
 
 if [[ "$USE_SQLITE" == "1" ]]; then
   echo "(note: smoke used sqlite file because Docker/Postgres was unavailable)"

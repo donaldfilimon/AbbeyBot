@@ -13,6 +13,8 @@ enum SyncDTO {
         var reputation: Double
         var interactionCount: Int
         var updatedAt: Date?
+        /// Soft-delete tombstone from the server. Non-nil means SyncPull should remove the local row.
+        var deletedAt: Date? = nil
     }
 
     struct Channel: Decodable, Sendable {
@@ -23,6 +25,8 @@ enum SyncDTO {
         var summary: String
         var messageCount: Int
         var updatedAt: Date?
+        /// Soft-delete tombstone from the server. Non-nil means SyncPull should remove the local row.
+        var deletedAt: Date? = nil
     }
 
     struct Message: Decodable, Sendable {

@@ -48,6 +48,16 @@ struct ForgetRequestDTO: Content {
     var index: Int
 }
 
+struct TombstoneUserRequestDTO: Content {
+    var guildId: String
+    var userId: String
+}
+
+struct TombstoneChannelRequestDTO: Content {
+    var guildId: String
+    var channelId: String
+}
+
 struct SyncStatusReportDTO: Content {
     var lastPullAt: Date?
     var lastPullError: String?
@@ -172,6 +182,28 @@ func routes(_ app: Application) throws {
             throw Abort(.notFound, reason: "no memory for that user")
         } catch MemoryForgetError.invalidIndex {
             throw Abort(.badRequest, reason: "invalid fact index")
+        }
+    }
+
+    app.post("api", "state", "tombstone", "user") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(TombstoneUserRequestDTO.self)
+        do {
+            try await req.application.botRuntime.tombstoneUser(userId: body.userId, guildId: body.guildId)
+            return OkDTO(ok: true)
+        } catch MemoryTombstoneError.noMemory {
+            throw Abort(.notFound, reason: "no memory for that user")
+        }
+    }
+
+    app.post("api", "state", "tombstone", "channel") { req async throws -> OkDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let body = try req.content.decode(TombstoneChannelRequestDTO.self)
+        do {
+            try await req.application.botRuntime.tombstoneChannel(channelId: body.channelId, guildId: body.guildId)
+            return OkDTO(ok: true)
+        } catch ChannelTombstoneError.noChannel {
+            throw Abort(.notFound, reason: "no channel context for that channel")
         }
     }
 

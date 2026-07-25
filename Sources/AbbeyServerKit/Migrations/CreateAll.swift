@@ -24,6 +24,7 @@ public struct CreateAll: AsyncMigration {
             .field("reputation", .double, .required)
             .field("interaction_count", .int, .required)
             .field("updated_at", .datetime)
+            .field("deleted_at", .datetime)
             .unique(on: "composite_key")
             .create()
 
@@ -35,6 +36,7 @@ public struct CreateAll: AsyncMigration {
             .field("summary", .string, .required)
             .field("message_count", .int, .required)
             .field("updated_at", .datetime)
+            .field("deleted_at", .datetime)
             .unique(on: "composite_key")
             .create()
 
