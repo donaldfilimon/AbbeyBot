@@ -7,7 +7,7 @@ public struct DQNCheckpointBlob: Codable, Sendable, Equatable {
     public var epsilon: Float
     public var stepCount: Int
     public var seed: UInt64?
-    /// `weights[layer][neuron][lane]` — 8 lanes per neuron (SIMD8 packing).
+    /// `weights[layer][neuron][lane]` — lane count equals that layer's fan-in (`topology[layer]`).
     public var onlineWeights: [[[Float]]]
     public var onlineBiases: [[Float]]
     public var targetWeights: [[[Float]]]
