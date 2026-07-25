@@ -91,6 +91,10 @@ public struct InteractionRouter: Sendable {
         case "forget":
             let target = (try? data.option(named: "user")?.requireString()) ?? userId
             let index = Int((try? data.option(named: "index")?.requireInt()) ?? 0)
+            guard index > 0 else {
+                result = DiscordCopy.invalidFactIndex
+                break
+            }
             result = await forget(target, guildId, index)
         case "context":
             result = await context(channelId, guildId)
@@ -132,6 +136,14 @@ public struct InteractionRouter: Sendable {
         data: Interaction.ApplicationCommand,
         client: any DiscordClient
     ) async {
+        guard data.name == "ask" else {
+            try? await client.createInteractionResponse(
+                id: interaction.id,
+                token: interaction.token,
+                payload: .autocompleteResult(.init(choices: []))
+            ).guardSuccess()
+            return
+        }
         let partial = data.options?
             .first(where: { $0.name == "question" && $0.focused == true })
             .flatMap { try? $0.requireString() } ?? ""
