@@ -34,6 +34,33 @@ abbey_resolve_swift() {
   esac
 }
 
+# Desktop SwiftData macros (@Query, \.modelContext, .modelContainer) break under
+# swiftly DEVELOPMENT-SNAPSHOT mixed with the macOS 27 SDK. Refuse early.
+abbey_assert_desktop_toolchain() {
+  local ver
+  if ! ver="$("${ABBEY_SWIFT_BIN[@]}" --version 2>&1 | head -5)"; then
+    ver=""
+  fi
+  if [[ -z "$ver" ]] \
+    || [[ "$ABBEY_SWIFT_LABEL" == "swiftly" ]] \
+    || [[ "$ver" == *DEVELOPMENT-SNAPSHOT* ]] \
+    || [[ "$ver" == *6.5-dev* ]]; then
+    echo "error: desktop must use Xcode Swift 6.4, not swiftly / DEVELOPMENT-SNAPSHOT." >&2
+    echo "  PATH swift resolves to: $(command -v swift 2>/dev/null || echo '?')" >&2
+    echo "  Got:" >&2
+    if [[ -z "$ver" ]]; then
+      echo "    (empty — swift --version failed or produced no output)" >&2
+    else
+      echo "$ver" | sed 's/^/    /' >&2
+    fi
+    echo "Fix:" >&2
+    echo "  unset TOOLCHAINS" >&2
+    echo "  bash Scripts/run.sh" >&2
+    echo "  # or: /usr/bin/xcrun --toolchain default swift run --build-path \"\${TMPDIR}/AbbeyBot.desktop.build\"" >&2
+    return 1
+  fi
+}
+
 abbey_swift_run() {
   local build_suffix="$1"
   local role="$2"
@@ -41,10 +68,8 @@ abbey_swift_run() {
 
   abbey_resolve_swift
 
-  if [[ "$role" == "desktop" && "$ABBEY_SWIFT_LABEL" == "swiftly" ]]; then
-    echo "error: desktop cannot build under swiftly (SwiftData @Query / \\.modelContext break)." >&2
-    echo "Use: bash Scripts/run.sh   # Xcode toolchain" >&2
-    return 1
+  if [[ "$role" == "desktop" ]]; then
+    abbey_assert_desktop_toolchain || return 1
   fi
 
   local build_path="${TMPDIR:-/tmp}/AbbeyBot.${build_suffix}.build"

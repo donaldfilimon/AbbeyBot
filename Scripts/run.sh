@@ -32,13 +32,24 @@ done
 
 if [[ "$DETACH" -eq 1 ]]; then
   abbey_resolve_swift
+  abbey_assert_desktop_toolchain || exit 1
   BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.desktop.build"
   unset ABBEY_PACKAGE_ROLE || true
   echo "Building AbbeyBot GUI (detached)…"
   "${ABBEY_SWIFT_BIN[@]}" build --build-path "$BUILD_PATH"
   BIN="$BUILD_PATH/out/Products/Debug/AbbeyBot"
   if [[ ! -x "$BIN" ]]; then
-    BIN="$(find "$BUILD_PATH" -name AbbeyBot -type f -perm +111 | head -1)"
+    matches=()
+    while IFS= read -r candidate; do
+      matches+=("$candidate")
+    done < <(find "$BUILD_PATH" -path '*/Debug/AbbeyBot' -type f -perm +111 2>/dev/null)
+    if [[ "${#matches[@]}" -eq 1 ]]; then
+      BIN="${matches[0]}"
+    elif [[ "${#matches[@]}" -gt 1 ]]; then
+      echo "error: multiple AbbeyBot binaries under $BUILD_PATH; expected $BUILD_PATH/out/Products/Debug/AbbeyBot" >&2
+      printf '  %s\n' "${matches[@]}" >&2
+      exit 1
+    fi
   fi
   if [[ ! -x "$BIN" ]]; then
     echo "error: AbbeyBot binary not found under $BUILD_PATH" >&2

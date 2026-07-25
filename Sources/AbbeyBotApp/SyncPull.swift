@@ -30,10 +30,10 @@ enum SyncPull {
     /// Throws on network/decode/store failures; local store is only mutated after a successful fetch set.
     ///
     /// Pass `since` to fetch only rows the server has touched after that instant (`?since=`
-    /// cursor). Callers supply the last *successful* pull time, so a failed pull never advances
-    /// the cursor past rows that were never applied. Two caveats worth knowing:
-    /// - The cursor lives in `SyncStatus`, which is session-only — the first pull after launch
-    ///   is always a full window, and only later pulls in that session are incremental.
+    /// cursor). Callers supply the last *successful* pull time from `SyncCursorStore`, so a failed
+    /// pull never advances the cursor past rows that were never applied. Two caveats worth knowing:
+    /// - The cursor is stamped at pull *start* (not completion) and persists across launches;
+    ///   a missing/non-numeric store value degrades to a full pull.
     /// - The server compares against its own `updatedAt` clock, so a desktop clock running ahead
     ///   of the server can skip rows (same clock-skew family as the last-write-wins caveat above).
     @MainActor

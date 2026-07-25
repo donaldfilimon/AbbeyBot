@@ -41,7 +41,11 @@ Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesi
 
 CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run swiftlang/swift:nightly-6.4.x-bookworm` — official `library/swift:6.4-*` not published yet) builds `web/` (bun), runs dashboard SPA tests, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`. Desktop job disabled (`if: false`) pending a self-hosted macOS 27 runner — GitHub-hosted `macos-*` runners don't satisfy the pin.
 
-**GitHub Actions (private repo):** hosted workflows currently fail at **startup** with **0 jobs** until Billing → Actions spending/quota is enabled for this repository. Until then, **`bash Scripts/verify-all.sh` is the gate of record** (not a green CI badge). After billing is unblocked, re-run the **Abbey CI** (`abbey-ci`) workflow on the branch under test.
+**Gate of record:** `bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change). Static and security failures must pass or be documented as accepted exceptions before ship. **GitHub Actions (`abbey-ci`)** is secondary until billing is unblocked — hosted workflows currently fail at **startup** with **0 jobs** until Billing → Actions spending/quota is enabled; re-run Abbey CI after unblock.
+
+**Continuation:** “finish all”, “do all”, and equivalent requests mean run the narrowest honest gate for the scoped change plus any ship steps the user asked for — not an intermediate green alone.
+
+**Narrow smokes:** desktop → `run-smoke.sh`; server → `run-server-smoke.sh`; CLI → `run-cli-smoke.sh`.
 
 ## Discord live path (desktop)
 
@@ -78,7 +82,7 @@ Deploy: `Dockerfile` (Bun SPA stage → `swiftlang/swift:nightly-6.4.x-bookworm`
 
 Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, Leaf `GET /`, `/dashboard` (200 if built, 404 skip if not), `/api/status`, `POST /api/ingest`, list endpoints, and `/api/state` remember/user/channel.
 
-Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — durable **push** (ingest/remember/forget/sync-status; failed POSTs retry via a JSONL outbox at `~/.abbey/pending-pushes.jsonl`, flushed on the next pull attempt) plus **pull** on launch and Settings “Pull now”. Pulls send a `?since=` cursor set to the last *successful* pull in the current session, so only rows the server touched after that are fetched; the cursor lives in `SyncStatus` (session-only, not persisted), so the first pull after each launch is a full window and only later pulls that session are incremental. The cursor is compared against the server's own `updatedAt`, so a desktop clock ahead of the server's can skip rows — same clock-skew caveat as last-write-wins below. Users/channels use **last-write-wins by `updatedAt`** (an unsynced local edit newer than the remote row survives instead of being clobbered — not resilient to clock skew); equity is still server-wins; messages insert-if-missing by Discord id; reputation/interactions insert-if-missing by Fluent `id`→`serverId`, rows without id skipped; limit 500. Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session, and the SPA's Sync tab shows the server's view of the same (desktop-reported).
+Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — durable **push** (ingest/remember/forget/sync-status; failed POSTs retry via a JSONL outbox at `~/.abbey/pending-pushes.jsonl`, flushed on the next pull attempt) plus **pull** on launch and Settings “Pull now”. Pulls send a `?since=` cursor so only rows the server touched since the last *successful* pull are fetched. The cursor persists in `UserDefaults` via `SyncCursorStore` (unix-epoch `Double` under `abbey.sync.lastPullSuccessAt`), so pulls stay incremental across relaunches; a missing or non-numeric value degrades to a full pull rather than a bogus cursor. It is stamped at the pull's *start*, not its completion — a row written while a pull is in flight is then refetched next time instead of being skipped permanently. The cursor is compared against the server's own `updatedAt`, so a desktop clock ahead of the server's can skip rows — same clock-skew caveat as last-write-wins below. Users/channels use **last-write-wins by `updatedAt`** (an unsynced local edit newer than the remote row survives instead of being clobbered — not resilient to clock skew); equity is still server-wins; messages insert-if-missing by Discord id; reputation/interactions insert-if-missing by Fluent `id`→`serverId`, rows without id skipped; limit 500. Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session, and the SPA's Sync tab shows the server's view of the same (desktop-reported).
 
 ## CLI ops
 
@@ -158,7 +162,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 ### Verification gate = release authority
 
-`bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change) is the gate of record. Static and security failures must pass or be documented as accepted exceptions before ship. GitHub Actions (`abbey-ci`) is secondary until billing is unblocked.
+See **Verify** above — gate of record, CI secondary, continuation semantics, and narrow smoke scripts.
 
 ### Still deferred
 
@@ -171,4 +175,17 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet, and a real implementation (Voice Gateway WS + UDP/IP-discovery + RTP + Opus codec + audio capture/playback) is a standalone effort on the order of the rest of this package combined. Deliberately out of scope; not planned alongside other sync/UI work. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
 
-Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` incremental cursors (launch + Settings “Pull now”; cursor is session-only, so the first pull per launch is still a full window) and **last-write-wins by `updatedAt`** for users/channels (equity is still server-wins; messages by Discord id; reputation/interactions by Fluent id; limit 500). LWW compares each side's own wall clock — not resilient to significant clock skew between desktop and server. No CRDT merge, no delete/tombstone propagation, and the CLI still doesn't participate in sync at all (`abbey` is local-SQLite-only per its own DATABASE_URL section above).
+Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` incremental cursors persisted across launches (launch + Settings “Pull now”) and **last-write-wins by `updatedAt`** for users/channels (equity is still server-wins; messages by Discord id; reputation/interactions by Fluent id; limit 500). LWW compares each side's own wall clock — not resilient to significant clock skew between desktop and server. No CRDT merge, no delete/tombstone propagation, and the CLI still doesn't participate in sync at all (`abbey` is local-SQLite-only per its own DATABASE_URL section above).
+
+## Learned User Preferences
+
+- Prefer terse, path-anchored findings and tables for gates/status; avoid narrative essay wrap-ups.
+- Mid-task slash-skill attaches (`/review`, `/continual-learning`, etc.) win over inventing a parallel workflow.
+- Dual review asks (“security and code quality”) mean run both Bugbot and Security Review.
+- Prefer `cursor/` branches from `origin/main`, draft PRs when offered, land via PR merge; never commit/push straight to `main` or force-push `main`.
+
+## Learned Workspace Facts
+
+- Do not commit secrets (`.env`, tokens) or local scratch (`.cursor/hooks/`, `functions/`).
+- Do not commit `node_modules` — dashboard deps live under `web/node_modules` (`web/.gitignore`); local scratch may also create `functions/node_modules`.
+- Dashboard SPA build output packs into `Sources/AbbeyServer/Resources/Public/` (gitignored unless intentionally shipping built assets).

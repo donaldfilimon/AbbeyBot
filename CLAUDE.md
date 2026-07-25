@@ -44,7 +44,7 @@ bun run test path/to/file.test.tsx   # single test file
 bun run build      # tsc -b && vite build → packed into Sources/AbbeyServer/Resources/Public/ for SPM
 ```
 
-**`bash Scripts/verify-all.sh` is the gate of record**, not GitHub Actions — hosted workflows on this private repo currently fail at startup (0 jobs) pending Actions billing/quota. Re-run `abbey-ci` once that's unblocked.
+**Gate of record:** see [`AGENTS.md` → Verify](./AGENTS.md#verify) — `verify-all.sh`, narrow smokes, CI secondary until billing unblocked.
 
 ## Architecture
 
@@ -63,4 +63,4 @@ bun run build      # tsc -b && vite build → packed into Sources/AbbeyServer/Re
 - Don't port claims from `research_mlai.md` (Python/TensorFlow stack, WDBX throughput numbers, blockchain, HIPAA/GDPR, industry pilots) into product docs or code comments as if shipped — see AGENTS.md's "Not shipped" list.
 - `IndustryProfile`, `WDBXMemoryFacade`, and `DecentralizationPolicy` (`Sources/AbbeyCore/{Industry,WDBX,Decentralization}/`) are deliberate **claim-honest shells** — a prompt-suffix flag, a local journal facade, and a policy stub that must stay disabled. Don't extend them to imply HIPAA/GDPR certification, real Zig-abi WDBX throughput, or an actual blockchain node; that's exactly the drift AGENTS.md's "Not shipped" list exists to prevent.
 - Twitch: IRC PRIVMSG→ingest and persona reply (with cooldown) are shipped, plus an EventSub webhook stub (`POST /api/twitch/eventsub`, challenge + log only). **Not shipped:** EventSub subscribe/HMAC verification, PubSub — don't assume a subscribed EventSub event actually reaches the classifier.
-- No CRDT merge or `?since=` cursor pagination for desktop↔server sync — it's push + pull with server-wins conflict resolution and a 500-row cap.
+- No CRDT merge or CLI↔desktop sync — desktop ships push + pull with persisted `?since=` cursors via `SyncCursorStore`, last-write-wins by `updatedAt` for users/channels (equity still server-wins), and a 500-row cap.

@@ -94,4 +94,4 @@ Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings us
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop→server push + pull-on-launch/manual (users/channels/messages/reputation/interactions/equity). Still deferred: Discord Voice **audio** (Opus/UDP); CRDT / cursor pagination / CLI↔desktop sync.
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop→server push + pull-on-launch/manual with persisted `?since=` cursors (users/channels/messages/reputation/interactions/equity). Still deferred: Discord Voice **audio** (Opus/UDP); CRDT merge / CLI↔desktop sync.

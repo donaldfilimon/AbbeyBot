@@ -159,9 +159,16 @@ final class AbbeyEngine {
         // a flushed ingest).
         _ = await AbbeyServerClient.shared.flushPendingPushes()
 
-        // Incremental after the first successful pull of the session: ask the server only for
-        // rows touched since then. Read before recordPullSuccess() below overwrites it.
-        let cursor = SyncStatus.shared.lastPullSuccessAt
+        // Ask the server only for rows touched since our last successful pull. The cursor is
+        // persisted, so this stays incremental across relaunches too, not just within a session.
+        let cursorStore = SyncCursorStore()
+        let cursor = cursorStore.lastPullSuccessAt
+
+        // Stamp the *start* of the pull, not its completion: a row the server writes while this
+        // pull is in flight may or may not appear in the response, so advancing the cursor to the
+        // end time could skip it permanently. Starting-time means such a row is simply refetched
+        // next pull — duplicate work, never lost data.
+        let attemptStartedAt = Date()
 
         do {
             let counts = try await SyncPull.run(into: modelContainer, since: cursor)
@@ -173,10 +180,12 @@ final class AbbeyEngine {
                 interactions: counts.interactionsInserted,
                 equity: counts.equityUpserted
             )
+            cursorStore.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: true)
             await socialBrain.warmCache()
         } catch {
             print("[sync] pull failed: \(error)")
             SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
+            cursorStore.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: false)
         }
 
         await reportSyncStatusToServer()
