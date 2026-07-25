@@ -2,10 +2,10 @@ import AbbeyCore
 import AbbeyServerKit
 import Foundation
 
-/// `/sync pull` — pull-only CLI participation in server sync. Fetches the six list endpoints
-/// with the persisted `?since=` cursor (`~/.abbey/cli-sync-cursor`) and applies them into the
-/// CLI's own Fluent database via `ServerSyncApply`. Push stays a desktop concern (durable
-/// outbox there); there is still no CRDT merge.
+/// `/sync pull` — pull server rows into the CLI's Fluent database. Fetches the six list
+/// endpoints with the persisted `?since=` cursor (`~/.abbey/cli-sync-cursor`) and applies
+/// them via `ServerSyncApply`. Pair with `/sync push` for the CLI's write path; there is
+/// still no CRDT merge.
 enum CLISyncPull {
     /// Runs one pull. Returns the lines to print — pure enough to unit-test the messaging
     /// without a REPL. The cursor only advances after a fully successful pull.

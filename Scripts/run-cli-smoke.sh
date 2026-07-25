@@ -24,7 +24,7 @@ echo "======== 2/3 boot cli with temp sqlite (dry-run) ========"
 OUT=/tmp/abbey-cli-smoke.log
 # `env` must wrap the binary (right side of the pipe), not printf.
 # Pin inference mode so desktop UserDefaults (e.g. remoteCompatible without endpoint) cannot block smoke.
-printf '/sync\n/sync pull\n/exit\n' | env ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
+printf '/sync\n/sync pull\n/sync push\n/exit\n' | env ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
   DATABASE_URL="sqlite://${SQLITE_PATH}" ABBEY_SYNC_SERVER_URL= \
   "$BIN" cli >"$OUT" 2>&1 || {
   echo "CLI_SMOKE_FAIL: binary exit nonzero"
@@ -40,9 +40,13 @@ echo "cli_boot_ok"
 rg -q "Sync status" "$OUT" || { echo "CLI_SMOKE_FAIL: /sync produced no report"; cat "$OUT"; exit 1; }
 rg -q "local CLI database" "$OUT" || { echo "CLI_SMOKE_FAIL: /sync did not flag local-only scope"; cat "$OUT"; exit 1; }
 echo "cli_sync_status_ok"
-# /sync pull without ABBEY_SYNC_SERVER_URL must say sync is unconfigured, not fake a pull.
-rg -q "Sync is not configured" "$OUT" || { echo "CLI_SMOKE_FAIL: /sync pull did not flag missing ABBEY_SYNC_SERVER_URL"; cat "$OUT"; exit 1; }
+# /sync pull|/sync push without ABBEY_SYNC_SERVER_URL must say sync is unconfigured, not fake a sync.
+rg -q "Sync is not configured" "$OUT" || { echo "CLI_SMOKE_FAIL: /sync pull|/sync push did not flag missing ABBEY_SYNC_SERVER_URL"; cat "$OUT"; exit 1; }
+# Both commands print the same unconfigured message — require at least two occurrences.
+UNCONFIG_COUNT="$(rg -c "Sync is not configured" "$OUT" || true)"
+python3 -c 'import sys; n=int(sys.argv[1] or 0); assert n>=2, n' "${UNCONFIG_COUNT:-0}"
 echo "cli_sync_pull_unconfigured_ok"
+echo "cli_sync_push_unconfigured_ok"
 
 echo "======== 3/3 run-abbey DATABASE_URL gate ========"
 # Same gate as Scripts/run-abbey.sh: clear server Postgres URL unless opt-in.

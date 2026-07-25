@@ -101,8 +101,13 @@ final class ConversationLoop {
                     print(line)
                 }
 
+            case .sync("push"):
+                for line in await CLISyncPush.run(runtime: runtime) {
+                    print(line)
+                }
+
             case .sync(let argument?):
-                print("Unknown /sync argument '\(argument)'. Usage: /sync (status) or /sync pull.")
+                print("Unknown /sync argument '\(argument)'. Usage: /sync (status), /sync pull, or /sync push.")
 
             case .exit:
                 break replLoop
@@ -124,6 +129,7 @@ final class ConversationLoop {
           /validate <src>  Static CodeProposalValidator (not a sandbox).
           /sync            Show the desktop-reported sync status in this database (read-only).
           /sync pull       Pull server rows into this database (ABBEY_SYNC_SERVER_URL; cursor at ~/.abbey/cli-sync-cursor).
+          /sync push       Push local messages + memory facts to the server (cursor at ~/.abbey/cli-sync-push-cursor).
           /exit, /quit     Quit.
         """)
     }
