@@ -43,6 +43,16 @@ public struct InteractionRouter: Sendable {
         self.voice = voice
     }
 
+    /// 1-based forget index. Returns `nil` when missing, unparseable (caller maps to 0), or ≤ 0.
+    public static func validatedForgetIndex(_ raw: Int) -> Int? {
+        raw > 0 ? raw : nil
+    }
+
+    /// Only `/ask` registers autocomplete; other commands get empty choices.
+    public static func shouldProvideAutocomplete(for commandName: String) -> Bool {
+        commandName == "ask"
+    }
+
     public func handle(_ interaction: Interaction, client: any DiscordClient) async {
         guard let data = interaction.data else { return }
 
@@ -90,8 +100,8 @@ public struct InteractionRouter: Sendable {
             result = await remember(target, guildId, fact)
         case "forget":
             let target = (try? data.option(named: "user")?.requireString()) ?? userId
-            let index = Int((try? data.option(named: "index")?.requireInt()) ?? 0)
-            guard index > 0 else {
+            let rawIndex = Int((try? data.option(named: "index")?.requireInt()) ?? 0)
+            guard let index = Self.validatedForgetIndex(rawIndex) else {
                 result = DiscordCopy.invalidFactIndex
                 break
             }
@@ -136,7 +146,7 @@ public struct InteractionRouter: Sendable {
         data: Interaction.ApplicationCommand,
         client: any DiscordClient
     ) async {
-        guard data.name == "ask" else {
+        guard Self.shouldProvideAutocomplete(for: data.name) else {
             try? await client.createInteractionResponse(
                 id: interaction.id,
                 token: interaction.token,
