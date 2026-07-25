@@ -160,34 +160,7 @@ public actor BotRuntime {
         if !twitchToken.isEmpty {
             let hooks = TwitchEventHooks { [weak self] msg in
                 guard let self else { return }
-                let botNick = (await self.twitchBridge.loginNick ?? "").lowercased()
-                if !botNick.isEmpty, msg.login == botNick { return }
-                await self.ingestMessage(
-                    content: msg.text,
-                    channelId: msg.channel,
-                    guildId: "twitch",
-                    authorId: msg.login,
-                    discordMessageId: "twitch-\(UUID().uuidString)"
-                )
-                if await self.scheduler.isCoolingDown(userId: msg.login, guildId: "twitch") {
-                    return
-                }
-                let intent = IntentClassifier.classify(msg.text)
-                let persona = await self.personaRouter.route(intent: intent)
-                let context = await self.personaContext(
-                    authorId: msg.login,
-                    guildId: "twitch",
-                    channelId: msg.channel
-                )
-                let response = await persona.respond(
-                    to: msg.text,
-                    context: context,
-                    inference: self.inferenceRouter
-                )
-                let reply = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !reply.isEmpty else { return }
-                await self.twitchBridge.sendPrivmsg(channel: msg.channel, text: reply)
-                await self.scheduler.markReplied(userId: msg.login, guildId: "twitch")
+                await self.handleTwitchChat(login: msg.login, channel: msg.channel, text: msg.text)
             }
             await twitchBridge.connect(
                 oauthToken: twitchToken,
@@ -352,6 +325,41 @@ public actor BotRuntime {
         } catch {
             app.logger.error("ingest failed: \(error)")
         }
+    }
+
+    /// Shared Twitch chat path: ingest under `guildId=twitch`, then persona reply via IRC with
+    /// cooldown. Used by both the IRC PRIVMSG hooks and EventSub `channel.chat.message`
+    /// notifications so the two transports cannot drift. Replies go out over the IRC bridge —
+    /// when it isn't connected `sendPrivmsg` logs and drops the reply (ingest still happened).
+    public func handleTwitchChat(login: String, channel: String, text: String) async {
+        let botNick = (await twitchBridge.loginNick ?? "").lowercased()
+        if !botNick.isEmpty, login.lowercased() == botNick { return }
+        await ingestMessage(
+            content: text,
+            channelId: channel,
+            guildId: "twitch",
+            authorId: login,
+            discordMessageId: "twitch-\(UUID().uuidString)"
+        )
+        if await scheduler.isCoolingDown(userId: login, guildId: "twitch") {
+            return
+        }
+        let intent = IntentClassifier.classify(text)
+        let persona = await personaRouter.route(intent: intent)
+        let context = await personaContext(
+            authorId: login,
+            guildId: "twitch",
+            channelId: channel
+        )
+        let response = await persona.respond(
+            to: text,
+            context: context,
+            inference: inferenceRouter
+        )
+        let reply = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reply.isEmpty else { return }
+        await twitchBridge.sendPrivmsg(channel: channel, text: reply)
+        await scheduler.markReplied(userId: login, guildId: "twitch")
     }
 
     func personaContext(authorId: String, guildId: String, channelId: String) async -> PersonaContext {
