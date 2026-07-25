@@ -396,6 +396,16 @@ public actor BotRuntime {
         try await MemoryRepository.forgetFact(userId: userId, guildId: guildId, index: index, on: app.db)
     }
 
+    /// Soft-delete a user-memory row so incremental sync pulls can tombstone it on desktop.
+    public func tombstoneUser(userId: String, guildId: String) async throws {
+        try await MemoryRepository.softDelete(userId: userId, guildId: guildId, on: app.db)
+    }
+
+    /// Soft-delete a channel-context row so incremental sync pulls can tombstone it on desktop.
+    public func tombstoneChannel(channelId: String, guildId: String) async throws {
+        try await ChannelRepository.softDelete(channelId: channelId, guildId: guildId, on: app.db)
+    }
+
     /// The sync-status row visible in *this* runtime's database. When the CLI runs on its own
     /// local SQLite file this is empty — the desktop reports into the server's database, so a
     /// meaningful row only appears when `ABBEY_CLI_USE_SERVER_DATABASE=1` points both at one DB.

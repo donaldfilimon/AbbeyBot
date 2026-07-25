@@ -100,6 +100,86 @@ struct SyncPullTests {
         #expect(stored?.messageCount == 10)
     }
 
+    @Test func upsertUsersAppliesTombstoneByHardDeletingLocalRow() throws {
+        let context = try makeContext()
+        let local = UserMemory(discordUserId: "u1", guildId: "g1", facts: ["gone"], reputation: 0.5, updatedAt: Date().addingTimeInterval(-100))
+        local.compositeKey = "g1:u1"
+        context.insert(local)
+        try context.save()
+
+        let deletedAt = Date()
+        let remote = SyncDTO.User(
+            id: UUID(),
+            compositeKey: "g1:u1",
+            discordUserId: "u1",
+            guildId: "g1",
+            facts: ["gone"],
+            reputation: 0.5,
+            interactionCount: 0,
+            updatedAt: deletedAt,
+            deletedAt: deletedAt
+        )
+
+        try SyncPull.upsertUsers([remote], into: context)
+
+        let key = "g1:u1"
+        let descriptor = FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
+        #expect(try context.fetch(descriptor).isEmpty)
+    }
+
+    @Test func upsertUsersPreservesNewerLocalEditOverOlderTombstone() throws {
+        let context = try makeContext()
+        let local = UserMemory(discordUserId: "u1", guildId: "g1", facts: ["kept"], reputation: 0.9, updatedAt: Date())
+        local.compositeKey = "g1:u1"
+        context.insert(local)
+        try context.save()
+
+        let deletedAt = Date().addingTimeInterval(-100)
+        let remote = SyncDTO.User(
+            id: UUID(),
+            compositeKey: "g1:u1",
+            discordUserId: "u1",
+            guildId: "g1",
+            facts: [],
+            reputation: 0.1,
+            interactionCount: 0,
+            updatedAt: deletedAt,
+            deletedAt: deletedAt
+        )
+
+        try SyncPull.upsertUsers([remote], into: context)
+
+        let key = "g1:u1"
+        let descriptor = FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
+        #expect(try context.fetch(descriptor).first?.facts == ["kept"])
+    }
+
+    @Test func upsertChannelsAppliesTombstoneByHardDeletingLocalRow() throws {
+        let context = try makeContext()
+        let local = ChannelContext(channelId: "c1", guildId: "g1", summary: "gone", messageCount: 3, updatedAt: Date().addingTimeInterval(-50))
+        local.compositeKey = "g1:c1"
+        context.insert(local)
+        try context.save()
+
+        let deletedAt = Date()
+        let remote = SyncDTO.Channel(
+            id: UUID(),
+            compositeKey: "g1:c1",
+            channelId: "c1",
+            guildId: "g1",
+            summary: "gone",
+            messageCount: 3,
+            updatedAt: deletedAt,
+            deletedAt: deletedAt
+        )
+
+        try SyncPull.upsertChannels([remote], into: context)
+
+        let key = "g1:c1"
+        let descriptor = FetchDescriptor<ChannelContext>(predicate: #Predicate { $0.compositeKey == key })
+        #expect(try context.fetch(descriptor).isEmpty)
+    }
+
     // MARK: - Equity
     //
     // Equity ideas are regenerated rather than hand-edited, so `generatedAt` is the

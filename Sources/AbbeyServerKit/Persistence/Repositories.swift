@@ -8,16 +8,28 @@ public enum MemoryForgetError: Error, Equatable {
     case invalidIndex
 }
 
+public enum MemoryTombstoneError: Error, Equatable {
+    case noMemory
+}
+
+public enum ChannelTombstoneError: Error, Equatable {
+    case noChannel
+}
+
 public enum MemoryRepository {
     public static func appendFact(userId: String, guildId: String, fact: String, on db: any Database) async throws {
         let trimmed = fact.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         if let existing = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() {
+            // A remember after soft-delete resurrects the row so sync can ship a live update.
+            if existing.deletedAt != nil {
+                existing.deletedAt = nil
+            }
             if !existing.facts.contains(trimmed) {
                 existing.facts.append(trimmed)
-                try await existing.save(on: db)
             }
+            try await existing.save(on: db)
         } else {
             let record = UserMemory(discordUserId: userId, guildId: guildId, facts: [trimmed])
             try await record.create(on: db)
@@ -26,7 +38,9 @@ public enum MemoryRepository {
 
     public static func forgetFact(userId: String, guildId: String, index: Int, on db: any Database) async throws {
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
-        guard let memory = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() else {
+        guard let memory = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first(),
+              memory.deletedAt == nil
+        else {
             throw MemoryForgetError.noMemory
         }
         let idx = index - 1
@@ -37,21 +51,45 @@ public enum MemoryRepository {
         try await memory.save(on: db)
     }
 
-    public static func facts(userId: String, guildId: String, on db: any Database) async throws -> [String] {
+    /// Soft-delete the whole user-memory row. Sets `deletedAt` and bumps `updatedAt` so
+    /// incremental `?since=` pulls deliver the tombstone to desktop.
+    public static func softDelete(userId: String, guildId: String, on db: any Database) async throws {
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
-        return try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first()?.facts ?? []
+        guard let memory = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first(),
+              memory.deletedAt == nil
+        else {
+            throw MemoryTombstoneError.noMemory
+        }
+        memory.deletedAt = Date()
+        try await memory.save(on: db)
     }
 
+    public static func facts(userId: String, guildId: String, on db: any Database) async throws -> [String] {
+        let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+        guard let memory = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first(),
+              memory.deletedAt == nil
+        else {
+            return []
+        }
+        return memory.facts
+    }
+
+    /// Full list (no `since`) hides tombstones. Incremental list (`since` set) includes
+    /// rows whose `updatedAt` advanced — including soft-deletes — so SyncPull can remove them.
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [UserMemory] {
         var query = UserMemory.query(on: db)
         if let since {
             query = query.filter(\.$updatedAt > since)
+            return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
         }
-        return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
+        // Fetch a wider window then drop tombstones in-process — Fluent optional-null
+        // filters are awkward across SQLite/Postgres drivers, and list caps are small (≤500).
+        let rows = try await query.sort(\.$updatedAt, .descending).limit(limit * 2).all()
+        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
     }
 
     public static func count(on db: any Database) async throws -> Int {
-        try await UserMemory.query(on: db).count()
+        try await UserMemory.query(on: db).all().filter { $0.deletedAt == nil }.count
     }
 }
 
@@ -59,6 +97,9 @@ public enum ChannelRepository {
     public static func bump(channelId: String, guildId: String, on db: any Database) async throws {
         let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
         if let existing = try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first() {
+            if existing.deletedAt != nil {
+                existing.deletedAt = nil
+            }
             existing.messageCount += 1
             try await existing.save(on: db)
         } else {
@@ -69,24 +110,47 @@ public enum ChannelRepository {
 
     public static func summary(channelId: String, guildId: String, on db: any Database) async throws -> String {
         let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
-        return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.summary ?? ""
+        guard let channel = try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first(),
+              channel.deletedAt == nil
+        else {
+            return ""
+        }
+        return channel.summary
     }
 
     public static func messageCount(channelId: String, guildId: String, on db: any Database) async throws -> Int {
         let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
-        return try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first()?.messageCount ?? 0
+        guard let channel = try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first(),
+              channel.deletedAt == nil
+        else {
+            return 0
+        }
+        return channel.messageCount
+    }
+
+    public static func softDelete(channelId: String, guildId: String, on db: any Database) async throws {
+        let composite = ReputationMath.channelKey(channelId: channelId, guildId: guildId)
+        guard let channel = try await ChannelContext.query(on: db).filter(\.$compositeKey == composite).first(),
+              channel.deletedAt == nil
+        else {
+            throw ChannelTombstoneError.noChannel
+        }
+        channel.deletedAt = Date()
+        try await channel.save(on: db)
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [ChannelContext] {
         var query = ChannelContext.query(on: db)
         if let since {
             query = query.filter(\.$updatedAt > since)
+            return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
         }
-        return try await query.sort(\.$updatedAt, .descending).limit(limit).all()
+        let rows = try await query.sort(\.$updatedAt, .descending).limit(limit * 2).all()
+        return Array(rows.filter { $0.deletedAt == nil }.prefix(limit))
     }
 
     public static func count(on db: any Database) async throws -> Int {
-        try await ChannelContext.query(on: db).count()
+        try await ChannelContext.query(on: db).all().filter { $0.deletedAt == nil }.count
     }
 }
 

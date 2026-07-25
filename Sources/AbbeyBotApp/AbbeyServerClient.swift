@@ -72,6 +72,24 @@ struct AbbeyServerClient: Sendable {
         await post(path: "/api/state/forget", body: body)
     }
 
+    /// Soft-delete a user-memory row on the server so the next incremental pull can tombstone it locally.
+    func tombstoneUser(guildId: String, userId: String) async {
+        let body: [String: String] = [
+            "guildId": guildId,
+            "userId": userId
+        ]
+        await post(path: "/api/state/tombstone/user", body: body)
+    }
+
+    /// Soft-delete a channel-context row on the server so the next incremental pull can tombstone it locally.
+    func tombstoneChannel(guildId: String, channelId: String) async {
+        let body: [String: String] = [
+            "guildId": guildId,
+            "channelId": channelId
+        ]
+        await post(path: "/api/state/tombstone/channel", body: body)
+    }
+
     /// Reports the desktop's current sync outcome so the operator dashboard's Sync tab
     /// can show it. Best-effort like every other push — benefits from the same durable
     /// outbox retry as ingest/remember/forget.

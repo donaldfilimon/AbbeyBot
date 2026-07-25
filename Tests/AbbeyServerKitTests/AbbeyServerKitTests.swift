@@ -3,16 +3,18 @@ import Foundation
 import Testing
 import Vapor
 
-@Suite("AbbeyServerKit sqlite-memory")
+@Suite("AbbeyServerKit sqlite isolation", .serialized)
 struct AbbeyServerKitTests {
     private func withRuntime<T: Sendable>(
         _ body: @Sendable (Application, BotRuntime) async throws -> T
     ) async throws -> T {
         unsetenv("DISCORD_BOT_TOKEN")
         unsetenv("DISCORD_DEV_GUILD_ID")
-        unsetenv("DATABASE_URL")
 
         let app = try await Application.make(.testing)
+        // Application.make loads `.env` into the process environment — force an in-memory
+        // URL afterward so configureRuntime cannot pick up a developer Postgres/sqlite file.
+        setenv("DATABASE_URL", "sqlite://memory", 1)
         do {
             let runtime = try await configureRuntime(app, defaultDatabaseURL: "sqlite://memory")
             let result = try await body(app, runtime)
@@ -32,8 +34,8 @@ struct AbbeyServerKitTests {
 
     @Test func configureRuntimeRejectsInvalidDatabaseURL() async throws {
         unsetenv("DISCORD_BOT_TOKEN")
-        unsetenv("DATABASE_URL")
         let app = try await Application.make(.testing)
+        setenv("DATABASE_URL", "mysql://nope", 1)
         do {
             await #expect(throws: (any Error).self) {
                 _ = try await configureRuntime(app, defaultDatabaseURL: "mysql://nope")
@@ -262,6 +264,50 @@ struct AbbeyServerKitTests {
             let metrics = await runtime.metricsSnapshot()
             #expect(metrics.discordBotUserId.isEmpty)
             #expect(metrics.discordState == "disconnected")
+        }
+    }
+
+    @Test func softDeleteHidesFromFullListAndSurfacesOnSincePull() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            try await MemoryRepository.appendFact(userId: "u1", guildId: "g1", fact: "tea", on: db)
+            try await ChannelRepository.bump(channelId: "c1", guildId: "g1", on: db)
+
+            let before = Date().addingTimeInterval(-1)
+            try await MemoryRepository.softDelete(userId: "u1", guildId: "g1", on: db)
+            try await ChannelRepository.softDelete(channelId: "c1", guildId: "g1", on: db)
+
+            let liveUsers = try await MemoryRepository.recent(limit: 10, on: db)
+            #expect(liveUsers.isEmpty)
+            let liveChannels = try await ChannelRepository.recent(limit: 10, on: db)
+            #expect(liveChannels.isEmpty)
+
+            let tombstoneUsers = try await MemoryRepository.recent(limit: 10, since: before, on: db)
+            #expect(tombstoneUsers.count == 1)
+            #expect(tombstoneUsers.first?.deletedAt != nil)
+
+            let tombstoneChannels = try await ChannelRepository.recent(limit: 10, since: before, on: db)
+            #expect(tombstoneChannels.count == 1)
+            #expect(tombstoneChannels.first?.deletedAt != nil)
+
+            #expect(try await MemoryRepository.count(on: db) == 0)
+            #expect(try await ChannelRepository.count(on: db) == 0)
+            #expect(try await MemoryRepository.facts(userId: "u1", guildId: "g1", on: db).isEmpty)
+        }
+    }
+
+    @Test func rememberResurrectsSoftDeletedUser() async throws {
+        try await withRuntime { app, runtime in
+            try await runtime.remember(userId: "u1", guildId: "g1", fact: "old")
+            try await runtime.tombstoneUser(userId: "u1", guildId: "g1")
+            #expect((await runtime.userState(userId: "u1", guildId: "g1")).facts.isEmpty)
+
+            try await runtime.remember(userId: "u1", guildId: "g1", fact: "new")
+            #expect((await runtime.userState(userId: "u1", guildId: "g1")).facts == ["old", "new"])
+
+            let live = try await MemoryRepository.recent(limit: 10, on: app.db)
+            #expect(live.count == 1)
+            #expect(live.first?.deletedAt == nil)
         }
     }
 }

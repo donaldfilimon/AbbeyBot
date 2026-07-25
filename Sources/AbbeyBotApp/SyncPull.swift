@@ -7,8 +7,11 @@ import SwiftData
 /// - `UserMemory` by `compositeKey` — facts, reputation, interactionCount, updatedAt
 ///   (**last-write-wins by `updatedAt`**: an unsynced local edit newer than the remote row
 ///   survives a pull instead of being clobbered; caveat — this compares each side's own wall
-///   clock, so it's not resilient to significant clock skew between desktop and server)
-/// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (same last-write-wins rule)
+///   clock, so it's not resilient to significant clock skew between desktop and server).
+///   When the remote row carries a non-nil `deletedAt` at least as new as the local
+///   `updatedAt`, the local SwiftData row is **hard-deleted** (tombstone application).
+/// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (same last-write-wins
+///   and tombstone rules)
 /// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing
 /// - `ReputationEvent` / `InteractionLog` — insert-if-missing by Fluent `serverId` only
 ///   (rows without `id` are skipped — no fragile composite identity)
@@ -93,7 +96,22 @@ enum SyncPull {
         var count = 0
         for row in rows {
             let key = row.compositeKey
-            if let existing = try firstMatching(UserMemory.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
+            let existing = try firstMatching(UserMemory.self, predicate: #Predicate { $0.compositeKey == key }, in: context)
+
+            if let deletedAt = row.deletedAt {
+                // Tombstone: remove local row when the remote delete is at least as new as local.
+                if let existing {
+                    let remoteStamp = row.updatedAt ?? deletedAt
+                    if remoteStamp >= existing.updatedAt {
+                        context.delete(existing)
+                    }
+                }
+                // Never insert a tombstone as a live local row.
+                count += 1
+                continue
+            }
+
+            if let existing {
                 // Last-write-wins: only apply the remote row if it's at least as new as the
                 // local one, so an unsynced local edit made since the last pull survives.
                 if let remoteUpdatedAt = row.updatedAt, remoteUpdatedAt < existing.updatedAt {
@@ -126,7 +144,20 @@ enum SyncPull {
         var count = 0
         for row in rows {
             let key = row.compositeKey
-            if let existing = try firstMatching(ChannelContext.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
+            let existing = try firstMatching(ChannelContext.self, predicate: #Predicate { $0.compositeKey == key }, in: context)
+
+            if let deletedAt = row.deletedAt {
+                if let existing {
+                    let remoteStamp = row.updatedAt ?? deletedAt
+                    if remoteStamp >= existing.updatedAt {
+                        context.delete(existing)
+                    }
+                }
+                count += 1
+                continue
+            }
+
+            if let existing {
                 // Last-write-wins: only apply the remote row if it's at least as new as the
                 // local one, so an unsynced local edit made since the last pull survives.
                 if let remoteUpdatedAt = row.updatedAt, remoteUpdatedAt < existing.updatedAt {
