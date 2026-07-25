@@ -13,6 +13,8 @@ public enum AbbeyEvent: Sendable {
     case destructiveActionCancelled(kind: DestructiveAction, targetUserId: String)
     case equityIdeaGenerated(symbol: String)
     case inferenceProviderFailed(mode: InferenceMode, message: String)
+    /// Twitch EventSub `stream.online` / `stream.offline` — operator status only.
+    case twitchStreamLifecycle(broadcasterLogin: String, isLive: Bool)
 
     /// Operator-facing one-liner for dashboards (not `String(describing:)`).
     public var displayDescription: String {
@@ -35,6 +37,10 @@ public enum AbbeyEvent: Sendable {
             return "Equity idea \(symbol)"
         case .inferenceProviderFailed(let mode, let message):
             return "Inference failed (\(mode.rawValue)): \(message)"
+        case .twitchStreamLifecycle(let broadcasterLogin, let isLive):
+            return isLive
+                ? "Twitch stream live: #\(broadcasterLogin)"
+                : "Twitch stream offline: #\(broadcasterLogin)"
         }
     }
 }

@@ -76,10 +76,83 @@ struct TwitchEventSubHandlerTests {
     @Test func otherNotificationTypesIgnoreBodyAndStayLogOnly() {
         #expect(TwitchEventSubHandler.handle(
             messageType: "notification",
-            subscriptionType: "stream.online",
+            subscriptionType: "channel.follow",
             subscriptionStatus: "enabled",
             body: Self.chatMessageBody
+        ) == .notificationAcknowledged(subscriptionType: "channel.follow"))
+    }
+
+    private static let streamLifecycleBody = Data("""
+    {
+      "subscription": {"id": "sub-2", "type": "stream.online", "status": "enabled"},
+      "event": {
+        "broadcaster_user_id": "100",
+        "broadcaster_user_login": "somechannel",
+        "type": "live",
+        "started_at": "2026-07-25T00:00:00Z"
+      }
+    }
+    """.utf8)
+
+    @Test func streamOnlineNotificationWithPayloadBecomesStreamLifecycle() {
+        let outcome = TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "stream.online",
+            subscriptionStatus: "enabled",
+            body: Self.streamLifecycleBody
+        )
+        #expect(outcome == .notificationStreamOnline(lifecycle: TwitchEventSubStreamLifecycle(
+            broadcasterLogin: "somechannel",
+            isLive: true
+        )))
+    }
+
+    @Test func streamOfflineNotificationWithPayloadBecomesStreamLifecycle() {
+        let body = Data("""
+        {"event": {"broadcaster_user_login": "somechannel"}}
+        """.utf8)
+        let outcome = TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "stream.offline",
+            subscriptionStatus: "enabled",
+            body: body
+        )
+        #expect(outcome == .notificationStreamOffline(lifecycle: TwitchEventSubStreamLifecycle(
+            broadcasterLogin: "somechannel",
+            isLive: false
+        )))
+    }
+
+    @Test func streamOnlineWithoutBodyFallsBackToAcknowledged() {
+        #expect(TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "stream.online",
+            subscriptionStatus: "enabled",
+            body: nil
         ) == .notificationAcknowledged(subscriptionType: "stream.online"))
+    }
+
+    @Test func streamOnlineWithMalformedBodyFallsBackToAcknowledged() {
+        #expect(TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "stream.online",
+            subscriptionStatus: "enabled",
+            body: Data("{\"event\": {}}".utf8)
+        ) == .notificationAcknowledged(subscriptionType: "stream.online"))
+    }
+
+    @Test func streamLifecycleLogLineNamesBroadcaster() {
+        let online = TwitchEventSubHandler.logLine(for: .notificationStreamOnline(lifecycle: TwitchEventSubStreamLifecycle(
+            broadcasterLogin: "somechannel",
+            isLive: true
+        )))
+        #expect(online.contains("somechannel"))
+        #expect(online.contains("live"))
+        let offline = TwitchEventSubHandler.logLine(for: .notificationStreamOffline(lifecycle: TwitchEventSubStreamLifecycle(
+            broadcasterLogin: "somechannel",
+            isLive: false
+        )))
+        #expect(offline.contains("offline"))
     }
 
     @Test func parseChatMessageRejectsEmptyText() {
@@ -108,9 +181,9 @@ struct TwitchEventSubHandlerTests {
         ) == .ignored(messageType: "something_new", subscriptionType: "channel.update"))
     }
 
-    @Test func logLineMentionsNoProductSideEffectForNotifications() {
-        let line = TwitchEventSubHandler.logLine(for: .notificationAcknowledged(subscriptionType: "stream.online"))
-        #expect(line.contains("stream.online"))
+    @Test func logLineMentionsNoProductSideEffectForFollowNotifications() {
+        let line = TwitchEventSubHandler.logLine(for: .notificationAcknowledged(subscriptionType: "channel.follow"))
+        #expect(line.contains("channel.follow"))
         #expect(line.contains("no product side-effect"))
     }
 }

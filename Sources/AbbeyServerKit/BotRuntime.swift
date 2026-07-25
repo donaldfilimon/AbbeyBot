@@ -105,6 +105,9 @@ public actor BotRuntime {
     private(set) var discordLastError: String?
     private(set) var discordBotUserId: String?
     private(set) var liveIngestCount: Int = 0
+    /// Last observed Twitch EventSub stream lifecycle. `nil` until the first
+    /// `stream.online` / `stream.offline` notification arrives this process.
+    public private(set) var twitchStreamLive: Bool?
     private var metricsListener: Task<Void, Never>?
 
     init(app: Application) {
@@ -375,6 +378,30 @@ public actor BotRuntime {
         guard !reply.isEmpty else { return }
         await twitchBridge.sendPrivmsg(channel: channel, text: reply)
         await scheduler.markReplied(userId: login, guildId: "twitch")
+    }
+
+    /// EventSub `stream.online` / `stream.offline` — updates operator-visible stream-live
+    /// state, publishes on the event bus, and logs an interaction. No Discord/IRC announce.
+    public func handleTwitchStreamLifecycle(broadcasterLogin: String, isLive: Bool) async {
+        twitchStreamLive = isLive
+        await eventBus.publish(
+            .twitchStreamLifecycle(broadcasterLogin: broadcasterLogin, isLive: isLive)
+        )
+        let command = isLive ? "eventsub.stream.online" : "eventsub.stream.offline"
+        do {
+            try await InteractionRepository.log(
+                commandName: command,
+                userId: broadcasterLogin,
+                guildId: "twitch",
+                succeeded: true,
+                latencyMs: 0,
+                on: app.db
+            )
+        } catch {
+            app.logger.warning(
+                "Twitch stream lifecycle interaction log failed: \(OperatorFacingError.message(error))"
+            )
+        }
     }
 
     func personaContext(authorId: String, guildId: String, channelId: String) async -> PersonaContext {

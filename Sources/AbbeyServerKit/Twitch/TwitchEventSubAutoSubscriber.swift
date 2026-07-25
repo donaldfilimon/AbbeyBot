@@ -4,15 +4,24 @@ import Vapor
 /// Env-gated EventSub auto-subscribe at server boot.
 ///
 /// Off by default. When `ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` and the full env contract is
-/// present, boot fetches an app access token and creates a `channel.chat.message` webhook
-/// subscription via `TwitchHelixClient`. Any missing/invalid config or Helix failure logs a
-/// warning and skips — it never crashes boot. Claim-honest: this flow is unverified against
-/// Twitch's live API; the `webhook_callback_verification` handshake needs a publicly reachable
-/// HTTPS callback this environment can't provide.
+/// present, boot fetches an app access token and creates webhook subscriptions for the types
+/// with product side-effects (`channel.chat.message`, `stream.online`, `stream.offline`) via
+/// `TwitchHelixClient`. Any missing/invalid config or Helix failure logs a warning and skips —
+/// it never crashes boot. Claim-honest: this flow is unverified against Twitch's live API;
+/// the `webhook_callback_verification` handshake needs a publicly reachable HTTPS callback
+/// this environment can't provide.
 public enum TwitchEventSubAutoSubscriber {
-    /// The only subscription type auto-subscribed in v1 — the one with a product side-effect.
-    public static let subscriptionType = TwitchEventSubHandler.chatMessageSubscriptionType
     public static let subscriptionVersion = "1"
+
+    /// Subscriptions created when auto-subscribe is enabled (types with product side-effects).
+    public static let subscriptionSpecs: [(type: String, needsBotUserId: Bool)] = [
+        (TwitchEventSubHandler.chatMessageSubscriptionType, true),
+        (TwitchEventSubHandler.streamOnlineSubscriptionType, false),
+        (TwitchEventSubHandler.streamOfflineSubscriptionType, false)
+    ]
+
+    /// Kept for callers that still reference the chat-only constant.
+    public static let subscriptionType = TwitchEventSubHandler.chatMessageSubscriptionType
 
     public struct Config: Equatable, Sendable {
         public let clientId: String
@@ -92,8 +101,9 @@ public enum TwitchEventSubAutoSubscriber {
         ))
     }
 
-    /// Runs the subscribe flow when configured. Returns whether a subscription request was
-    /// accepted by Helix. Never throws; every non-ready path logs and returns false.
+    /// Runs the subscribe flow when configured. Returns whether **all** subscription requests
+    /// were accepted by Helix. Never throws; every non-ready path logs and returns false.
+    /// A mid-list Helix failure warns, skips the remaining types, and returns false — boot continues.
     @discardableResult
     public static func subscribeIfConfigured(
         app: Application,
@@ -121,20 +131,23 @@ public enum TwitchEventSubAutoSubscriber {
             )
             do {
                 let token = try await helix.fetchAppAccessToken()
-                try await helix.createSubscription(
-                    type: subscriptionType,
-                    version: subscriptionVersion,
-                    condition: [
-                        "broadcaster_user_id": config.broadcasterUserId,
-                        "user_id": config.botUserId
-                    ],
-                    callbackURL: config.callbackURL,
-                    webhookSecret: config.webhookSecret,
-                    appAccessToken: token
-                )
-                app.logger.info(
-                    "Twitch EventSub auto-subscribe: \(subscriptionType) subscription requested for broadcaster \(config.broadcasterUserId) → \(config.callbackURL)"
-                )
+                for spec in subscriptionSpecs {
+                    var condition = ["broadcaster_user_id": config.broadcasterUserId]
+                    if spec.needsBotUserId {
+                        condition["user_id"] = config.botUserId
+                    }
+                    try await helix.createSubscription(
+                        type: spec.type,
+                        version: subscriptionVersion,
+                        condition: condition,
+                        callbackURL: config.callbackURL,
+                        webhookSecret: config.webhookSecret,
+                        appAccessToken: token
+                    )
+                    app.logger.info(
+                        "Twitch EventSub auto-subscribe: \(spec.type) subscription requested for broadcaster \(config.broadcasterUserId) → \(config.callbackURL)"
+                    )
+                }
                 return true
             } catch {
                 app.logger.warning(
