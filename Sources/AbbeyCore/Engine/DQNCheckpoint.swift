@@ -88,34 +88,30 @@ public enum DQNCheckpointStore: Sendable {
 
 extension NeuralNetwork {
     func encodeWeights() -> [[[Float]]] {
-        weights.map { layer in
-            layer.map { simd in
-                (0..<8).map { simd[$0] }
-            }
-        }
+        weights
     }
 
-    static func decodeWeights(_ raw: [[[Float]]], topology: [Int]) throws -> [[SIMD8<Float>]] {
+    /// Validates layer/neuron counts *and* each neuron's lane count against `topology`'s
+    /// fan-in (previously fixed at 8 lanes regardless of layer width). A checkpoint
+    /// written before that fix will fail this check — treated the same as any other
+    /// unreadable checkpoint (`.corrupt`), not silently truncated/padded back to 8.
+    static func decodeWeights(_ raw: [[[Float]]], topology: [Int]) throws -> [[[Float]]] {
         guard raw.count == max(topology.count - 1, 0) else {
             throw DQNCheckpointError.corrupt("weight layer count \(raw.count)")
         }
-        var out: [[SIMD8<Float>]] = []
         for (layerIndex, layer) in raw.enumerated() {
-            let expected = topology[layerIndex + 1]
-            guard layer.count == expected else {
+            let expectedNeurons = topology[layerIndex + 1]
+            guard layer.count == expectedNeurons else {
                 throw DQNCheckpointError.corrupt("layer \(layerIndex) neuron count \(layer.count)")
             }
-            var neurons: [SIMD8<Float>] = []
+            let expectedFanIn = topology[layerIndex]
             for neuron in layer {
-                var lanes = Array(neuron.prefix(8))
-                if lanes.count < 8 {
-                    lanes.append(contentsOf: repeatElement(Float(0), count: 8 - lanes.count))
+                guard neuron.count == expectedFanIn else {
+                    throw DQNCheckpointError.corrupt("layer \(layerIndex) neuron fan-in \(neuron.count)")
                 }
-                neurons.append(SIMD8<Float>(lanes))
             }
-            out.append(neurons)
         }
-        return out
+        return raw
     }
 
     mutating func applyCheckpoint(weights rawWeights: [[[Float]]], biases: [[Float]], topology: [Int]) throws {
