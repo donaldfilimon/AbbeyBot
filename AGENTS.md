@@ -97,6 +97,8 @@ ABBEY_CLI_USE_SERVER_DATABASE=1 bash Scripts/run-abbey.sh
 
 Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `Scripts/run-abbey.sh` sources `.env` for Discord/`ABBEY_*` knobs but **clears `DATABASE_URL` unless** `ABBEY_CLI_USE_SERVER_DATABASE=1`. To override without the wrapper, export `DATABASE_URL` (same postgres/sqlite conventions as the server) before `swift run AbbeyBot cli`. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
 
+REPL commands: `/help`, `/clear`, `/model [mode]`, `/validate <src>`, `/sync`, `/exit`. `/sync` is **read-only** — it prints the desktop-reported `sync_status_records` row visible in the CLI's own database (`BotRuntime.syncStatusSnapshot()`). On the default local SQLite DB there is no such row, so it says so and points at `ABBEY_CLI_USE_SERVER_DATABASE=1`; the CLI still performs no push or pull of its own.
+
 ## Shared core (finalized)
 
 `AbbeyCore` owns `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, and strict-by-default `IntentClassifier`. Desktop `AbbeyEngine` and server `BotRuntime` keep persistence adapters only.
@@ -178,7 +180,7 @@ See **Verify** above — gate of record, CI secondary, continuation semantics, a
 
 Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet, and a real implementation (Voice Gateway WS + UDP/IP-discovery + RTP + Opus codec + audio capture/playback) is a standalone effort on the order of the rest of this package combined. Deliberately out of scope; not planned alongside other sync/UI work. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
 
-Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` incremental cursors persisted across launches (launch + Settings “Pull now”) and **last-write-wins** for users/channels (`updatedAt`) and equity (`generatedAt`); messages by Discord id; reputation/interactions by Fluent id; limit 500. LWW compares each side's own wall clock — not resilient to significant clock skew between desktop and server. No CRDT merge, no delete/tombstone propagation, and the CLI still doesn't participate in sync at all (`abbey` is local-SQLite-only per its own DATABASE_URL section above).
+Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` incremental cursors persisted across launches (launch + Settings “Pull now”) and **last-write-wins** for users/channels (`updatedAt`) and equity (`generatedAt`); messages by Discord id; reputation/interactions by Fluent id; limit 500. LWW compares each side's own wall clock — not resilient to significant clock skew between desktop and server. No CRDT merge and no delete/tombstone propagation. The CLI still performs no push or pull; its only sync surface is the read-only `/sync` report of the desktop-reported row in whichever database it is pointed at (`abbey` defaults to local SQLite per its own DATABASE_URL section above).
 
 ## Learned User Preferences
 

@@ -24,7 +24,7 @@ echo "======== 2/3 boot cli with temp sqlite (dry-run) ========"
 OUT=/tmp/abbey-cli-smoke.log
 # `env` must wrap the binary (right side of the pipe), not printf.
 # Pin inference mode so desktop UserDefaults (e.g. remoteCompatible without endpoint) cannot block smoke.
-printf '/exit\n' | env ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
+printf '/sync\n/exit\n' | env ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
   DATABASE_URL="sqlite://${SQLITE_PATH}" \
   "$BIN" cli >"$OUT" 2>&1 || {
   echo "CLI_SMOKE_FAIL: binary exit nonzero"
@@ -35,6 +35,11 @@ rg -q "Abbey CLI" "$OUT" || { echo "CLI_SMOKE_FAIL: missing banner"; cat "$OUT";
 rg -q "abbey>" "$OUT" || { echo "CLI_SMOKE_FAIL: missing prompt"; cat "$OUT"; exit 1; }
 rg -q "Database dialect: sqlite-file" "$OUT" || { echo "CLI_SMOKE_FAIL: expected sqlite-file"; cat "$OUT"; exit 1; }
 echo "cli_boot_ok"
+# /sync is read-only; without ABBEY_CLI_USE_SERVER_DATABASE=1 it must say so rather than
+# implying the CLI participates in desktop push/pull.
+rg -q "Sync status" "$OUT" || { echo "CLI_SMOKE_FAIL: /sync produced no report"; cat "$OUT"; exit 1; }
+rg -q "local CLI database" "$OUT" || { echo "CLI_SMOKE_FAIL: /sync did not flag local-only scope"; cat "$OUT"; exit 1; }
+echo "cli_sync_status_ok"
 
 echo "======== 3/3 run-abbey DATABASE_URL gate ========"
 # Same gate as Scripts/run-abbey.sh: clear server Postgres URL unless opt-in.

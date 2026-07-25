@@ -56,6 +56,36 @@ public struct ChannelStateDTO: Content {
     }
 }
 
+/// The desktop-reported sync outcome as stored in this runtime's database, plus the dialect
+/// it came from. Read-only: neither the server nor the CLI performs desktop-style push/pull.
+public struct SyncStatusSnapshotDTO: Content, Sendable {
+    public var databaseDialect: String
+    public var lastPullAt: Date?
+    public var lastPullError: String?
+    public var lastPushAt: Date?
+    public var lastPushError: String?
+    public var pendingPushCount: Int
+    public var reportedAt: Date?
+
+    public init(
+        databaseDialect: String,
+        lastPullAt: Date? = nil,
+        lastPullError: String? = nil,
+        lastPushAt: Date? = nil,
+        lastPushError: String? = nil,
+        pendingPushCount: Int = 0,
+        reportedAt: Date? = nil
+    ) {
+        self.databaseDialect = databaseDialect
+        self.lastPullAt = lastPullAt
+        self.lastPullError = lastPullError
+        self.lastPushAt = lastPushAt
+        self.lastPushError = lastPushError
+        self.pendingPushCount = pendingPushCount
+        self.reportedAt = reportedAt
+    }
+}
+
 /// Headless engine: Fluent persistence + DiscordBM gateway + AbbeyCore brain.
 public actor BotRuntime {
     let app: Application
@@ -364,6 +394,25 @@ public actor BotRuntime {
     /// Direct forget by 1-based fact index (same indexing as the `/forget` slash command).
     public func forget(userId: String, guildId: String, index: Int) async throws {
         try await MemoryRepository.forgetFact(userId: userId, guildId: guildId, index: index, on: app.db)
+    }
+
+    /// The sync-status row visible in *this* runtime's database. When the CLI runs on its own
+    /// local SQLite file this is empty — the desktop reports into the server's database, so a
+    /// meaningful row only appears when `ABBEY_CLI_USE_SERVER_DATABASE=1` points both at one DB.
+    public func syncStatusSnapshot() async -> SyncStatusSnapshotDTO {
+        let dialect = app.databaseDialect
+        guard let record = try? await SyncStatusRepository.current(on: app.db) else {
+            return SyncStatusSnapshotDTO(databaseDialect: dialect)
+        }
+        return SyncStatusSnapshotDTO(
+            databaseDialect: dialect,
+            lastPullAt: record.lastPullAt,
+            lastPullError: record.lastPullError,
+            lastPushAt: record.lastPushAt,
+            lastPushError: record.lastPushError,
+            pendingPushCount: record.pendingPushCount,
+            reportedAt: record.reportedAt
+        )
     }
 
     public func metricsSnapshot() -> MetricsDTO {

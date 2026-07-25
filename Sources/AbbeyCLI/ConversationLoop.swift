@@ -89,6 +89,13 @@ final class ConversationLoop {
                     }
                 }
 
+            case .sync:
+                let snapshot = await runtime.syncStatusSnapshot()
+                let shared = CLISyncStatusReport.sharesServerDatabase(
+                    environment: ProcessInfo.processInfo.environment
+                )
+                print(CLISyncStatusReport.render(snapshot, sharesServerDatabase: shared))
+
             case .exit:
                 break replLoop
 
@@ -107,6 +114,7 @@ final class ConversationLoop {
           /clear           Start a new conversation (fresh channel context).
           /model [mode]    Show or set the inference mode (\(InferenceMode.allCases.map(\.rawValue).joined(separator: ", "))).
           /validate <src>  Static CodeProposalValidator (not a sandbox).
+          /sync            Show the desktop-reported sync status in this database (read-only).
           /exit, /quit     Quit.
         """)
     }
