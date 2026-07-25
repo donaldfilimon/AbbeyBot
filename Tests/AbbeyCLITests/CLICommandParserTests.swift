@@ -72,6 +72,11 @@ struct CLICommandParserTests {
         #expect(CLICommandParser.parse("/sync PULL") == .sync("pull"))
     }
 
+    @Test func syncPushParsesArgumentCaseInsensitively() {
+        #expect(CLICommandParser.parse("/sync push") == .sync("push"))
+        #expect(CLICommandParser.parse("/sync PUSH") == .sync("push"))
+    }
+
     @Test func syncUnknownArgumentIsPassedThroughLowercased() {
         #expect(CLICommandParser.parse("/sync now") == .sync("now"))
     }

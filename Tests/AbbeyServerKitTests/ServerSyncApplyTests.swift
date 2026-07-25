@@ -310,4 +310,28 @@ struct SyncCursorFileStoreTests {
         try store.saveLastPullSuccess(Date())
         #expect(store.loadLastPullSuccess() != nil)
     }
+
+    @Test func defaultPushURLIsIndependentOfPullURL() {
+        let pull = SyncCursorFileStore.defaultURL()
+        let push = SyncCursorFileStore.defaultPushURL()
+        #expect(pull.lastPathComponent == "cli-sync-cursor")
+        #expect(push.lastPathComponent == "cli-sync-push-cursor")
+        #expect(pull != push)
+    }
+
+    @Test func pushAndPullCursorsDoNotOverwriteEachOther() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-pair-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let pull = SyncCursorFileStore(fileURL: dir.appendingPathComponent("cli-sync-cursor"))
+        let push = SyncCursorFileStore(fileURL: dir.appendingPathComponent("cli-sync-push-cursor"))
+        let pullStamp = Date(timeIntervalSince1970: 1_000)
+        let pushStamp = Date(timeIntervalSince1970: 2_000)
+        try pull.saveLastSuccess(pullStamp)
+        try push.saveLastSuccess(pushStamp)
+
+        #expect(abs(pull.loadLastSuccess()!.timeIntervalSince1970 - 1_000) < 0.001)
+        #expect(abs(push.loadLastSuccess()!.timeIntervalSince1970 - 2_000) < 0.001)
+    }
 }
