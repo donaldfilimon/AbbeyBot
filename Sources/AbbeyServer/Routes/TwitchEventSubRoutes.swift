@@ -5,8 +5,10 @@ import Vapor
 /// Webhook receiver for Twitch EventSub. Verifies the HMAC-SHA256 signature Twitch attaches
 /// to every delivery (`Twitch-Eventsub-Message-Signature`), then handles callback verification
 /// (`challenge` echo), dedupes by `Twitch-Eventsub-Message-Id`, and dispatches per message type
-/// via `TwitchEventSubHandler`. Still deferred: auto-subscribe on boot, PubSub, live Helix
-/// wiring, and product side-effects per subscription type.
+/// via `TwitchEventSubHandler`. `channel.chat.message` notifications feed the shared Twitch
+/// ingest/reply path (`BotRuntime.handleTwitchChat`); other notification types stay log-only.
+/// Still deferred: PubSub (Twitch-deprecated) and the live Helix handshake (needs a public
+/// HTTPS callback).
 struct TwitchEventSubWebhookDTO: Content {
     var challenge: String?
     var subscription: TwitchEventSubSubscriptionDTO?
@@ -84,7 +86,8 @@ enum TwitchEventSubRoutes {
             let outcome = TwitchEventSubHandler.handle(
                 messageType: messageType,
                 subscriptionType: body.subscription?.type,
-                subscriptionStatus: body.subscription?.status
+                subscriptionStatus: body.subscription?.status,
+                body: rawBody
             )
             req.logger.info("\(TwitchEventSubHandler.logLine(for: outcome))")
 
@@ -97,6 +100,14 @@ enum TwitchEventSubRoutes {
             case .revocation:
                 handled = true
                 outcomeLabel = "revocation"
+            case .notificationChatIngest(let chat):
+                await req.application.botRuntime.handleTwitchChat(
+                    login: chat.chatterLogin,
+                    channel: chat.broadcasterLogin,
+                    text: chat.text
+                )
+                handled = true
+                outcomeLabel = "notification-ingested"
             case .notificationAcknowledged:
                 handled = false
                 outcomeLabel = "notification"

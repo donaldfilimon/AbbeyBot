@@ -311,6 +311,19 @@ struct AbbeyServerKitTests {
         }
     }
 
+    @Test func handleTwitchChatIngestsUnderTwitchGuild() async throws {
+        try await withRuntime { app, runtime in
+            await runtime.handleTwitchChat(login: "someviewer", channel: "somechannel", text: "hello abbey")
+
+            let rows = try await MessageRepository.recent(limit: 10, on: app.db)
+            #expect(rows.count == 1)
+            #expect(rows.first?.guildId == "twitch")
+            #expect(rows.first?.channelId == "somechannel")
+            #expect(rows.first?.authorId == "someviewer")
+            #expect(rows.first?.content == "hello abbey")
+        }
+    }
+
     @Test func messageTombstoneHidesFromFullListAndSurfacesOnSince() async throws {
         try await withRuntime { app, runtime in
             try await MessageRepository.insert(
