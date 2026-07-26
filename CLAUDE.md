@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Full agent instructions (ops, personas, safety policy, deferred features) live in [`AGENTS.md`](./AGENTS.md) — **read that file before making non-trivial changes.** This file is a quick-reference layer on top of it.
 
+Cursor uses a parallel persona at [`.cursor/agents/abbey.md`](./.cursor/agents/abbey.md) that mirrors AGENTS.md's verify gates, shipped/won't-ship lists, and toolchain rules — when those change here, update it too so the two don't drift.
+
 All three products route through `AbbeyEntry` (the package's sole `@main`), which dispatches on the first argument (`serve` / `cli` / nothing → desktop).
 
 ## Commands
