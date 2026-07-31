@@ -324,6 +324,7 @@ func routes(_ app: Application) throws {
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
+        let twitchStreamLive = await runtime.twitchStreamLive
         let indexPath = resourcesPublicDirectory().appendingPathComponent("index.html").path
         let dashboardAvailable = FileManager.default.fileExists(atPath: indexPath)
         return try await req.view.render(
@@ -341,6 +342,7 @@ func routes(_ app: Application) throws {
                 "messageCount": "\(counts.messages)",
                 "reputationEventCount": "\(counts.reputationEvents)",
                 "equityIdeaCount": "\(counts.equityIdeas)",
+                "twitchStreamLive": leafTwitchStreamLiveLabel(twitchStreamLive),
                 "dashboardAvailable": dashboardAvailable ? "true" : ""
             ]
         )
@@ -350,4 +352,13 @@ func routes(_ app: Application) throws {
 /// Leaf-only title case for Discord wire states (`connected` → `Connected`).
 private func leafDiscordStateLabel(_ raw: String) -> String {
     DiscordConnectionState(rawValue: raw)?.displayName ?? raw.capitalized
+}
+
+/// Leaf-facing EventSub stream lifecycle: nil → unknown, true → live, false → offline.
+private func leafTwitchStreamLiveLabel(_ live: Bool?) -> String {
+    switch live {
+    case .none: "unknown"
+    case .some(true): "live"
+    case .some(false): "offline"
+    }
 }

@@ -33,7 +33,7 @@ describe("api client", () => {
     expect(result).toEqual({ status: "ok", discord: "connected" });
   });
 
-  it("fetchStatus returns all twelve status fields untouched", async () => {
+  it("fetchStatus returns all thirteen status fields untouched", async () => {
     const status = {
       databaseDialect: "postgres",
       discordState: "connected",
@@ -47,6 +47,7 @@ describe("api client", () => {
       liveIngestCount: 5,
       inferenceCalls: 10,
       inferenceFailures: 0,
+      twitchStreamLive: null,
     };
     mockFetchOnce(status);
 
