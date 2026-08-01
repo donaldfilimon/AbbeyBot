@@ -15,6 +15,7 @@ public enum NativeMediaError: Error, Sendable, Equatable {
     case daveParticipantUnavailable
     case daveCommitFailed
     case daveWelcomeFailed
+    case daveMLSFailure(operation: String)
     case codecFailure(operation: String, code: Int32)
     case daveFailure(operation: String, code: UInt32)
 }
@@ -50,6 +51,8 @@ extension NativeMediaError: LocalizedError {
             "DAVE rejected the MLS commit."
         case .daveWelcomeFailed:
             "DAVE rejected the MLS welcome."
+        case let .daveMLSFailure(operation):
+            "DAVE rejected the MLS operation: \(operation)."
         case let .codecFailure(operation, code):
             "Opus \(operation) failed with code \(code)."
         case let .daveFailure(operation, code):

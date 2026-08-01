@@ -38,6 +38,34 @@ public enum NativeDAVECommitOutcome: Equatable, Sendable {
     case ignored
 }
 
+private final class NativeDAVEFailureLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+
+    func recordFailure() {
+        lock.lock()
+        generation &+= 1
+        lock.unlock()
+    }
+
+    func snapshot() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+}
+
+/// libdave owns neither `userData` nor the transient source/reason C strings.
+/// Record only that a failure occurred; native diagnostic text must never cross
+/// this boundary into logs, errors, reflection, or persistence.
+private let nativeDAVEFailureCallback: DAVEMLSFailureCallback = { _, _, userData in
+    guard let userData else { return }
+    Unmanaged<NativeDAVEFailureLatch>
+        .fromOpaque(userData)
+        .takeUnretainedValue()
+        .recordFailure()
+}
+
 private final class NativeDAVEParticipantStorage {
     private(set) var ratchet: OpaquePointer
     let decryptor: OpaquePointer
@@ -64,12 +92,18 @@ private final class NativeDAVEParticipantStorage {
 private final class NativeDAVEGroupStorage {
     let session: OpaquePointer
     let encryptor: OpaquePointer
+    let failureLatch: NativeDAVEFailureLatch
     var selfRatchet: OpaquePointer?
     var participants: [UInt64: NativeDAVEParticipantStorage] = [:]
 
-    init(session: OpaquePointer, encryptor: OpaquePointer) {
+    init(
+        session: OpaquePointer,
+        encryptor: OpaquePointer,
+        failureLatch: NativeDAVEFailureLatch
+    ) {
         self.session = session
         self.encryptor = encryptor
+        self.failureLatch = failureLatch
     }
 
     deinit {
@@ -152,32 +186,56 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
             }
         }
 
+        let failureLatch = NativeDAVEFailureLatch()
+        let creationGeneration = failureLatch.snapshot()
+        let failureContext = Unmanaged.passUnretained(failureLatch).toOpaque()
         let session: OpaquePointer? = if let authenticationSessionID {
             authenticationSessionID.withCString {
-                daveSessionCreate(nil, $0, nil, nil)
+                daveSessionCreate(
+                    nil,
+                    $0,
+                    nativeDAVEFailureCallback,
+                    failureContext
+                )
             }
         } else {
-            daveSessionCreate(nil, nil, nil, nil)
+            daveSessionCreate(
+                nil,
+                nil,
+                nativeDAVEFailureCallback,
+                failureContext
+            )
         }
         guard let session else {
             throw NativeMediaError.initializationFailed(component: "libdaveSession")
+        }
+        guard failureLatch.snapshot() == creationGeneration else {
+            daveSessionDestroy(session)
+            throw NativeMediaError.daveMLSFailure(operation: "create-session")
         }
         guard let encryptor = daveEncryptorCreate() else {
             daveSessionDestroy(session)
             throw NativeMediaError.initializationFailed(component: "libdaveEncryptor")
         }
 
+        let initializationGeneration = failureLatch.snapshot()
         trimmedUserID.withCString {
             daveSessionInit(session, protocolVersion, groupID, $0)
         }
-        guard daveSessionGetProtocolVersion(session) == protocolVersion else {
+        guard failureLatch.snapshot() == initializationGeneration,
+              daveSessionGetProtocolVersion(session) == protocolVersion
+        else {
             daveEncryptorDestroy(encryptor)
             daveSessionDestroy(session)
-            throw NativeMediaError.initializationFailed(component: "libdaveProtocol")
+            throw NativeMediaError.daveMLSFailure(operation: "initialize-session")
         }
         daveEncryptorSetPassthroughMode(encryptor, false)
 
-        self.storage = NativeDAVEGroupStorage(session: session, encryptor: encryptor)
+        self.storage = NativeDAVEGroupStorage(
+            session: session,
+            encryptor: encryptor,
+            failureLatch: failureLatch
+        )
         self.selfUserID = trimmedUserID
         self.selfNumericUserID = numericUserID
         self.configuredProtocolVersion = protocolVersion
@@ -194,19 +252,23 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     public var rosterMemberIDs: [UInt64] { activeRoster }
 
     public func marshalledKeyPackage() throws -> Data {
-        try takeAllocatedBytes(maximum: Self.maximumControlPayloadBytes) { bytes, length in
-            daveSessionGetMarshalledKeyPackage(storage.session, bytes, length)
+        try withMLSFailureCheck(operation: "create-key-package") {
+            try takeAllocatedBytes(maximum: Self.maximumControlPayloadBytes) { bytes, length in
+                daveSessionGetMarshalledKeyPackage(storage.session, bytes, length)
+            }
         }
     }
 
     public func setExternalSender(_ bytes: Data) throws {
         try validateControlPayload(bytes)
-        bytes.withUnsafeBytes { raw in
-            daveSessionSetExternalSender(
-                storage.session,
-                raw.bindMemory(to: UInt8.self).baseAddress,
-                bytes.count
-            )
+        try withMLSFailureCheck(operation: "set-external-sender") {
+            bytes.withUnsafeBytes { raw in
+                daveSessionSetExternalSender(
+                    storage.session,
+                    raw.bindMemory(to: UInt8.self).baseAddress,
+                    bytes.count
+                )
+            }
         }
     }
 
@@ -215,18 +277,22 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         recognizedUserIDs: [String]
     ) throws -> Data {
         try validateControlPayload(proposals)
-        return try withValidatedUserIDs(recognizedUserIDs) { pointers in
-            try takeAllocatedBytes(maximum: Self.maximumControlPayloadBytes) { output, outputLength in
-                proposals.withUnsafeBytes { raw in
-                    daveSessionProcessProposals(
-                        storage.session,
-                        raw.bindMemory(to: UInt8.self).baseAddress,
-                        proposals.count,
-                        pointers.baseAddress,
-                        pointers.count,
-                        output,
-                        outputLength
-                    )
+        return try withMLSFailureCheck(operation: "process-proposals") {
+            try withValidatedUserIDs(recognizedUserIDs) { pointers in
+                try takeAllocatedBytes(
+                    maximum: Self.maximumControlPayloadBytes
+                ) { output, outputLength in
+                    proposals.withUnsafeBytes { raw in
+                        daveSessionProcessProposals(
+                            storage.session,
+                            raw.bindMemory(to: UInt8.self).baseAddress,
+                            proposals.count,
+                            pointers.baseAddress,
+                            pointers.count,
+                            output,
+                            outputLength
+                        )
+                    }
                 }
             }
         }
@@ -234,51 +300,53 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
 
     public func processCommit(_ commit: Data) throws -> NativeDAVECommitOutcome {
         try validateControlPayload(commit)
-        let rawResult = commit.withUnsafeBytes { raw in
-            daveSessionProcessCommit(
-                storage.session,
-                raw.bindMemory(to: UInt8.self).baseAddress,
-                commit.count
-            )
-        }
-        guard let rawResult else {
-            throw NativeMediaError.daveCommitFailed
-        }
-        let result = NativeDAVECommitResultStorage(rawResult)
-        guard !daveCommitResultIsFailed(result.raw) else {
-            throw NativeMediaError.daveCommitFailed
-        }
-        if daveCommitResultIsIgnored(result.raw) {
-            return .ignored
-        }
-        do {
-            let changedMemberIDs = try takeRosterMemberIDs { ids, length in
-                daveCommitResultGetRosterMemberIds(result.raw, ids, length)
+        return try withMLSFailureCheck(operation: "process-commit") {
+            let rawResult = commit.withUnsafeBytes { raw in
+                daveSessionProcessCommit(
+                    storage.session,
+                    raw.bindMemory(to: UInt8.self).baseAddress,
+                    commit.count
+                )
             }
-            var changes: [UInt64: Bool] = [:]
-            changes.reserveCapacity(changedMemberIDs.count)
-            for memberID in changedMemberIDs {
-                let signature = try takeAllocatedBytes(
-                    maximum: Self.maximumControlPayloadBytes
-                ) { bytes, length in
-                    daveCommitResultGetRosterMemberSignature(
-                        result.raw,
-                        memberID,
-                        bytes,
-                        length
-                    )
+            guard let rawResult else {
+                throw NativeMediaError.daveCommitFailed
+            }
+            let result = NativeDAVECommitResultStorage(rawResult)
+            guard !daveCommitResultIsFailed(result.raw) else {
+                throw NativeMediaError.daveCommitFailed
+            }
+            if daveCommitResultIsIgnored(result.raw) {
+                return .ignored
+            }
+            do {
+                let changedMemberIDs = try takeRosterMemberIDs { ids, length in
+                    daveCommitResultGetRosterMemberIds(result.raw, ids, length)
                 }
-                changes[memberID] = !signature.isEmpty
+                var changes: [UInt64: Bool] = [:]
+                changes.reserveCapacity(changedMemberIDs.count)
+                for memberID in changedMemberIDs {
+                    let signature = try takeAllocatedBytes(
+                        maximum: Self.maximumControlPayloadBytes
+                    ) { bytes, length in
+                        daveCommitResultGetRosterMemberSignature(
+                            result.raw,
+                            memberID,
+                            bytes,
+                            length
+                        )
+                    }
+                    changes[memberID] = !signature.isEmpty
+                }
+                let roster = Self.mergedRoster(
+                    current: activeRoster,
+                    changes: changes
+                )
+                try activateRoster(memberIDs: roster)
+                return .applied(rosterMemberIDs: roster)
+            } catch {
+                invalidateMediaReadiness()
+                throw error
             }
-            let roster = Self.mergedRoster(
-                current: activeRoster,
-                changes: changes
-            )
-            try activateRoster(memberIDs: roster)
-            return .applied(rosterMemberIDs: roster)
-        } catch {
-            invalidateMediaReadiness()
-            throw error
         }
     }
 
@@ -287,30 +355,32 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         recognizedUserIDs: [String]
     ) throws -> [UInt64] {
         try validateControlPayload(welcome)
-        return try withValidatedUserIDs(recognizedUserIDs) { pointers in
-            let rawResult = welcome.withUnsafeBytes { raw in
-                daveSessionProcessWelcome(
-                    storage.session,
-                    raw.bindMemory(to: UInt8.self).baseAddress,
-                    welcome.count,
-                    pointers.baseAddress,
-                    pointers.count
-                )
-            }
-            guard let rawResult else {
-                invalidateMediaReadiness()
-                throw NativeMediaError.daveWelcomeFailed
-            }
-            let result = NativeDAVEWelcomeResultStorage(rawResult)
-            do {
-                let roster = try takeRosterMemberIDs { ids, length in
-                    daveWelcomeResultGetRosterMemberIds(result.raw, ids, length)
+        return try withMLSFailureCheck(operation: "process-welcome") {
+            try withValidatedUserIDs(recognizedUserIDs) { pointers in
+                let rawResult = welcome.withUnsafeBytes { raw in
+                    daveSessionProcessWelcome(
+                        storage.session,
+                        raw.bindMemory(to: UInt8.self).baseAddress,
+                        welcome.count,
+                        pointers.baseAddress,
+                        pointers.count
+                    )
                 }
-                try activateRoster(memberIDs: roster)
-                return roster
-            } catch {
-                invalidateMediaReadiness()
-                throw error
+                guard let rawResult else {
+                    invalidateMediaReadiness()
+                    throw NativeMediaError.daveWelcomeFailed
+                }
+                let result = NativeDAVEWelcomeResultStorage(rawResult)
+                do {
+                    let roster = try takeRosterMemberIDs { ids, length in
+                        daveWelcomeResultGetRosterMemberIds(result.raw, ids, length)
+                    }
+                    try activateRoster(memberIDs: roster)
+                    return roster
+                } catch {
+                    invalidateMediaReadiness()
+                    throw error
+                }
             }
         }
     }
@@ -318,6 +388,12 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     /// Refreshes borrowed ratchets only after the gateway/MLS transition is accepted.
     /// The update is built fully before it replaces the active roster.
     public func activateRoster(memberIDs: [UInt64]) throws {
+        try withMLSFailureCheck(operation: "activate-roster") {
+            try activateRosterUnchecked(memberIDs: memberIDs)
+        }
+    }
+
+    private func activateRosterUnchecked(memberIDs: [UInt64]) throws {
         let unique = Array(Set(memberIDs)).sorted()
         guard !unique.isEmpty, unique.count <= 1_024, unique.contains(selfNumericUserID) else {
             throw NativeMediaError.daveParticipantUnavailable
@@ -494,6 +570,28 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
                 maximum: Self.maximumControlPayloadBytes
             )
         }
+    }
+
+    private func withMLSFailureCheck<Result>(
+        operation: String,
+        _ body: () throws -> Result
+    ) throws -> Result {
+        let generation = storage.failureLatch.snapshot()
+        let result: Result
+        do {
+            result = try body()
+        } catch {
+            guard storage.failureLatch.snapshot() == generation else {
+                invalidateMediaReadiness()
+                throw NativeMediaError.daveMLSFailure(operation: operation)
+            }
+            throw error
+        }
+        guard storage.failureLatch.snapshot() == generation else {
+            invalidateMediaReadiness()
+            throw NativeMediaError.daveMLSFailure(operation: operation)
+        }
+        return result
     }
 
     static func mergedRoster(

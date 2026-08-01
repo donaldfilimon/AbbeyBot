@@ -230,6 +230,46 @@ struct DiscordVoiceGatewaySessionTests {
         await gateway.disconnect()
     }
 
+    @Test("only External Sender may precede Session Description")
+    func proposalsBeforeSessionDescriptionFailClosed() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let handler = DiscordVoiceGatewayDAVEHandlerRecorder()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            daveControlHandler: handler.handler,
+            configuration: .init(maximumDAVEProtocolVersion: 1)
+        )
+        let connection = Task { try await gateway.connect(using: pair()) }
+        try await eventually { await harness.attemptCount() == 1 }
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+        await harness.send(
+            readyJSON(modes: [DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue])
+        )
+        _ = try await connection.value
+
+        await harness.sendBinary(Data([
+            0x00, 0x03,
+            VoiceGatewayDAVEOpcode.externalSenderPackage.rawValue,
+            0x01, 0xAA,
+            0x00, 0x01,
+            0x01, 0xBB,
+        ]))
+        try await eventually {
+            await handler.receivedOpcodes() == [.externalSenderPackage]
+        }
+        await harness.sendBinary(Data([
+            0x00, 0x04,
+            VoiceGatewayDAVEOpcode.proposals.rawValue,
+            VoiceGatewayDAVEProposalsOperation.append.rawValue,
+            0x01, 0xCC,
+        ]))
+
+        try await eventually { await harness.closeCodes() == [1002] }
+        #expect(await handler.receivedOpcodes() == [.externalSenderPackage])
+        try await eventually { await gateway.snapshot().phase == .failed }
+    }
+
     @Test("missing initial Key Package fails closed before establishment")
     func missingInitialDAVEKeyPackageFailsClosed() async throws {
         let harness = DiscordVoiceGatewaySessionHarness()
@@ -511,6 +551,67 @@ struct DiscordVoiceGatewaySessionTests {
         #expect(await harness.closeCodes() == [1000])
         #expect(await harness.sentDAVEClientMessages().map(\.opcode) == [.keyPackage])
         #expect(await gateway.snapshot().phase == .disconnected)
+    }
+
+    @Test("disconnect joins and clears an in-flight membership replacement")
+    func disconnectJoinsDAVEMembershipReplacement() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let membership = DiscordVoiceGatewaySuspendedMembershipHandler()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            daveControlHandler: membership.handler,
+            configuration: .init(maximumDAVEProtocolVersion: 1)
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 1)
+        #expect(await membership.nativeUserIDs() == [101])
+
+        await harness.send(#"{"op":11,"d":{"user_ids":["9"]},"seq":12}"#)
+        await membership.waitUntilReplacementStarted()
+        await gateway.disconnect()
+
+        #expect(await membership.replacementFinished())
+        #expect(await membership.nativeUserIDs().isEmpty)
+        #expect(await membership.resetCount() == 3)
+        #expect(await harness.closeCodes() == [1000])
+        #expect(await gateway.snapshot().phase == .disconnected)
+    }
+
+    @Test("disconnect cancels a suspended initial DAVE bootstrap without stale establishment")
+    func disconnectCancelsInitialDAVEBootstrap() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let bootstrap = DiscordVoiceGatewaySuspendedDAVEBootstrap()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            daveControlHandler: bootstrap.handler,
+            configuration: .init(maximumDAVEProtocolVersion: 1)
+        )
+        let connection = Task { try await gateway.connect(using: pair()) }
+        try await eventually { await harness.attemptCount() == 1 }
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+        await harness.send(
+            readyJSON(modes: [DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue])
+        )
+        _ = try await connection.value
+        try await gateway.selectTransport(
+            .init(address: "198.51.100.46", port: 63_046)
+        )
+        await harness.send(sessionDescriptionJSON(
+            mode: DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue,
+            daveProtocolVersion: 1
+        ))
+        await bootstrap.waitUntilStarted()
+
+        await gateway.disconnect()
+
+        #expect(await bootstrap.resetCount() == 2)
+        #expect(await harness.sentDAVEClientMessages().isEmpty)
+        #expect(await harness.closeCodes() == [1000])
+        #expect(await gateway.snapshot().phase == .disconnected)
+        await #expect(throws: DiscordVoiceGatewaySessionError.self) {
+            _ = try await gateway.negotiateDAVEAndMedia()
+        }
     }
 
     @Test("missing required DAVE response fails closed")
@@ -914,7 +1015,12 @@ struct DiscordVoiceGatewaySessionTests {
             try await Task.sleep(for: .milliseconds(2))
         }
         Issue.record("Condition was not satisfied before timeout")
+        throw DiscordVoiceGatewaySessionTestError.conditionTimedOut
     }
+}
+
+private enum DiscordVoiceGatewaySessionTestError: Error {
+    case conditionTimedOut
 }
 
 private actor DiscordVoiceGatewaySessionHarness {
@@ -933,13 +1039,19 @@ private actor DiscordVoiceGatewaySessionHarness {
     nonisolated var transport: VoiceGatewayClientTransport {
         VoiceGatewayClientTransport { [self] _, _, operation in
             await beganOperation()
-            defer { Task { await self.finishedOperation() } }
             do {
                 try await operation(socket.session)
             } catch VoiceGatewayClientTransportError.connectionClosed {
-                return await closeResult()
+                let close = await closeResult()
+                await finishedOperation()
+                return close
+            } catch {
+                await finishedOperation()
+                throw error
             }
-            return await closeResult()
+            let close = await closeResult()
+            await finishedOperation()
+            return close
         }
     }
 
@@ -1271,6 +1383,106 @@ private actor DiscordVoiceGatewaySuspendedDAVEHandler {
         for waiter in pending {
             waiter.resume()
         }
+    }
+}
+
+private actor DiscordVoiceGatewaySuspendedDAVEBootstrap {
+    private var started = false
+    private var resets = 0
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    nonisolated var handler: VoiceGatewayDAVEControlHandler {
+        VoiceGatewayDAVEControlHandler(
+            beginSession: { [self] _, _ in
+                await suspendUntilReset()
+                try Task.checkCancellation()
+                return [.keyPackage(try .init(Data([0xBA, 0x5E])))]
+            },
+            handle: { _, _ in [] },
+            reset: { [self] in await reset() }
+        )
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func resetCount() -> Int { resets }
+
+    private func suspendUntilReset() async {
+        started = true
+        let pending = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        for waiter in pending { waiter.resume() }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    private func reset() {
+        resets += 1
+        let pending = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        for waiter in pending { waiter.resume() }
+    }
+}
+
+private actor DiscordVoiceGatewaySuspendedMembershipHandler {
+    private var replacementCalls = 0
+    private var resets = 0
+    private var userIDs: [UInt64] = []
+    private var replacementStarted = false
+    private var replacementDidFinish = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    nonisolated var handler: VoiceGatewayDAVEControlHandler {
+        VoiceGatewayDAVEControlHandler(
+            beginSession: { _, _ in
+                [.keyPackage(try .init(Data([0xBA, 0x5E])))]
+            },
+            replaceRecognizedUserIDs: { [self] userIDs in
+                await replaceRecognizedUserIDs(userIDs)
+            },
+            handle: { _, _ in [] },
+            reset: { [self] in await reset() }
+        )
+    }
+
+    func waitUntilReplacementStarted() async {
+        guard !replacementStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func nativeUserIDs() -> [UInt64] { userIDs }
+    func replacementFinished() -> Bool { replacementDidFinish }
+    func resetCount() -> Int { resets }
+
+    private func replaceRecognizedUserIDs(_ nextUserIDs: [UInt64]) async {
+        replacementCalls += 1
+        if replacementCalls == 1 {
+            userIDs = nextUserIDs
+            return
+        }
+
+        replacementStarted = true
+        let pendingStarts = startWaiters
+        startWaiters.removeAll(keepingCapacity: false)
+        for waiter in pendingStarts { waiter.resume() }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+
+        // Deliberately ignore cooperative cancellation and model a native
+        // replacement that lands after the reset which released it.
+        userIDs = nextUserIDs
+        replacementDidFinish = true
+    }
+
+    private func reset() {
+        resets += 1
+        userIDs.removeAll(keepingCapacity: false)
+        let pendingReleases = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        for waiter in pendingReleases { waiter.resume() }
     }
 }
 

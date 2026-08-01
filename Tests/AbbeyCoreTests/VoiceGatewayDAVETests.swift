@@ -129,6 +129,44 @@ struct VoiceGatewayDAVETests {
         #expect(package.credentialIdentity.bytes == Data([0xCD]))
     }
 
+    @Test("native MLS marshaling uses canonical one-byte and two-byte vectors")
+    func canonicalNativeMarshaling() throws {
+        let smallExternalSender = VoiceGatewayDAVEExternalSenderPackage(
+            signatureKey: try .init(Data([0xAA, 0xBB, 0xCC])),
+            credentialIdentity: try .init(Data([0xDD, 0xEE]))
+        )
+        #expect(smallExternalSender.marshalledBytes == Data([
+            0x03, 0xAA, 0xBB, 0xCC,
+            0x00, 0x01,
+            0x02, 0xDD, 0xEE,
+        ]))
+
+        let append = VoiceGatewayDAVEProposals(
+            operation: .append,
+            vector: try .init(Data([0x10, 0x20, 0x30]))
+        )
+        let revoke = VoiceGatewayDAVEProposals(
+            operation: .revoke,
+            vector: try .init(Data([0x40, 0x50]))
+        )
+        #expect(append.marshalledBytes == Data([0x00, 0x03, 0x10, 0x20, 0x30]))
+        #expect(revoke.marshalledBytes == Data([0x01, 0x02, 0x40, 0x50]))
+
+        let oneByteBoundary = VoiceGatewayDAVEProposals(
+            operation: .append,
+            vector: try .init(Data(repeating: 0x5A, count: 63))
+        ).marshalledBytes
+        #expect(oneByteBoundary.prefix(2) == Data([0x00, 0x3F]))
+        #expect(oneByteBoundary.count == 65)
+
+        let twoByteBoundary = VoiceGatewayDAVEProposals(
+            operation: .append,
+            vector: try .init(Data(repeating: 0xA5, count: 64))
+        ).marshalledBytes
+        #expect(twoByteBoundary.prefix(3) == Data([0x00, 0x40, 0x40]))
+        #expect(twoByteBoundary.count == 67)
+    }
+
     @Test("proposal append and revoke fixtures preserve their bounded opaque vectors")
     func proposalsFixtures() throws {
         let append = try VoiceGatewayDAVECodec.decodeServerBinary(Data([
@@ -290,6 +328,36 @@ struct VoiceGatewayDAVETests {
         #expect(!rendered.contains("222"))
         #expect(!rendered.contains("173"))
         #expect(!rendered.lowercased().contains("deadbeef"))
+    }
+
+    @Test("DAVE connection context accepts canonical numeric IDs and redacts every diagnostic surface")
+    func connectionContextValidationAndRedaction() throws {
+        #expect(throws: VoiceGatewayDAVEError.invalidIdentifier) {
+            _ = try VoiceGatewayDAVEConnectionContext(groupID: 0, selfUserID: 1)
+        }
+        #expect(throws: VoiceGatewayDAVEError.invalidIdentifier) {
+            _ = try VoiceGatewayDAVEConnectionContext(groupID: 1, selfUserID: 0)
+        }
+
+        let groupID: UInt64 = 9_223_372_036_854_775_807
+        let selfUserID: UInt64 = 18_446_744_073_709_551_615
+        let context = try VoiceGatewayDAVEConnectionContext(
+            groupID: groupID,
+            selfUserID: selfUserID
+        )
+        #expect(context.groupID == groupID)
+        #expect(context.selfUserID == selfUserID)
+
+        var rendered = String(describing: context)
+        rendered += String(reflecting: context)
+        rendered += context.debugDescription
+        dump(context, to: &rendered)
+
+        #expect(rendered.contains("<redacted>"))
+        #expect(!rendered.contains(String(groupID)))
+        #expect(!rendered.contains(String(selfUserID)))
+        #expect(Mirror(reflecting: context).children.count == 1)
+        #expect(Mirror(reflecting: context).children.first?.label == "identity")
     }
 
     @Test("transition state refuses execution before preparation")

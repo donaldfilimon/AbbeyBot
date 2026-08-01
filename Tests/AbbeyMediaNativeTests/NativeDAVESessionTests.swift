@@ -102,6 +102,22 @@ struct NativeDAVESessionTests {
         }
     }
 
+    @Test("native MLS failures cross the void C boundary as a generic Swift error")
+    func nativeFailureCallbackIsFailClosedAndRedacted() async throws {
+        let session = try NativeDAVESession(
+            protocolVersion: 1,
+            groupID: 900,
+            selfUserID: "901"
+        )
+
+        await #expect(throws: NativeMediaError.daveMLSFailure(
+            operation: "set-external-sender"
+        )) {
+            try await session.setExternalSender(Data([0xff]))
+        }
+        #expect(await session.isMediaReady == false)
+    }
+
     @Test("Commit roster deltas preserve unchanged members and apply removals")
     func commitRosterDeltaMerge() {
         #expect(
