@@ -43,6 +43,31 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       and capture live current-protocol evidence for join, DAVE negotiation, speak, hear, network
       reconnect/resume, channel move, and leave without logging credentials or raw audio.
 
+## Discord video + Go Live — in progress
+
+- [ ] Implement Voice Gateway video source/sink and stream signaling, including SSRC allocation,
+      source announcements, sink wants, stream lifecycle, participant mapping, resume, and bounded
+      JSON/binary opcode fixtures. Keep this independently incomplete from voice audio.
+- [ ] Add opt-in Apple camera and screen-capture sources with camera, microphone, and Screen & System
+      Audio Recording permission handling; expose visible capture state, source selection, preview,
+      window/display selection, and an immediate capture kill switch.
+- [ ] Add negotiated video codec and RTP send/receive pipelines with pacing, timestamps, keyframes,
+      frame dependency handling, retransmission/feedback, receive reassembly, and decoder recovery.
+      Do not claim a specific codec until the implemented Discord negotiation selects it live.
+- [ ] Extend the pinned libdave bridge for DAVE video-frame encryption/decryption, protocol and epoch
+      transitions, per-sender ratchets, roster changes, authentication failure, and tamper/replay
+      tests without persisting video keys or captured frames.
+- [ ] Add render and SwiftUI controls for camera preview, remote participant tiles, Go Live preview,
+      source/status indicators, start/stop, quality limits, and operator-visible permission,
+      negotiation, congestion, decode, and reconnect failures.
+- [ ] Test packet loss, reorder, jitter, bandwidth collapse/recovery, keyframe loss, source/device
+      removal, screen lock, suspend/resume, long-session memory growth, CPU/thermal pressure, and
+      audio/video synchronization using deterministic local transports and fixture media.
+- [ ] Run the full repository gate, then capture live current-protocol evidence for DAVE-protected
+      camera send/receive and Go Live screen send/receive, reconnect/resume, source switching, and
+      clean stop in an isolated guild using a rotated token. Local fixtures alone cannot close this
+      item.
+
 ## Release and SwiftData hardening — closed
 
 - [x] Preserve released flat v2 sync cursor JSON and decode the transient enum-dictionary format;

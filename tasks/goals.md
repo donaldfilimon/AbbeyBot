@@ -20,6 +20,21 @@ status: in_progress
   tests, Opus loopback, Apple audio-device/permission tests, the full repository gate, and a live
   join/speak/hear/reconnect/leave run using a rotated bot token in an authorized test guild.
 
+## Complete Discord video and Go Live
+status: in_progress
+- Discord camera video and Go Live screen sharing are separate from the audio completion claim and
+  are not shipped. Completion requires Voice Gateway video source/sink signaling, camera and screen
+  capture permissions, negotiated video codec and RTP pipelines, DAVE video-frame encryption,
+  receive/render paths, SwiftUI controls, congestion and loss recovery, and live DAVE-enabled camera
+  plus Go Live validation.
+- Video capture is opt-in and visibly indicated. Never persist raw camera, screen, encoded video, or
+  DAVE material by default; screen capture must fail closed when macOS permission is absent or the
+  operator activates the capture kill switch.
+- Completion evidence must cover deterministic source/sink opcode fixtures, codec and RTP golden
+  tests, packet loss/reorder/congestion simulations, camera and screen-device interruption, bounded
+  CPU/memory/thermal behavior, the full repository gate, and live send/receive evidence for both a
+  camera stream and a Go Live screen stream.
+
 ## Release and SwiftData hardening
 status: done
 - Preserve sync persistence and migration compatibility across previously released database and

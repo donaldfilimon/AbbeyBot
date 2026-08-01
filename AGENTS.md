@@ -213,6 +213,11 @@ See **Verify** above — gate of record, CI secondary, continuation semantics, a
   DAVE E2EE, RTP/Opus send and receive, capture/playback, reconnect/resume, permissions/UI, tests,
   and a live DAVE-enabled call are verified. DiscordBM supplies the main-gateway event models and
   voice-state update, but not the separate media stack.
+- **Discord video / Go Live** — reopened and **in progress**, independently from voice audio. No
+  camera or screen-streaming product surface is shipped. Do not claim video until source/sink
+  signaling, permission-gated camera/screen capture, negotiated codec/RTP send and receive, DAVE
+  video frames, rendering/UI, congestion/loss/resource tests, and live DAVE-enabled camera plus Go
+  Live evidence are verified.
 - **CRDT merge** — **won't ship**; LWW + tombstones + CLI `/sync pull` + `/sync push` (messages + facts) is the sync story (see Deferred below). Multi-writer CRDT merge stays out.
 
 ## Deferred
@@ -223,6 +228,12 @@ Voice Gateway v8 connection, UDP/IP discovery, supported AEAD transport encrypti
 RTP/Opus send and receive, capture/playback, reconnect/resume, permission and privacy controls,
 deterministic tests, and a live DAVE-enabled call. Do not convert roadmap code or a local transport
 test into a shipped-audio claim; keep `tasks/goals.md` and `tasks/todo.md` as the completion ledger.
+
+Discord **video and Go Live** — **in progress, not shipped.** Track video independently from audio.
+Completion requires Voice Gateway source/sink signaling, explicit camera/screen permissions,
+negotiated video codec/RTP send and receive, DAVE video-frame protection, render and SwiftUI
+controls, congestion/loss/resource testing, and live DAVE-enabled camera plus Go Live evidence.
+Scaffolds, fixture playback, or an audio-only live call do not prove video completion.
 
 CRDT (won't ship) — desktop ships **push + pull** with persisted per-entity compound incremental cursors and **last-write-wins** for users/channels (`updatedAt`) and equity (`generatedAt`); all six sync entity types soft-delete via `deletedAt` tombstones that `SyncPull` applies as local hard-deletes; messages key by Discord ID and reputation/interactions by Fluent ID; page limit 500 drains through `(changedAt, stable ID)` continuation. LWW and pull-start guards compare wall clocks and remain vulnerable to significant clock skew. The CLI ships **pull + push** with the same compound pull protocol; push remains messages + memory facts only. True multi-writer CRDT/vector-clock merge remains a **won't-ship** for this package.
 
