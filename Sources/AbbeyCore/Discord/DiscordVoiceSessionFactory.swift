@@ -6,6 +6,8 @@ protocol DiscordVoiceRetainedUDPSession: Sendable {
         ssrc: UInt32,
         deadline: ContinuousClock.Instant?
     ) async throws -> DiscordVoiceUDPDiscoveryResult
+    func sendProtectedPacket(_ bytes: [UInt8]) async throws
+    func receiveProtectedPacket() async throws -> [UInt8]
     func close() async
 }
 
@@ -17,6 +19,7 @@ extension DiscordVoiceUDPSession: DiscordVoiceRetainedUDPSession {}
 /// by discovery, so replacing that socket before protected media begins would invalidate the
 /// selected transport endpoint.
 public actor DiscordVoiceUDPSessionAdapter: DiscordVoiceUDPDiscoverySession,
+    DiscordVoiceMediaDatagramTransport,
     CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public enum AdapterError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -148,6 +151,34 @@ public actor DiscordVoiceUDPSessionAdapter: DiscordVoiceUDPDiscoverySession,
             }
         } onCancel: {
             Task { await self.disconnect() }
+        }
+    }
+
+    public func sendProtectedPacket(_ bytes: [UInt8]) async throws {
+        guard state == .ready, let retainedSession else {
+            throw state == .disconnected ? AdapterError.disconnected : AdapterError.transportFailure
+        }
+        do {
+            try await retainedSession.sendProtectedPacket(bytes)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            state = .failed
+            throw AdapterError.transportFailure
+        }
+    }
+
+    public func receiveProtectedPacket() async throws -> [UInt8] {
+        guard state == .ready, let retainedSession else {
+            throw state == .disconnected ? AdapterError.disconnected : AdapterError.transportFailure
+        }
+        do {
+            return try await retainedSession.receiveProtectedPacket()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if state != .disconnected { state = .failed }
+            throw state == .disconnected ? AdapterError.disconnected : AdapterError.transportFailure
         }
     }
 

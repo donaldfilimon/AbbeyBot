@@ -92,10 +92,42 @@ public protocol DiscordVoiceUDPDiscoverySession: Sendable {
     func disconnect() async
 }
 
+/// Protected datagram access to the exact UDP socket used for Discord IP discovery.
+/// Implementations retain socket ownership and never expose endpoints or packet contents
+/// through diagnostics.
+public protocol DiscordVoiceMediaDatagramTransport: Sendable {
+    func sendProtectedPacket(_ bytes: [UInt8]) async throws
+    func receiveProtectedPacket() async throws -> [UInt8]
+    func disconnect() async
+}
+
+public struct DiscordVoiceSessionComponents: Sendable {
+    public let gateway: any DiscordVoiceGatewaySessionClient
+    public let udp: any DiscordVoiceUDPDiscoverySession
+
+    public init(
+        gateway: any DiscordVoiceGatewaySessionClient,
+        udp: any DiscordVoiceUDPDiscoverySession
+    ) {
+        self.gateway = gateway
+        self.udp = udp
+    }
+}
+
 public protocol DiscordVoiceSessionFactory: Sendable {
     var mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability { get }
     func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient
     func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession
+    func makeSessionComponents() -> DiscordVoiceSessionComponents
+}
+
+public extension DiscordVoiceSessionFactory {
+    func makeSessionComponents() -> DiscordVoiceSessionComponents {
+        DiscordVoiceSessionComponents(
+            gateway: makeGatewayClient(),
+            udp: makeUDPDiscoverySession()
+        )
+    }
 }
 
 public enum DiscordVoiceControllerPhase: String, Equatable, Sendable {
@@ -416,8 +448,9 @@ public actor DiscordVoiceController {
         case .cancelled: return makeSnapshot()
         }
 
-        let gateway = factory.makeGatewayClient()
-        let udp = factory.makeUDPDiscoverySession()
+        let components = factory.makeSessionComponents()
+        let gateway = components.gateway
+        let udp = components.udp
         gatewayClient = gateway
         udpSession = udp
         transition(to: .connectingVoiceGateway)

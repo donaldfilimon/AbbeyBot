@@ -31,6 +31,11 @@ struct DiscordVoiceSessionFactoryTests {
         )
         #expect(await adapter.snapshot() == .init(state: .ready, retainedSocket: true))
 
+        try await adapter.sendProtectedPacket([1, 2, 3])
+        #expect(try await adapter.receiveProtectedPacket() == [4, 5, 6])
+        #expect(await recorder.observation().sentPackets == [[1, 2, 3]])
+        #expect(await recorder.observation().receiveCount == 1)
+
         await adapter.disconnect()
         #expect(await recorder.observation().closeCount == 1)
     }
@@ -175,6 +180,8 @@ private actor FactoryUDPRecorder: DiscordVoiceRetainedUDPSession {
         var openCount = 0
         var ssrcs: [UInt32] = []
         var closeCount = 0
+        var sentPackets: [[UInt8]] = []
+        var receiveCount = 0
     }
 
     private nonisolated let capturedConfiguration = LockedValue<DiscordVoiceUDPSession.Configuration?>(nil)
@@ -215,6 +222,15 @@ private actor FactoryUDPRecorder: DiscordVoiceRetainedUDPSession {
         }
         guard suspendDiscovery else { return result }
         return try await withCheckedThrowingContinuation { suspendedDiscovery = $0 }
+    }
+
+    func sendProtectedPacket(_ bytes: [UInt8]) async throws {
+        current.sentPackets.append(bytes)
+    }
+
+    func receiveProtectedPacket() async throws -> [UInt8] {
+        current.receiveCount += 1
+        return [4, 5, 6]
     }
 
     func close() async {
