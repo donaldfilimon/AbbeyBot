@@ -2,6 +2,47 @@
 
 Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
+## Discord application + real voice audio — in progress
+
+- [ ] Harden the DiscordBM main-gateway lifecycle: READY remains the connected authority, explicit
+      disconnect closes the pinned manager, failures become observable, and voice presence is not
+      reported as joined before Discord confirms the bot's own `VOICE_STATE_UPDATE`.
+- [ ] Pair the unordered self `VOICE_STATE_UPDATE` and `VOICE_SERVER_UPDATE` events in a
+      generation-scoped handshake accumulator; cover both event orders, wrong guild/user/channel,
+      nil endpoint, stale partials, cancellation, timeout, and single-emission behavior.
+- [ ] Implement the separate Discord Voice Gateway v8 state machine: endpoint normalization,
+      Identify, Hello, heartbeat/ACK with `seq_ack`, Ready, Session Description, Speaking, binary
+      payload decoding, close-code policy, and bounded parsing.
+- [ ] Implement UDP/IP discovery and protocol selection, including exact discovery packet fixtures,
+      NAT-visible address/port handling, datagram receive, and a real local UDP echo test.
+- [ ] Implement transport encryption with required `aead_xchacha20_poly1305_rtpsize` support and
+      advertised AES-256-GCM preference; prove nonce uniqueness, authentication failure, tamper,
+      replay, counter-wrap, and known-answer behavior.
+- [ ] Integrate a pinned, reproducible build of Discord's official `libdave` C API and implement the
+      DAVE/MLS voice opcodes, protocol transitions, roster/key-ratchet management, and Opus-frame
+      encryption/decryption. Do not advertise a nonzero DAVE version until this path is real.
+- [ ] Add portable libopus bindings and the RTP media pipeline: 48 kHz stereo, 20 ms frames,
+      sequence/timestamp/SSRC wrap, speaking-before-send, five silence frames, receive parsing,
+      SSRC/user mapping, jitter/reorder buffering, packet-loss concealment, decode, mix, and loopback
+      golden tests.
+- [ ] Add Apple capture/playback with `AVAudioEngine`: microphone permission, device selection,
+      format conversion, mute/deafen, push-to-talk/VAD, output volume, speaker levels, interruption
+      handling, and input/output device removal recovery. Keep server audio behind injected source
+      and sink protocols rather than assuming physical devices.
+- [ ] Add Voice Gateway buffered resume and full reconnect fallback, re-establish UDP/media state
+      safely, stop audio on explicit leave, and verify induced WebSocket loss, UDP loss/reorder,
+      invalid session, channel move, and process shutdown.
+- [ ] Expand `/voice` and the Discord SwiftUI surface with honest connection phases, guild/channel
+      selection, join/leave/status, mute/deafen, PTT/VAD, device/volume controls, speaking meters,
+      reconnect/error visibility, stage-channel state, permission preflight, privacy policy, and an
+      immediate capture kill switch.
+- [ ] Add the voice gate: protocol/unit fixtures, scripted local Voice WebSocket, real UDP loopback,
+      codec/crypto/DAVE tests, audio-device tests, and fault injection; then run the full repository
+      gate. Do not mark live capability complete from local tests alone.
+- [ ] Rotate the previously exposed Discord bot token, authorize an isolated test guild/channel,
+      and capture live current-protocol evidence for join, DAVE negotiation, speak, hear, network
+      reconnect/resume, channel move, and leave without logging credentials or raw audio.
+
 ## Release and SwiftData hardening — closed
 
 - [x] Preserve released flat v2 sync cursor JSON and decode the transient enum-dictionary format;

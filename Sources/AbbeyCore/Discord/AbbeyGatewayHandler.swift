@@ -1,4 +1,14 @@
 import DiscordBM
+
+extension AbbeyGatewayHandler {
+    func onVoiceStateUpdate(_ payload: VoiceState) async {
+        await bridge.handleVoiceStateUpdate(payload)
+    }
+
+    func onVoiceServerUpdate(_ payload: Gateway.VoiceServerUpdate) async {
+        await bridge.handleVoiceServerUpdate(payload)
+    }
+}
 import Logging
 
 struct AbbeyGatewayHandler: GatewayEventHandler {

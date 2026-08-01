@@ -83,7 +83,7 @@ PubSub won't ship. Live EventSub handshake still needs public HTTPS.
 | `/mod` | Abi moderation **advice only** (does not kick/ban) |
 | `/equity` | Synthetic `FactorScreen` when equity module enabled — not market data |
 | `/industry`, `/ping`, `/help` | Config / health / command list |
-| `/voice join\|leave` | Gateway **presence** only (no audio) |
+| `/voice join\|leave` | Gateway **presence** only today; real audio is **in progress**, not shipped |
 
 Re-register slash commands after upgrade so Discord sees the expanded set.
 
@@ -208,12 +208,21 @@ See **Verify** above — gate of record, CI secondary, continuation semantics, a
 - **Twitch EventSub live verification / PubSub** — HMAC signature verification (with replay window), message-id replay dedup (`TwitchEventSubReplayGuard`), typed `TwitchEventSubHandler` classification, chat/stream/follow/subscribe/cheer handling, env-gated six-type auto-subscribe reconciliation (`TwitchEventSubAutoSubscriber`, off by default), and a reusable Helix subscribe client ship (see Phase 2 table). Still deferred: running the authorization + `webhook_callback_verification` handshake against Twitch through a real public HTTPS callback. PubSub is a **won't-ship** — Twitch deprecated it in favor of EventSub.
 - **Codegen sandbox** — **won't ship in this package**; `/validate` remains the static `CodeProposalValidator` reject-list only. An isolated execution sandbox would be a separate product surface; nothing here should scaffold or imply a jail.
 - **Real WDBX / blockchain** — facade + policy stubs only; Zig abi WDBX and chain nodes are out of this package.
-- **Discord Voice audio** — **won't ship in this package**; DiscordBM has no media stack. Presence (`/voice join|leave`) is the whole voice claim.
+- **Discord Voice audio** — reopened and **in progress**. Presence (`/voice join|leave`) is currently
+  shipped. Do not claim audio until Voice Gateway v8, UDP discovery, mandatory transport AEAD,
+  DAVE E2EE, RTP/Opus send and receive, capture/playback, reconnect/resume, permissions/UI, tests,
+  and a live DAVE-enabled call are verified. DiscordBM supplies the main-gateway event models and
+  voice-state update, but not the separate media stack.
 - **CRDT merge** — **won't ship**; LWW + tombstones + CLI `/sync pull` + `/sync push` (messages + facts) is the sync story (see Deferred below). Multi-writer CRDT merge stays out.
 
 ## Deferred
 
-Discord Voice **audio** (Opus/UDP) — **won't ship in this package.** DiscordBM has no media stack, and a real implementation (Voice Gateway WS + UDP/IP-discovery + RTP + Opus codec + audio capture/playback) is a standalone effort on the order of the rest of this package combined. No scaffold implying an Opus stack should land here. Voice **presence** (`/voice join|leave`, Discord tab) is shipped and is the whole voice claim.
+Discord Voice **audio** — **in progress, not shipped.** Voice presence (`/voice join|leave`, Discord
+tab) remains the only verified runtime claim. Current Discord participation requires the separate
+Voice Gateway v8 connection, UDP/IP discovery, supported AEAD transport encryption, DAVE E2EE,
+RTP/Opus send and receive, capture/playback, reconnect/resume, permission and privacy controls,
+deterministic tests, and a live DAVE-enabled call. Do not convert roadmap code or a local transport
+test into a shipped-audio claim; keep `tasks/goals.md` and `tasks/todo.md` as the completion ledger.
 
 CRDT (won't ship) — desktop ships **push + pull** with persisted per-entity compound incremental cursors and **last-write-wins** for users/channels (`updatedAt`) and equity (`generatedAt`); all six sync entity types soft-delete via `deletedAt` tombstones that `SyncPull` applies as local hard-deletes; messages key by Discord ID and reputation/interactions by Fluent ID; page limit 500 drains through `(changedAt, stable ID)` continuation. LWW and pull-start guards compare wall clocks and remain vulnerable to significant clock skew. The CLI ships **pull + push** with the same compound pull protocol; push remains messages + memory facts only. True multi-writer CRDT/vector-clock merge remains a **won't-ship** for this package.
 

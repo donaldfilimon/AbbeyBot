@@ -29,6 +29,8 @@ public actor DiscordBridge {
     public private(set) var voiceGuildId: String?
 
     private var gateway: BotGatewayManager?
+    public private(set) var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
+    private var voiceGatewayHandshake = VoiceGatewayHandshake()
     private var eventTask: Task<Void, Never>?
     private let logger = Logger(label: "AbbeyBot.DiscordBridge")
 
@@ -102,6 +104,7 @@ public actor DiscordBridge {
         }
         eventTask?.cancel()
         eventTask = nil
+        await gateway?.disconnect()
         // BotGatewayManager has no explicit disconnect API in all versions — drop reference.
         gateway = nil
         state = .disconnected
@@ -118,6 +121,9 @@ public actor DiscordBridge {
         let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGuild.isEmpty, !trimmedChannel.isEmpty else { return .invalidIdentifiers }
+        guard beginVoiceGatewayHandshake(guildId: guildId, channelId: channelId) else {
+            return .gatewayUnavailable
+        }
         await gateway.updateVoiceState(
             payload: VoiceStateUpdate(
                 guildId: GuildSnowflake(trimmedGuild),
@@ -138,6 +144,10 @@ public actor DiscordBridge {
         let trimmed = (guildId ?? voiceGuildId)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return .invalidIdentifiers }
+        _ = voiceGatewayHandshake.cancel(guildID: trimmed)
+        if voiceGatewayCredentials?.guildID == trimmed {
+            voiceGatewayCredentials = nil
+        }
         await gateway.updateVoiceState(
             payload: VoiceStateUpdate(
                 guildId: GuildSnowflake(trimmed),
@@ -168,6 +178,70 @@ public actor DiscordBridge {
 }
 
 /// Callbacks from gateway handlers into the app engine (Sendable closures).
+extension DiscordBridge {
+    /// Begins correlation before Gateway opcode 4 is sent.
+    private func beginVoiceGatewayHandshake(guildId: String, channelId: String) -> Bool {
+        guard let botUserId else { return false }
+        voiceGatewayCredentials = nil
+        voiceGatewayHandshake.begin(guildID: guildId, channelID: channelId, userID: botUserId)
+        return true
+    }
+
+    /// Receives the bot's main-Gateway voice-state dispatch. Public voice
+    /// presence is updated only after Discord confirms the self state.
+    public func handleVoiceStateUpdate(_ payload: VoiceState) {
+        guard payload.user_id.rawValue == botUserId else { return }
+        let guildId = payload.guild_id.rawValue
+        let outcome = voiceGatewayHandshake.receive(
+            .init(
+                guildID: guildId,
+                channelID: payload.channel_id?.rawValue,
+                userID: payload.user_id.rawValue,
+                sessionID: payload.session_id
+            )
+        )
+
+        switch outcome {
+        case .waiting, .ready:
+            voiceChannelId = payload.channel_id?.rawValue
+            if case .ready(let credentials) = outcome {
+                voiceGatewayCredentials = credentials
+            }
+        case .cancelled:
+            if voiceGatewayCredentials?.guildID == guildId {
+                voiceGatewayCredentials = nil
+            }
+            if voiceGuildId == guildId {
+                voiceGuildId = nil
+                voiceChannelId = nil
+            }
+        case .ignored:
+            if payload.channel_id == nil, voiceGuildId == guildId {
+                voiceGatewayCredentials = nil
+                voiceGuildId = nil
+                voiceChannelId = nil
+            }
+        case .rejected:
+            break
+        }
+    }
+
+    /// Receives Discord's ephemeral Voice Gateway endpoint and token. The token
+    /// remains actor-local until the future media transport consumes it.
+    public func handleVoiceServerUpdate(_ payload: Gateway.VoiceServerUpdate) {
+        let outcome = voiceGatewayHandshake.receive(
+            .init(
+                guildID: payload.guild_id.rawValue,
+                endpoint: payload.endpoint,
+                token: payload.token
+            )
+        )
+        if case .ready(let credentials) = outcome {
+            voiceGatewayCredentials = credentials
+        }
+    }
+}
+
 public struct DiscordEventHooks: Sendable {
     public var onReady: @Sendable (_ userId: String) async -> Void
     public var onMessageCreate: @Sendable (_ message: Gateway.MessageCreate) async -> Void

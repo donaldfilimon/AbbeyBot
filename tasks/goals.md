@@ -1,5 +1,25 @@
 # Goals
 
+## Complete Discord application and real Discord Voice audio
+status: in_progress
+- Gateway voice presence is shipped today; real Discord audio is not. Completion requires a
+  confirmed main-gateway voice handshake, Voice Gateway v8, UDP discovery, mandatory transport
+  AEAD, DAVE end-to-end encryption, RTP/Opus send and receive, capture/playback, reconnect/resume,
+  operator UI and permission controls, deterministic integration tests, and a live DAVE-enabled
+  guild-call validation.
+- Treat Discord's March 1, 2026 DAVE-only call requirement as a release constraint. A
+  transport-only RTP/Opus demonstration, a gateway presence update, or a mocked green test is not
+  evidence that AbbeyBot can participate in a current Discord call.
+- Keep voice credentials and media private: never persist or log the voice token, endpoint,
+  session id, transport key, DAVE/MLS material, or raw microphone audio. Recording and
+  transcription remain off by default and require an explicit operator/guild policy.
+- Keep the existing text/slash application reliable while voice lands: main-gateway readiness and
+  disconnect semantics, runtime command authorization, response error visibility, and connection
+  observability are part of this goal rather than separate polish.
+- Completion evidence must include protocol fixtures, local WebSocket/UDP and loss/reorder fault
+  tests, Opus loopback, Apple audio-device/permission tests, the full repository gate, and a live
+  join/speak/hear/reconnect/leave run using a rotated bot token in an authorized test guild.
+
 ## Release and SwiftData hardening
 status: done
 - Preserve sync persistence and migration compatibility across previously released database and
