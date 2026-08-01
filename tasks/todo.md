@@ -61,9 +61,9 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       coverage gap noted for later: no test exercises both dedupe layers together.
 - [ ] **Live Helix / EventSub handshake — not achievable in this environment**, permanently open
       until a public HTTPS callback exists. Do not mark done off a green local test.
-- [ ] **Push / open the PR after the fresh release gate.** Work now lives on
-      `codex/massive-improve-cleanup`, rebased on current `origin/main`; local `main` was safely
-      realigned to `origin/main` without a force-push.
+- [x] **Published and merged through PR #53.** `codex/massive-improve-cleanup` was rebased on
+      current `origin/main`, pushed, merged without a force-push, and deleted remotely. Local
+      `main` was checked out and verified byte-for-byte at the resulting `origin/main` merge commit.
 
 ## Retire the legacy sync-cursor policy layer — all closed
 
