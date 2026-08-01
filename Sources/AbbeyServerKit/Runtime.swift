@@ -54,6 +54,7 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
 
     app.migrations.add(CreateAll())
     app.migrations.add(AddSyncSourceTimestamps())
+    app.migrations.add(AddTwitchEventSubDeliveries())
     try await app.autoMigrate()
 
     let runtime = BotRuntime(app: app)

@@ -4,16 +4,25 @@ import AbbeyCore
 
 /// Reputation engine backed by SwiftData. Algorithm lives in `ReputationMath`.
 actor SocialBrain {
+    typealias SaveContext = @Sendable (ModelContext) throws -> Void
+
     private let modelContainer: ModelContainer
     private let eventBus: EventBus
     private let decay: @Sendable () -> Double
+    private let saveContext: SaveContext
     private var scores: [String: Double] = [:]
     private(set) var lastPersistenceError: (any Error)?
 
-    init(modelContainer: ModelContainer, eventBus: EventBus, decay: @escaping @Sendable () -> Double) {
+    init(
+        modelContainer: ModelContainer,
+        eventBus: EventBus,
+        decay: @escaping @Sendable () -> Double,
+        saveContext: @escaping SaveContext = { try $0.save() }
+    ) {
         self.modelContainer = modelContainer
         self.eventBus = eventBus
         self.decay = decay
+        self.saveContext = saveContext
     }
 
     func reputation(userId: String, guildId: String) -> Double {
@@ -33,8 +42,10 @@ actor SocialBrain {
         let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         let current = scores[k] ?? ReputationMath.defaultScore
         let updated = ReputationMath.blend(current: current, quality: quality, decay: decay())
+        guard persist(userId: userId, guildId: guildId, newValue: updated, delta: updated - current, reason: reason) else {
+            return
+        }
         scores[k] = updated
-        await persist(userId: userId, guildId: guildId, newValue: updated, delta: updated - current, reason: reason)
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
@@ -42,12 +53,15 @@ actor SocialBrain {
         let k = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         let current = scores[k] ?? ReputationMath.defaultScore
         let updated = ReputationMath.penalize(current: current)
+        guard persist(userId: userId, guildId: guildId, newValue: updated, delta: -ReputationMath.penaltyDelta, reason: reason) else {
+            return
+        }
         scores[k] = updated
-        await persist(userId: userId, guildId: guildId, newValue: updated, delta: -ReputationMath.penaltyDelta, reason: reason)
         await eventBus.publish(.reputationChanged(userId: userId, guildId: guildId, newValue: updated, reason: reason))
     }
 
-    private func persist(userId: String, guildId: String, newValue: Double, delta: Double, reason: String) async {
+    @discardableResult
+    private func persist(userId: String, guildId: String, newValue: Double, delta: Double, reason: String) -> Bool {
         let context = ModelContext(modelContainer)
         do {
             let descriptor = FetchDescriptor<UserMemory>(
@@ -62,10 +76,13 @@ actor SocialBrain {
                 context.insert(record)
             }
             context.insert(ReputationEvent(userId: userId, guildId: guildId, delta: delta, reason: reason))
-            try context.save()
+            try saveContext(context)
             lastPersistenceError = nil
+            return true
         } catch {
+            context.rollback()
             lastPersistenceError = error
+            return false
         }
     }
 }

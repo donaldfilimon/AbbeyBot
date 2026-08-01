@@ -6,6 +6,7 @@ struct EquityResearchView: View {
     @Environment(AbbeyEngine.self) private var engine
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \EquityIdea.generatedAt, order: .reverse) private var ideas: [EquityIdea]
+    @State private var operationError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +33,14 @@ struct EquityResearchView: View {
                 }
 
                 generateBar
+            }
+
+            if let operationError {
+                Label(operationError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
             }
         }
         .navigationTitle("Equity Research")
@@ -61,10 +70,16 @@ struct EquityResearchView: View {
     private func generate(count: Int) {
         var engineCopy = engine.equityEngine
         let generated = engineCopy.generateBatch(count: count, context: modelContext)
-        try? modelContext.save()
-        engine.equityEngine = engineCopy
-        for idea in generated {
-            Task { await engine.eventBus.publish(.equityIdeaGenerated(symbol: idea.symbol)) }
+        do {
+            try modelContext.save()
+            operationError = nil
+            engine.equityEngine = engineCopy
+            for idea in generated {
+                Task { await engine.eventBus.publish(.equityIdeaGenerated(symbol: idea.symbol)) }
+            }
+        } catch {
+            modelContext.rollback()
+            operationError = OperatorFacingError.message(error)
         }
     }
 }

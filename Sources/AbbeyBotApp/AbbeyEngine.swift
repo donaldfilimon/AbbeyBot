@@ -7,6 +7,10 @@ import AbbeyCore
 @Observable
 @MainActor
 final class AbbeyEngine {
+    typealias ModelContextSaver = @MainActor (ModelContext) throws -> Void
+    typealias RememberPushScheduler = @MainActor (_ guildId: String, _ userId: String, _ fact: String) -> Void
+    typealias ForgetPushScheduler = @MainActor (_ guildId: String, _ userId: String, _ index: Int) -> Void
+
     let modelContainer: ModelContainer
     let config = AppConfig.shared
     let metrics = EngineMetrics()
@@ -36,9 +40,29 @@ final class AbbeyEngine {
     let twitchBridge = TwitchBridge()
     let moderationClient = ModerationClient()
     private var eventListenerTask: Task<Void, Never>?
+    private let saveModelContext: ModelContextSaver
+    private let scheduleRememberPush: RememberPushScheduler
+    private let scheduleForgetPush: ForgetPushScheduler
 
-    init(modelContainer: ModelContainer, storeDegraded: Bool = false) {
+    init(
+        modelContainer: ModelContainer,
+        storeDegraded: Bool = false,
+        saveModelContext: @escaping ModelContextSaver = { try $0.save() },
+        scheduleRememberPush: @escaping RememberPushScheduler = { guildId, userId, fact in
+            Task.detached(priority: .utility) {
+                await AbbeyServerClient.shared.remember(guildId: guildId, userId: userId, fact: fact)
+            }
+        },
+        scheduleForgetPush: @escaping ForgetPushScheduler = { guildId, userId, index in
+            Task.detached(priority: .utility) {
+                await AbbeyServerClient.shared.forget(guildId: guildId, userId: userId, index: index)
+            }
+        }
+    ) {
         self.modelContainer = modelContainer
+        self.saveModelContext = saveModelContext
+        self.scheduleRememberPush = scheduleRememberPush
+        self.scheduleForgetPush = scheduleForgetPush
 
         let bus = EventBus()
         self.eventBus = bus
@@ -274,12 +298,13 @@ final class AbbeyEngine {
         context.insert(message)
         upsertChannelContext(in: context, channelId: channelId, guildId: guildId)
         let intent = IntentClassifier.classify(content)
-        if intent == .memoryStore {
-            appendMemoryFact(in: context, authorId: authorId, guildId: guildId, content: content)
-        }
+        let memoryFact = intent == .memoryStore
+            ? appendMemoryFact(in: context, authorId: authorId, guildId: guildId, content: content)
+            : nil
         do {
-            try context.save()
+            try saveModelContext(context)
         } catch {
+            context.rollback()
             logInteraction(
                 commandName: "ingestMessage",
                 userId: authorId,
@@ -288,6 +313,9 @@ final class AbbeyEngine {
                 latencyMs: IngestScorer.latencyMilliseconds(since: started)
             )
             return .failed
+        }
+        if let memoryFact {
+            scheduleRememberPush(guildId, authorId, memoryFact)
         }
         if discordMessageId != nil {
             liveIngestCount += 1
@@ -406,10 +434,10 @@ final class AbbeyEngine {
         }
     }
 
-    private func appendMemoryFact(in context: ModelContext, authorId: String, guildId: String, content: String) {
+    private func appendMemoryFact(in context: ModelContext, authorId: String, guildId: String, content: String) -> String? {
         let key = ReputationMath.cacheKey(userId: authorId, guildId: guildId)
         let fact = MemoryFactText.extract(from: content)
-        guard !fact.isEmpty else { return }
+        guard !fact.isEmpty else { return nil }
         let descriptor = FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
         if let existing = try? context.fetch(descriptor).first {
             if !existing.facts.contains(fact) {
@@ -419,9 +447,50 @@ final class AbbeyEngine {
         } else {
             context.insert(UserMemory(discordUserId: authorId, guildId: guildId, facts: [fact]))
         }
-        Task.detached(priority: .utility) {
-            await AbbeyServerClient.shared.remember(guildId: guildId, userId: authorId, fact: fact)
+        return fact
+    }
+
+    func rememberFact(userId: String, guildId: String, fact: String) async -> String {
+        let outcome = await ingestMessage(
+            content: "remember \(fact)",
+            channelId: "slash",
+            guildId: guildId,
+            authorId: userId
+        )
+        guard case .inserted = outcome else {
+            return DiscordCopy.rememberFailed(MemoryCommitError.notCommitted)
         }
+        return DiscordCopy.remembered(userId: userId)
+    }
+
+    func forgetFact(userId: String, guildId: String, index: Int) -> String {
+        let context = ModelContext(modelContainer)
+        let key = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+        do {
+            guard let memory = try context.fetch(
+                FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
+            ).first else {
+                return DiscordCopy.noMemory
+            }
+            let zeroBasedIndex = index - 1
+            guard memory.facts.indices.contains(zeroBasedIndex) else {
+                return DiscordCopy.invalidFactIndex
+            }
+            memory.facts.remove(at: zeroBasedIndex)
+            memory.updatedAt = .now
+            do {
+                try saveModelContext(context)
+            } catch {
+                context.rollback()
+                return DiscordCopy.forgetFailed(error)
+            }
+        } catch {
+            context.rollback()
+            return DiscordCopy.forgetFailed(error)
+        }
+
+        scheduleForgetPush(guildId, userId, index)
+        return DiscordCopy.forgot(index: index)
     }
 
     // MARK: - Discord
@@ -595,24 +664,11 @@ final class AbbeyEngine {
             },
             remember: { [weak self] userId, guildId, fact in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                await self.ingestMessage(content: "remember \(fact)", channelId: "slash", guildId: guildId, authorId: userId)
-                return DiscordCopy.remembered(userId: userId)
+                return await self.rememberFact(userId: userId, guildId: guildId, fact: fact)
             },
             forget: { [weak self] userId, guildId, index in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                let context = ModelContext(self.modelContainer)
-                let key = ReputationMath.cacheKey(userId: userId, guildId: guildId)
-                guard let memory = try? context.fetch(FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })).first else {
-                    return DiscordCopy.noMemory
-                }
-                let idx = index - 1
-                guard memory.facts.indices.contains(idx) else { return DiscordCopy.invalidFactIndex }
-                memory.facts.remove(at: idx)
-                try? context.save()
-                Task.detached(priority: .utility) {
-                    await AbbeyServerClient.shared.forget(guildId: guildId, userId: userId, index: index)
-                }
-                return DiscordCopy.forgot(index: index)
+                return self.forgetFact(userId: userId, guildId: guildId, index: index)
             },
             context: { [weak self] channelId, guildId in
                 guard let self else { return DiscordCopy.engineUnavailable }
@@ -749,5 +805,13 @@ final class AbbeyEngine {
             join: { guild, channel in await bridge.joinVoice(guildId: guild, channelId: channel) },
             leave: { guild in await bridge.leaveVoice(guildId: guild) }
         )
+    }
+}
+
+private enum MemoryCommitError: LocalizedError {
+    case notCommitted
+
+    var errorDescription: String? {
+        "Local memory did not commit. Nothing was synchronized."
     }
 }

@@ -147,9 +147,6 @@ public struct ServerSyncClient: Sendable {
         limit: Int,
         cursor: SyncPullCursor?
     ) async throws -> SyncPullPage<T> {
-        guard var components = URLComponents(string: baseURL + path) else {
-            throw ClientError.invalidURL(path)
-        }
         var query = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 500)))]
         if let cursor {
             query.append(URLQueryItem(
@@ -160,17 +157,8 @@ public struct ServerSyncClient: Sendable {
                 query.append(URLQueryItem(name: SyncPullCursorWire.idQuery, value: stableID))
             }
         }
-        components.queryItems = query
-        guard let url = components.url else {
-            throw ClientError.invalidURL(path)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        var request = try makeRequest(path: path, method: "GET", queryItems: query)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let apiToken {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -210,16 +198,9 @@ public struct ServerSyncClient: Sendable {
     }
 
     private func post(path: String, jsonObjectBody: [String: Any]) async throws -> Data {
-        guard let url = URL(string: baseURL + path) else {
-            throw ClientError.invalidURL(path)
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        var request = try makeRequest(path: path, method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let apiToken {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
         request.httpBody = try JSONSerialization.data(withJSONObject: jsonObjectBody)
 
         let (data, response) = try await session.data(for: request)
@@ -227,6 +208,41 @@ public struct ServerSyncClient: Sendable {
             throw ClientError.httpStatus(http.statusCode)
         }
         return data
+    }
+
+    /// Internal request boundary so tests can prove rejected transports never receive
+    /// an Authorization header or a sync body.
+    func makeRequest(
+        path: String,
+        method: String,
+        queryItems: [URLQueryItem] = []
+    ) throws -> URLRequest {
+        let validatedBaseURL: URL
+        do {
+            validatedBaseURL = try SyncTransportPolicy.validate(baseURL: baseURL)
+        } catch {
+            throw ClientError.invalidURL(path)
+        }
+
+        let validatedBase = validatedBaseURL.absoluteString
+        let base = validatedBase.hasSuffix("/") ? String(validatedBase.dropLast()) : validatedBase
+        let suffix = path.hasPrefix("/") ? path : "/\(path)"
+        guard var components = URLComponents(string: base + suffix) else {
+            throw ClientError.invalidURL(path)
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw ClientError.invalidURL(path)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        if let apiToken {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 }
 

@@ -131,6 +131,40 @@ struct SyncCursorStoreTests {
         #expect(defaults.object(forKey: SyncCursorStore.defaultsKey) == nil)
     }
 
+    @Test func releasedFlatV2FixtureSurvivesDesktopStoreUpgrade() {
+        let defaults = makeDefaults()
+        defaults.set(
+            Data(#"{"users":{"changedAt":123,"stableID":"g:u"},"messages":{"changedAt":456,"stableID":"m-0500"}}"#.utf8),
+            forKey: SyncCursorStore.cursorSetKey
+        )
+
+        let cursors = SyncCursorStore(defaults: defaults).pullCursors
+
+        #expect(cursors[.users] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 123),
+            stableID: "g:u"
+        ))
+        #expect(cursors[.messages] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 456),
+            stableID: "m-0500"
+        ))
+    }
+
+    @Test func transientDictionaryFixtureSurvivesDesktopStoreUpgrade() {
+        let defaults = makeDefaults()
+        defaults.set(
+            Data(#"{"values":["users",{"changedAt":123,"stableID":"g:u"}]}"#.utf8),
+            forKey: SyncCursorStore.cursorSetKey
+        )
+
+        let cursors = SyncCursorStore(defaults: defaults).pullCursors
+
+        #expect(cursors[.users] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 123),
+            stableID: "g:u"
+        ))
+    }
+
     @Test func failedCompoundPullPreservesPreviousSet() {
         let defaults = makeDefaults()
         let store = SyncCursorStore(defaults: defaults)

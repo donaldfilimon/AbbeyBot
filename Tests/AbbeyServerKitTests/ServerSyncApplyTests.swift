@@ -536,6 +536,40 @@ struct SyncCursorFileStoreTests {
         #expect(store.loadPullCursors() == expected)
     }
 
+    @Test func releasedFlatV2FixtureSurvivesCLICursorStoreUpgrade() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-flat-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"channels":{"changedAt":123,"stableID":"g:c"},"interactions":{"changedAt":456,"stableID":"i-0500"}}"#.utf8)
+            .write(to: url, options: .atomic)
+
+        let cursors = SyncCursorFileStore(fileURL: url).loadPullCursors()
+
+        #expect(cursors[.channels] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 123),
+            stableID: "g:c"
+        ))
+        #expect(cursors[.interactions] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 456),
+            stableID: "i-0500"
+        ))
+    }
+
+    @Test func transientDictionaryFixtureSurvivesCLICursorStoreUpgrade() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-transient-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"values":["channels",{"changedAt":123,"stableID":"g:c"}]}"#.utf8)
+            .write(to: url, options: .atomic)
+
+        let cursors = SyncCursorFileStore(fileURL: url).loadPullCursors()
+
+        #expect(cursors[.channels] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 123),
+            stableID: "g:c"
+        ))
+    }
+
     @Test func endpointNamespacesProduceStableIndependentFiles() {
         let first = SyncCursorFileStore.namespacedPullURL(endpoint: "HTTPS://Example.com:443/api/")
         let equivalent = SyncCursorFileStore.namespacedPullURL(endpoint: "https://example.com/api")

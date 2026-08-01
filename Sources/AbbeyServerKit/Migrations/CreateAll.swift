@@ -83,8 +83,10 @@ public struct CreateAll: AsyncMigration {
             .field("reported_at", .datetime)
             .create()
 
-        // Durable Twitch EventSub dedupe. The unique constraint on message_id is what makes
-        // `TwitchEventSubReplayGuard.claim` atomic — the insert either wins or violates.
+        // Keep the replay table in the whole-schema bootstrap. It shipped here before the
+        // forward migration existed, so `CreateAll` remains its owner for fresh databases and
+        // for full-schema rollback. `AddTwitchEventSubDeliveries` adopts or creates it for
+        // databases whose CreateAll migration is already recorded.
         try await database.schema(TwitchEventSubDelivery.schema)
             .id()
             .field("message_id", .string, .required)
