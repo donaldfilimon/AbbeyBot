@@ -15,6 +15,15 @@ public enum AbbeyEvent: Sendable {
     case inferenceProviderFailed(mode: InferenceMode, message: String)
     /// Twitch EventSub `stream.online` / `stream.offline` — operator status only.
     case twitchStreamLifecycle(broadcasterLogin: String, isLive: Bool)
+    /// Twitch EventSub `channel.follow` / `channel.subscribe` / `channel.cheer`. Emitted once
+    /// per genuinely new delivery — a redelivered webhook dedupes upstream and publishes
+    /// nothing. `kind` is the EventSub subscription type as Twitch sent it.
+    case twitchChannelSocial(
+        kind: String,
+        broadcasterLogin: String,
+        actorLogin: String,
+        detail: String
+    )
 
     /// Operator-facing one-liner for dashboards (not `String(describing:)`).
     public var displayDescription: String {
@@ -41,6 +50,8 @@ public enum AbbeyEvent: Sendable {
             return isLive
                 ? "Twitch stream live: #\(broadcasterLogin)"
                 : "Twitch stream offline: #\(broadcasterLogin)"
+        case .twitchChannelSocial(let kind, let broadcasterLogin, let actorLogin, let detail):
+            return "Twitch \(kind) #\(broadcasterLogin) by \(actorLogin): \(detail)"
         }
     }
 }

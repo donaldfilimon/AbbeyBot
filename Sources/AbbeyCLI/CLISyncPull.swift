@@ -21,17 +21,48 @@ enum CLISyncPull {
             ]
         }
 
-        let since = cursorStore.loadLastPullSuccess()
-        // Stamp at pull *start* so rows written mid-pull are refetched next time.
+        let cursorStore = cursorStore.fileURL == SyncCursorFileStore.defaultURL()
+            ? SyncCursorFileStore(fileURL: SyncCursorFileStore.namespacedPullURL(endpoint: client.baseURL))
+            : cursorStore
+
+        let cursors = cursorStore.loadPullCursors()
+        // Pull start is the upper cursor bound; a full entity page may hold it back to the
+        // newest server change actually returned so later pulls drain the remaining rows.
         let startedAt = Date()
 
         do {
-            let users = try await client.fetchUsers(since: since)
-            let channels = try await client.fetchChannels(since: since)
-            let messages = try await client.fetchMessages(since: since)
-            let reputation = try await client.fetchReputation(since: since)
-            let interactions = try await client.fetchInteractions(since: since)
-            let equity = try await client.fetchEquity(since: since)
+            async let usersTask = SyncPageDrain.run(
+                initialCursor: cursors.users ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchUsersPage(cursor: $0) }
+            async let channelsTask = SyncPageDrain.run(
+                initialCursor: cursors.channels ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchChannelsPage(cursor: $0) }
+            async let messagesTask = SyncPageDrain.run(
+                initialCursor: cursors.messages ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchMessagesPage(cursor: $0) }
+            async let reputationTask = SyncPageDrain.run(
+                initialCursor: cursors.reputation ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchReputationPage(cursor: $0) }
+            async let interactionsTask = SyncPageDrain.run(
+                initialCursor: cursors.interactions ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchInteractionsPage(cursor: $0) }
+            async let equityTask = SyncPageDrain.run(
+                initialCursor: cursors.equity ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchEquityPage(cursor: $0) }
+
+            let usersDrain = try await usersTask
+            let channelsDrain = try await channelsTask
+            let messagesDrain = try await messagesTask
+            let reputationDrain = try await reputationTask
+            let interactionsDrain = try await interactionsTask
+            let equityDrain = try await equityTask
+
+            let users = usersDrain.rows
+            let channels = channelsDrain.rows
+            let messages = messagesDrain.rows
+            let reputation = reputationDrain.rows
+            let interactions = interactionsDrain.rows
+            let equity = equityDrain.rows
 
             let counts = try await ServerSyncApply.apply(
                 users: users,
@@ -43,8 +74,16 @@ enum CLISyncPull {
                 on: runtime.database
             )
 
+            var nextCursors = cursors
+            nextCursors.users = usersDrain.nextCursor
+            nextCursors.channels = channelsDrain.nextCursor
+            nextCursors.messages = messagesDrain.nextCursor
+            nextCursors.reputation = reputationDrain.nextCursor
+            nextCursors.interactions = interactionsDrain.nextCursor
+            nextCursors.equity = equityDrain.nextCursor
+
             do {
-                try cursorStore.saveLastPullSuccess(startedAt)
+                try cursorStore.applyPullOutcome(nextCursors: nextCursors, succeeded: true)
             } catch {
                 return [
                     "Pulled from \(client.baseURL): \(counts.summary).",
@@ -52,7 +91,8 @@ enum CLISyncPull {
                 ]
             }
 
-            let scope = since.map { "since \(Self.format($0))" } ?? "full (no cursor)"
+            let scope = cursors.earliestChangedAt.map { "incremental from \(Self.format($0))" }
+                ?? "full (compound cursor bootstrap)"
             return ["Pulled from \(client.baseURL) [\(scope)]: \(counts.summary)."]
         } catch {
             return [
@@ -66,4 +106,5 @@ enum CLISyncPull {
         let formatter = ISO8601DateFormatter()
         return formatter.string(from: date)
     }
+
 }

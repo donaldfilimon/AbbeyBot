@@ -9,6 +9,23 @@ import Foundation
 /// server-side ingest (pushing them would double-count). Equity and tombstones have no CLI
 /// write surface (`/clear` is non-destructive).
 enum CLISyncPushPlan {
+    typealias MessageRow = (
+        createdAt: Date?,
+        discordMessageId: String,
+        content: String,
+        channelId: String,
+        guildId: String,
+        authorId: String,
+        deletedAt: Date?
+    )
+    typealias MemoryRow = (
+        updatedAt: Date?,
+        discordUserId: String,
+        guildId: String,
+        facts: [String],
+        deletedAt: Date?
+    )
+
     struct MessagePayload: Equatable, Sendable {
         var discordMessageId: String
         var content: String
@@ -32,12 +49,17 @@ enum CLISyncPushPlan {
     /// `createdAt` ascending (oldest first) so the server timeline stays coherent; facts
     /// are expanded per-user in fact-array order. Empty / whitespace-only facts are skipped.
     static func build(
-        messages: [(createdAt: Date?, discordMessageId: String, content: String, channelId: String, guildId: String, authorId: String, deletedAt: Date?)],
-        memories: [(updatedAt: Date?, discordUserId: String, guildId: String, facts: [String], deletedAt: Date?)]
+        messages: [MessageRow],
+        memories: [MemoryRow]
     ) -> Plan {
         let liveMessages = messages
             .filter { $0.deletedAt == nil }
-            .sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
+            .sorted {
+                let lhsDate = $0.createdAt ?? .distantPast
+                let rhsDate = $1.createdAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate < rhsDate }
+                return $0.discordMessageId < $1.discordMessageId
+            }
             .map {
                 MessagePayload(
                     discordMessageId: $0.discordMessageId,
@@ -51,7 +73,13 @@ enum CLISyncPushPlan {
         var facts: [FactPayload] = []
         let liveMemories = memories
             .filter { $0.deletedAt == nil }
-            .sorted { ($0.updatedAt ?? .distantPast) < ($1.updatedAt ?? .distantPast) }
+            .sorted {
+                let lhsDate = $0.updatedAt ?? .distantPast
+                let rhsDate = $1.updatedAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate < rhsDate }
+                if $0.guildId != $1.guildId { return $0.guildId < $1.guildId }
+                return $0.discordUserId < $1.discordUserId
+            }
         for memory in liveMemories {
             for fact in memory.facts {
                 let trimmed = fact.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -69,10 +97,22 @@ enum CLISyncPushPlan {
 }
 
 /// `/sync push` — push CLI-local messages and memory facts to the configured sync server.
-/// Uses `~/.abbey/cli-sync-push-cursor` (independent of the pull cursor). Cursor advances
-/// only after a fully successful push. Reputation/interactions/equity/tombstones are out
-/// of scope for this command (see `CLISyncPushPlan`).
+/// Uses message/memory sidecars beside `~/.abbey/cli-sync-push-cursor` (independent of the
+/// pull cursor). Each stream advances only after that stream fully succeeds.
+/// Reputation/interactions/equity/tombstones are out of scope (see `CLISyncPushPlan`).
 enum CLISyncPush {
+    struct Source: Sendable {
+        var messages: @Sendable (Date?) async throws -> [CLISyncPushPlan.MessageRow]
+        var memories: @Sendable (Date?) async throws -> [CLISyncPushPlan.MemoryRow]
+    }
+
+    struct Sink: Sendable {
+        var baseURL: String
+        /// Returns true when the server reports an idempotent duplicate.
+        var pushMessage: @Sendable (CLISyncPushPlan.MessagePayload) async throws -> Bool
+        var pushFact: @Sendable (CLISyncPushPlan.FactPayload) async throws -> Void
+    }
+
     static func run(
         runtime: BotRuntime,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -85,19 +125,17 @@ enum CLISyncPush {
             ]
         }
 
-        let since = cursorStore.loadLastSuccess()
-        let startedAt = Date()
+        let cursorStore = cursorStore.fileURL == SyncCursorFileStore.defaultPushURL()
+            ? SyncCursorFileStore(fileURL: SyncCursorFileStore.namespacedPushURL(endpoint: client.baseURL))
+            : cursorStore
 
-        do {
-            let messageRows = try await selectMessages(since: since, on: runtime.database)
-            let memoryRows = try await selectMemories(since: since, on: runtime.database)
-            let plan = CLISyncPushPlan.build(messages: messageRows, memories: memoryRows)
-
-            var messagesPushed = 0
-            var factsPushed = 0
-            var duplicatesSkipped = 0
-
-            for message in plan.messages {
+        let source = Source(
+            messages: { since in try await selectMessages(since: since, on: runtime.database) },
+            memories: { since in try await selectMemories(since: since, on: runtime.database) }
+        )
+        let sink = Sink(
+            baseURL: client.baseURL,
+            pushMessage: { message in
                 let result = try await client.pushIngest(
                     discordMessageId: message.discordMessageId,
                     content: message.content,
@@ -105,52 +143,92 @@ enum CLISyncPush {
                     guildId: message.guildId,
                     authorId: message.authorId
                 )
-                if result.duplicate {
+                return result.duplicate
+            },
+            pushFact: { fact in
+                try await client.pushRemember(userId: fact.userId, guildId: fact.guildId, fact: fact.fact)
+            }
+        )
+        return await execute(
+            source: source,
+            sink: sink,
+            cursorStore: cursorStore,
+            startedAt: Date()
+        )
+    }
+
+    /// Executes the two push streams independently. This dependency-injected seam keeps
+    /// large-batch/resume behavior deterministic in tests without opening sockets.
+    static func execute(
+        source: Source,
+        sink: Sink,
+        cursorStore: SyncCursorFileStore,
+        startedAt: Date
+    ) async -> [String] {
+        let messageSince = cursorStore.loadLastSuccess(for: .messages)
+        let memorySince = cursorStore.loadLastSuccess(for: .memories)
+
+        var messagesPushed = 0
+        var factsPushed = 0
+        var duplicatesSkipped = 0
+        var messageFailure: String?
+        var memoryFailure: String?
+
+        do {
+            let rows = try await source.messages(messageSince)
+            let messages = CLISyncPushPlan.build(messages: rows, memories: []).messages
+            for message in messages {
+                if try await sink.pushMessage(message) {
                     duplicatesSkipped += 1
                 } else {
                     messagesPushed += 1
                 }
             }
+            try cursorStore.saveLastSuccess(startedAt, for: .messages)
+        } catch {
+            messageFailure = OperatorFacingError.message(error)
+        }
 
-            for fact in plan.facts {
-                try await client.pushRemember(
-                    userId: fact.userId,
-                    guildId: fact.guildId,
-                    fact: fact.fact
-                )
+        do {
+            let rows = try await source.memories(memorySince)
+            let facts = CLISyncPushPlan.build(messages: [], memories: rows).facts
+            for fact in facts {
+                try await sink.pushFact(fact)
                 factsPushed += 1
             }
-
-            do {
-                try cursorStore.saveLastSuccess(startedAt)
-            } catch {
-                return [
-                    "Pushed to \(client.baseURL): \(messagesPushed) messages, \(factsPushed) facts (\(duplicatesSkipped) duplicates skipped).",
-                    "Warning: could not persist the push cursor (\(OperatorFacingError.message(error))) — next push will refetch."
-                ]
-            }
-
-            let scope = since.map { "since \(Self.format($0))" } ?? "full (no cursor)"
-            return [
-                "Pushed to \(client.baseURL) [\(scope)]: \(messagesPushed) messages, \(factsPushed) facts (\(duplicatesSkipped) duplicates skipped)."
-            ]
+            try cursorStore.saveLastSuccess(startedAt, for: .memories)
         } catch {
+            memoryFailure = OperatorFacingError.message(error)
+        }
+
+        if messageFailure == nil, memoryFailure == nil {
+            let messageScope = messageSince.map { "since \(Self.format($0))" } ?? "full"
+            let memoryScope = memorySince.map { "since \(Self.format($0))" } ?? "full"
             return [
-                "Sync push failed: \(OperatorFacingError.message(error))",
-                "Cursor not advanced — the next push retries the same window."
+                "Pushed to \(sink.baseURL) [messages: \(messageScope); memories: \(memoryScope)]: \(messagesPushed) messages, \(factsPushed) facts (\(duplicatesSkipped) duplicates skipped)."
             ]
         }
+
+        var failures: [String] = []
+        if let messageFailure { failures.append("messages: \(messageFailure)") }
+        if let memoryFailure { failures.append("memories: \(memoryFailure)") }
+        return [
+            "Sync push partially failed after \(messagesPushed) messages and \(factsPushed) facts (\(duplicatesSkipped) duplicates skipped): \(failures.joined(separator: "; ")).",
+            "Each failed stream kept its cursor; successful stream cursors advanced independently."
+        ]
     }
 
     private static func selectMessages(
         since: Date?,
         on db: any Database
-    ) async throws -> [(createdAt: Date?, discordMessageId: String, content: String, channelId: String, guildId: String, authorId: String, deletedAt: Date?)] {
+    ) async throws -> [CLISyncPushPlan.MessageRow] {
         var query = GuildMessage.query(on: db)
         if let since {
-            query = query.filter(\.$createdAt > since)
+            // Inclusive overlap avoids dropping rows tied exactly to the cursor; ingest is
+            // idempotent by discord message id, so replay is safe.
+            query = query.filter(\.$createdAt >= since)
         }
-        let rows = try await query.sort(\.$createdAt, .ascending).limit(500).all()
+        let rows = try await query.sort(\.$createdAt, .ascending).all()
         return rows.map {
             (
                 createdAt: $0.createdAt,
@@ -167,12 +245,14 @@ enum CLISyncPush {
     private static func selectMemories(
         since: Date?,
         on db: any Database
-    ) async throws -> [(updatedAt: Date?, discordUserId: String, guildId: String, facts: [String], deletedAt: Date?)] {
+    ) async throws -> [CLISyncPushPlan.MemoryRow] {
         var query = UserMemory.query(on: db)
         if let since {
-            query = query.filter(\.$updatedAt > since)
+            // Identical facts are idempotent server-side, so inclusive overlap is safer
+            // than skipping records whose timestamp ties the persisted cursor.
+            query = query.filter(\.$updatedAt >= since)
         }
-        let rows = try await query.sort(\.$updatedAt, .ascending).limit(500).all()
+        let rows = try await query.sort(\.$updatedAt, .ascending).all()
         return rows.map {
             (
                 updatedAt: $0.updatedAt,

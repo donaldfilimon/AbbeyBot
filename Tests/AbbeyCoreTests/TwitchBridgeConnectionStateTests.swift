@@ -24,11 +24,10 @@ struct TwitchBridgeConnectionStateTests {
         }
 
         let bridge = TwitchBridge()
-        await bridge.connect(
-            oauthToken: "fake-oauth-token",
+        await bridge.connectInsecureLoopbackForTesting(
+            oauthToken: "test-only-oauth-token",
             login: "testbot",
             channel: "testchannel",
-            dryRun: false,
             host: "127.0.0.1",
             port: Int(listener.port)
         )
@@ -80,11 +79,10 @@ struct TwitchBridgeConnectionStateTests {
         // Long enough that this test's own disconnect() call always lands well inside the
         // backoff wait, never racing the (real, working) reconnect attempt itself.
         let bridge = TwitchBridge(reconnectBaseDelay: 5, reconnectMaxDelay: 5)
-        await bridge.connect(
-            oauthToken: "fake-oauth-token",
+        await bridge.connectInsecureLoopbackForTesting(
+            oauthToken: "test-only-oauth-token",
             login: "testbot",
             channel: "testchannel",
-            dryRun: false,
             host: "127.0.0.1",
             port: Int(port)
         )
@@ -108,6 +106,20 @@ struct TwitchBridgeConnectionStateTests {
         // nothing is listening on `port` anymore) flip state to .connecting or .failed again.
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(await bridge.state == .disconnected)
+    }
+
+    @Test func insecureTestTransportRejectsNonLoopbackHostBeforeSendingCredentials() async {
+        let bridge = TwitchBridge()
+        await bridge.connectInsecureLoopbackForTesting(
+            oauthToken: "must-not-leave-process",
+            login: "testbot",
+            channel: "testchannel",
+            host: "example.com",
+            port: 6667
+        )
+
+        #expect(await bridge.state == .failed)
+        #expect(await bridge.lastError == "Insecure Twitch IRC test transport is restricted to loopback")
     }
 }
 

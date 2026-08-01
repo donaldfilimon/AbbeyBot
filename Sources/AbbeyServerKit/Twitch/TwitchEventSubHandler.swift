@@ -36,11 +36,30 @@ public struct TwitchEventSubStreamLifecycle: Equatable, Sendable {
 /// the shared Twitch runtime path:
 /// - `channel.chat.message` → `BotRuntime.handleTwitchChat`
 /// - `stream.online` / `stream.offline` → `BotRuntime.handleTwitchStreamLifecycle`
-/// Other notification types stay log-only.
+/// - `channel.follow` / `channel.subscribe` / `channel.cheer` →
+///   `BotRuntime.handleTwitchChannelSocial`
+/// Other notification types stay typed-ack + log-only.
 public enum TwitchEventSubHandler {
     public static let chatMessageSubscriptionType = "channel.chat.message"
     public static let streamOnlineSubscriptionType = "stream.online"
     public static let streamOfflineSubscriptionType = "stream.offline"
+    public static let followSubscriptionType = "channel.follow"
+    public static let subscribeSubscriptionType = "channel.subscribe"
+    public static let cheerSubscriptionType = "channel.cheer"
+
+    public struct ChannelSocialEvent: Equatable, Sendable {
+        public let kind: String
+        public let broadcasterLogin: String
+        public let actorLogin: String
+        public let detail: String
+
+        public init(kind: String, broadcasterLogin: String, actorLogin: String, detail: String) {
+            self.kind = kind
+            self.broadcasterLogin = broadcasterLogin
+            self.actorLogin = actorLogin
+            self.detail = detail
+        }
+    }
 
     public enum Outcome: Equatable, Sendable {
         /// `webhook_callback_verification` challenge (handled by the HTTP route, not here).
@@ -54,6 +73,8 @@ public enum TwitchEventSubHandler {
         case notificationStreamOnline(lifecycle: TwitchEventSubStreamLifecycle)
         /// `stream.offline` with a parseable broadcaster — updates runtime stream-live state.
         case notificationStreamOffline(lifecycle: TwitchEventSubStreamLifecycle)
+        /// follow / subscribe / cheer — log interaction + optional status note.
+        case notificationChannelSocial(event: ChannelSocialEvent)
         /// Any other notification type we acknowledge and log (no product side-effect).
         case notificationAcknowledged(subscriptionType: String)
         /// Message type we don't model (still ack 2xx so Twitch stops retrying).
@@ -61,7 +82,7 @@ public enum TwitchEventSubHandler {
     }
 
     /// Classify a delivery. `messageType` is `Twitch-Eventsub-Message-Type`; `body` is the raw
-    /// webhook JSON (used to parse chat and stream-lifecycle payloads).
+    /// webhook JSON (used to parse chat, stream-lifecycle, and channel-social payloads).
     public static func handle(
         messageType: String,
         subscriptionType: String?,
@@ -88,6 +109,12 @@ public enum TwitchEventSubHandler {
                let lifecycle = parseStreamLifecycle(from: body, isLive: false)
             {
                 return .notificationStreamOffline(lifecycle: lifecycle)
+            }
+            if sub == followSubscriptionType || sub == subscribeSubscriptionType || sub == cheerSubscriptionType,
+               let body,
+               let social = parseChannelSocial(from: body, kind: sub)
+            {
+                return .notificationChannelSocial(event: social)
             }
             return .notificationAcknowledged(subscriptionType: sub.isEmpty ? "unknown" : sub)
         default:
@@ -131,11 +158,42 @@ public enum TwitchEventSubHandler {
             return "Twitch EventSub: \(streamOnlineSubscriptionType) #\(lifecycle.broadcasterLogin) — stream live"
         case .notificationStreamOffline(let lifecycle):
             return "Twitch EventSub: \(streamOfflineSubscriptionType) #\(lifecycle.broadcasterLogin) — stream offline"
+        case .notificationChannelSocial(let event):
+            return "Twitch EventSub: \(event.kind) #\(event.broadcasterLogin) by \(event.actorLogin) — \(event.detail)"
         case .notificationAcknowledged(let subscriptionType):
             return "Twitch EventSub: notification type=\(subscriptionType) acknowledged (no product side-effect)"
         case .ignored(let messageType, let subscriptionType):
             return "Twitch EventSub: ignored messageType=\(messageType) subscriptionType=\(subscriptionType)"
         }
+    }
+
+    /// Parse follow, subscribe, and cheer payloads into the shared social-event shape.
+    /// Anonymous cheers legitimately omit a user login and are represented as `unknown`.
+    public static func parseChannelSocial(from body: Data, kind: String) -> ChannelSocialEvent? {
+        guard let decoded = try? JSONDecoder().decode(ChannelSocialWebhookBody.self, from: body),
+              let event = decoded.event
+        else { return nil }
+        let broadcaster = (event.broadcasterUserLogin ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let actor = (event.userLogin ?? event.chatterUserLogin ?? "unknown")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !broadcaster.isEmpty else { return nil }
+        let detail: String
+        switch kind {
+        case followSubscriptionType:
+            detail = "followed"
+        case subscribeSubscriptionType:
+            detail = "subscribed tier=\(event.tier ?? "?")"
+        case cheerSubscriptionType:
+            detail = "cheered bits=\(event.bits.map(String.init) ?? "?") \(event.message ?? "")"
+        default:
+            detail = kind
+        }
+        return ChannelSocialEvent(
+            kind: kind,
+            broadcasterLogin: broadcaster,
+            actorLogin: actor.isEmpty ? "unknown" : actor,
+            detail: detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 }
 
@@ -165,6 +223,26 @@ private struct StreamLifecycleWebhookBody: Decodable {
 
         enum CodingKeys: String, CodingKey {
             case broadcasterUserLogin = "broadcaster_user_login"
+        }
+    }
+
+    var event: Event?
+}
+
+private struct ChannelSocialWebhookBody: Decodable {
+    struct Event: Decodable {
+        var broadcasterUserLogin: String?
+        var userLogin: String?
+        var chatterUserLogin: String?
+        var tier: String?
+        var bits: Int?
+        var message: String?
+
+        enum CodingKeys: String, CodingKey {
+            case broadcasterUserLogin = "broadcaster_user_login"
+            case userLogin = "user_login"
+            case chatterUserLogin = "chatter_user_login"
+            case tier, bits, message
         }
     }
 

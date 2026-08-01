@@ -34,10 +34,12 @@ public struct IntentClassifier {
             || lower.contains("timeout") || lower.contains("mod ") { return .modRequest }
         if lower.contains("remember") || lower.contains("note that") { return .memoryStore }
         if lower.contains("rep") || lower.contains("reputation") { return .repQuery }
-        // Align with PersonaName.resolve — "be abi/abbey" must switch, not only "be aviva".
-        if lower.contains("switch")
-            || lower.range(of: #"\bbe\s+(aviva|abi|abbey)\b"#, options: .regularExpression) != nil
-        {
+        // Align with PersonaName.resolve, but require an explicit switch phrase.
+        // Ordinary questions about a programming-language `switch` are not persona commands.
+        if lower.range(
+            of: #"\b(?:switch\s+(?:to\s+)?|be\s+)(aviva|abi|abbey)\b"#,
+            options: .regularExpression
+        ) != nil {
             return .personaSwitch
         }
         if lower.hasSuffix("?") || lower.hasPrefix("what") || lower.hasPrefix("how") { return .question }

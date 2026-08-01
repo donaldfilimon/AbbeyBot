@@ -31,14 +31,24 @@ public actor ABIRouter {
         }
     }
 
+    /// Resolve an explicit persona request for one reply without mutating the router's
+    /// shared active persona. Global changes stay behind the authorized `/persona` command.
+    public func route(intent: IntentClassifier.Intent, userText: String) -> any Persona {
+        guard intent == .personaSwitch else { return route(intent: intent) }
+        return Self.persona(named: PersonaName.resolve(userText))
+    }
+
     public func setPersona(named name: String) async {
-        let resolved: any Persona
-        switch name.lowercased() {
-        case "aviva": resolved = AvivaPersona()
-        case "abi": resolved = AbiPersona()
-        default: resolved = AbbeyPersona()
-        }
+        let resolved = Self.persona(named: name)
         current = resolved
         await eventBus.publish(.personaSwitched(to: resolved.name))
+    }
+
+    private nonisolated static func persona(named name: String) -> any Persona {
+        switch name.lowercased() {
+        case "aviva": return AvivaPersona()
+        case "abi": return AbiPersona()
+        default: return AbbeyPersona()
+        }
     }
 }

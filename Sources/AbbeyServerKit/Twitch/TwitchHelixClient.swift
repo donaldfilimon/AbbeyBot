@@ -10,6 +10,12 @@ import Vapor
 /// that requires a live, publicly reachable deployment this environment doesn't have. Treat
 /// this as untested-in-production until run against a real deployment with real credentials.
 public struct TwitchHelixClient: Sendable {
+    public enum SubscriptionCreateOutcome: Sendable, Equatable {
+        case created
+        /// Twitch uses HTTP 409 when the same type/condition/transport already exists.
+        case alreadyExists
+    }
+
     public enum ClientError: Error, LocalizedError, Sendable {
         case tokenRequestFailed(status: UInt, body: String)
         case subscriptionRequestFailed(status: UInt, body: String)
@@ -49,8 +55,55 @@ public struct TwitchHelixClient: Sendable {
         return try response.content.decode(AppTokenResponseBody.self).accessToken
     }
 
+    /// GET /helix/users?login=
+    public func getUsers(logins: [String], appAccessToken: String) async throws -> [[String: String]] {
+        var components = URLComponents(string: "https://api.twitch.tv/helix/users")!
+        components.queryItems = logins.map { URLQueryItem(name: "login", value: $0) }
+        let uri = URI(string: components.string ?? "https://api.twitch.tv/helix/users")
+        let response = try await client.get(uri) { req in
+            req.headers.bearerAuthorization = BearerAuthorization(token: appAccessToken)
+            req.headers.replaceOrAdd(name: "Client-Id", value: clientId)
+        }.get()
+        guard response.status == .ok else {
+            throw ClientError.tokenRequestFailed(status: response.status.code, body: Self.bodyString(response))
+        }
+        let decoded = try response.content.decode(HelixDataList.self)
+        return decoded.data.map { row in
+            [
+                "id": row.id ?? "",
+                "login": row.login ?? "",
+                "display_name": row.displayName ?? "",
+            ]
+        }
+    }
+
+    /// GET /helix/streams?user_login=
+    public func getStreams(userLogins: [String], appAccessToken: String) async throws -> [[String: String]] {
+        var components = URLComponents(string: "https://api.twitch.tv/helix/streams")!
+        components.queryItems = userLogins.map { URLQueryItem(name: "user_login", value: $0) }
+        let uri = URI(string: components.string ?? "https://api.twitch.tv/helix/streams")
+        let response = try await client.get(uri) { req in
+            req.headers.bearerAuthorization = BearerAuthorization(token: appAccessToken)
+            req.headers.replaceOrAdd(name: "Client-Id", value: clientId)
+        }.get()
+        guard response.status == .ok else {
+            throw ClientError.subscriptionRequestFailed(status: response.status.code, body: Self.bodyString(response))
+        }
+        let decoded = try response.content.decode(HelixStreamList.self)
+        return decoded.data.map { row in
+            [
+                "id": row.id ?? "",
+                "user_login": row.userLogin ?? "",
+                "title": row.title ?? "",
+                "viewer_count": row.viewerCount.map(String.init) ?? "0",
+                "type": row.type ?? "",
+            ]
+        }
+    }
+
     /// Creates an EventSub webhook subscription.
     /// https://dev.twitch.tv/docs/api/reference/#create-eventsub-subscription
+    @discardableResult
     public func createSubscription(
         type: String,
         version: String,
@@ -58,7 +111,7 @@ public struct TwitchHelixClient: Sendable {
         callbackURL: String,
         webhookSecret: String,
         appAccessToken: String
-    ) async throws {
+    ) async throws -> SubscriptionCreateOutcome {
         let response = try await client.post("https://api.twitch.tv/helix/eventsub/subscriptions") { req in
             req.headers.bearerAuthorization = BearerAuthorization(token: appAccessToken)
             req.headers.replaceOrAdd(name: "Client-Id", value: clientId)
@@ -71,14 +124,17 @@ public struct TwitchHelixClient: Sendable {
                 )
             )
         }.get()
+        if response.status == .conflict { return .alreadyExists }
         guard response.status == .accepted || response.status == .created else {
             throw ClientError.subscriptionRequestFailed(status: response.status.code, body: Self.bodyString(response))
         }
+        return .created
     }
 
     private static func bodyString(_ response: ClientResponse) -> String {
         guard var body = response.body else { return "" }
-        return body.readString(length: body.readableBytes) ?? ""
+        let raw = body.readString(length: min(body.readableBytes, 512)) ?? ""
+        return raw.replacingOccurrences(of: "\n", with: " ")
     }
 }
 
@@ -113,4 +169,37 @@ struct CreateSubscriptionBody: Content {
     var version: String
     var condition: [String: String]
     var transport: Transport
+}
+
+struct HelixDataList: Content {
+    struct User: Content {
+        var id: String?
+        var login: String?
+        var displayName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, login
+            case displayName = "display_name"
+        }
+    }
+
+    var data: [User]
+}
+
+struct HelixStreamList: Content {
+    struct Stream: Content {
+        var id: String?
+        var userLogin: String?
+        var title: String?
+        var viewerCount: Int?
+        var type: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, title, type
+            case userLogin = "user_login"
+            case viewerCount = "viewer_count"
+        }
+    }
+
+    var data: [Stream]
 }

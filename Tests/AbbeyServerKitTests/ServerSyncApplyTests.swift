@@ -1,3 +1,4 @@
+import AbbeyCore
 import AbbeyServerKit
 import Fluent
 import Foundation
@@ -64,6 +65,86 @@ struct ServerSyncApplyTests {
                 .filter(\.$compositeKey == "g1:u1")
                 .first()
             #expect(after?.facts == ["likes tea"])
+        }
+    }
+
+    @Test func preservesSourceClockAndAcceptsLaterRemoteUpdate() async throws {
+        try await withRuntime { app, _ in
+            let firstStamp = Date(timeIntervalSince1970: 1_000)
+            let laterStamp = Date(timeIntervalSince1970: 1_001)
+            _ = try await ServerSyncApply.applyUsers(
+                [.init(
+                    compositeKey: "g1:clock",
+                    discordUserId: "clock",
+                    guildId: "g1",
+                    facts: ["first"],
+                    reputation: 0.5,
+                    interactionCount: 1,
+                    updatedAt: firstStamp
+                )],
+                on: app.db
+            )
+
+            let first = try #require(try await UserMemory.query(on: app.db)
+                .filter(\.$compositeKey == "g1:clock")
+                .first())
+            #expect(first.sourceUpdatedAt == firstStamp)
+            #expect((first.updatedAt ?? .distantPast) > laterStamp)
+
+            _ = try await ServerSyncApply.applyUsers(
+                [.init(
+                    compositeKey: "g1:clock",
+                    discordUserId: "clock",
+                    guildId: "g1",
+                    facts: ["later"],
+                    reputation: 0.8,
+                    interactionCount: 2,
+                    updatedAt: laterStamp
+                )],
+                on: app.db
+            )
+
+            let updated = try #require(try await UserMemory.query(on: app.db)
+                .filter(\.$compositeKey == "g1:clock")
+                .first())
+            #expect(updated.facts == ["later"])
+            #expect(updated.sourceUpdatedAt == laterStamp)
+        }
+    }
+
+    @Test func preservesSourceCreationAndGenerationClocks() async throws {
+        try await withRuntime { app, _ in
+            let sourceStamp = Date(timeIntervalSince1970: 2_000)
+            _ = try await ServerSyncApply.applyMessages(
+                [.init(
+                    discordMessageId: "source-time",
+                    channelId: "c",
+                    guildId: "g",
+                    authorId: "u",
+                    content: "hello",
+                    createdAt: sourceStamp
+                )],
+                on: app.db
+            )
+            _ = try await ServerSyncApply.applyEquity(
+                [.init(
+                    symbol: "TIME",
+                    thesisSummary: "synthetic",
+                    syntheticScore: 0.5,
+                    factorBreakdown: [:],
+                    generatedAt: sourceStamp
+                )],
+                on: app.db
+            )
+
+            let message = try #require(try await GuildMessage.query(on: app.db)
+                .filter(\.$discordMessageId == "source-time")
+                .first())
+            let equity = try #require(try await EquityIdea.query(on: app.db)
+                .filter(\.$symbol == "TIME")
+                .first())
+            #expect(message.sourceCreatedAt == sourceStamp)
+            #expect(equity.sourceGeneratedAt == sourceStamp)
         }
     }
 
@@ -266,6 +347,81 @@ struct ServerSyncApplyTests {
             #expect(counts.summary.contains("1 users"))
         }
     }
+
+    @Test func incrementalMessagePagesAreOldestChangeFirstAndIncludeTombstones() async throws {
+        try await withRuntime { app, _ in
+            let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+            func insert(_ id: String, createdOffset: TimeInterval, deletedOffset: TimeInterval? = nil) async throws {
+                let row = GuildMessage(
+                    discordMessageId: id,
+                    channelId: "c1",
+                    guildId: "g1",
+                    authorId: "u1",
+                    content: id
+                )
+                try await row.create(on: app.db)
+                row.createdAt = base.addingTimeInterval(createdOffset)
+                row.deletedAt = deletedOffset.map { base.addingTimeInterval($0) }
+                try await row.save(on: app.db)
+            }
+
+            try await insert("m1", createdOffset: 10)
+            try await insert("m2", createdOffset: 20)
+            try await insert("m3", createdOffset: 30)
+            try await insert("old-deleted", createdOffset: 1, deletedOffset: 25)
+
+            let firstPage = try await MessageRepository.recent(limit: 2, since: base, on: app.db)
+            #expect(firstPage.map(\.discordMessageId) == ["m1", "m2"])
+
+            let secondPage = try await MessageRepository.recent(
+                limit: 2,
+                since: base.addingTimeInterval(20),
+                on: app.db
+            )
+            #expect(secondPage.map(\.discordMessageId) == ["old-deleted", "m3"])
+        }
+    }
+
+    @Test func compoundMessageCursorDrains501RowsWithIdenticalTimestamp() async throws {
+        try await withRuntime { app, _ in
+            let sharedStamp = Date(timeIntervalSince1970: 1_700_000_000)
+            for index in 0...500 {
+                let id = String(format: "m-%04d", index)
+                let row = GuildMessage(
+                    discordMessageId: id,
+                    channelId: "c1",
+                    guildId: "g1",
+                    authorId: "u1",
+                    content: id
+                )
+                try await row.create(on: app.db)
+                row.createdAt = sharedStamp
+                try await row.save(on: app.db)
+            }
+
+            let first = try await MessageRepository.recent(
+                limit: 500,
+                cursor: .initial,
+                on: app.db
+            )
+            #expect(first.count == 500)
+            #expect(first.first?.discordMessageId == "m-0000")
+            #expect(first.last?.discordMessageId == "m-0499")
+
+            let boundary = SyncPullCursor(
+                changedAt: first.last?.createdAt ?? .distantPast,
+                stableID: first.last?.discordMessageId
+            )
+            let second = try await MessageRepository.recent(
+                limit: 500,
+                cursor: boundary,
+                on: app.db
+            )
+
+            #expect(second.map(\.discordMessageId) == ["m-0500"])
+        }
+    }
 }
 
 @Suite("Sync cursor file store")
@@ -333,5 +489,60 @@ struct SyncCursorFileStoreTests {
 
         #expect(abs(pull.loadLastSuccess()!.timeIntervalSince1970 - 1_000) < 0.001)
         #expect(abs(push.loadLastSuccess()!.timeIntervalSince1970 - 2_000) < 0.001)
+    }
+
+    @Test func failedOutcomePreservesCursorAndSuccessfulNilClearsIt() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-outcome-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = SyncCursorFileStore(fileURL: url)
+        let original = Date(timeIntervalSince1970: 1_000)
+        try store.saveLastPullSuccess(original)
+
+        try store.applyPullOutcome(nextCursor: Date(timeIntervalSince1970: 2_000), succeeded: false)
+        #expect(store.loadLastPullSuccess() == original)
+
+        try store.applyPullOutcome(nextCursor: nil, succeeded: true)
+        #expect(store.loadLastPullSuccess() == nil)
+    }
+
+    @Test func legacyPullFileMigratesToAllEntityCursors() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-legacy-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try "1700000000.0".write(to: url, atomically: true, encoding: .utf8)
+
+        let cursors = SyncCursorFileStore(fileURL: url).loadPullCursors()
+
+        for entity in SyncPullEntity.allCases {
+            #expect(cursors[entity] == SyncPullCursor(
+                changedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            ))
+        }
+    }
+
+    @Test func compoundPullFileRoundTripsIndependentEntityProgress() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = SyncCursorFileStore(fileURL: url)
+        let expected = SyncPullCursorSet(
+            channels: SyncPullCursor(changedAt: Date(timeIntervalSince1970: 200), stableID: "g:c"),
+            interactions: SyncPullCursor(changedAt: Date(timeIntervalSince1970: 300), stableID: UUID().uuidString)
+        )
+
+        try store.applyPullOutcome(nextCursors: expected, succeeded: true)
+
+        #expect(store.loadPullCursors() == expected)
+    }
+
+    @Test func endpointNamespacesProduceStableIndependentFiles() {
+        let first = SyncCursorFileStore.namespacedPullURL(endpoint: "HTTPS://Example.com:443/api/")
+        let equivalent = SyncCursorFileStore.namespacedPullURL(endpoint: "https://example.com/api")
+        let other = SyncCursorFileStore.namespacedPullURL(endpoint: "https://other.example/api")
+
+        #expect(first == equivalent)
+        #expect(first != other)
+        #expect(first.deletingLastPathComponent() == SyncCursorFileStore.defaultURL().deletingLastPathComponent())
     }
 }

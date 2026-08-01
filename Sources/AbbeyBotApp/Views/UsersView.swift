@@ -3,9 +3,16 @@ import SwiftData
 import AbbeyCore
 
 struct UsersView: View {
-    @Environment(AbbeyEngine.self) private var engine
-    @Query(sort: \UserMemory.reputation, order: .reverse) private var users: [UserMemory]
+    @Query private var users: [UserMemory]
     @State private var selectedUser: UserMemory?
+
+    init() {
+        var descriptor = FetchDescriptor<UserMemory>(
+            sortBy: [SortDescriptor(\UserMemory.reputation, order: .reverse)]
+        )
+        descriptor.fetchLimit = 500
+        _users = Query(descriptor)
+    }
 
     private var sections: [(guildId: String, users: [UserMemory])] {
         let grouped = Dictionary(grouping: users, by: \.guildId)
@@ -60,13 +67,19 @@ struct UsersView: View {
 private struct UserDetailView: View {
     @Environment(AbbeyEngine.self) private var engine
     let user: UserMemory
-    @Query private var allEvents: [ReputationEvent]
+    @Query private var events: [ReputationEvent]
     @State private var reason = ""
 
-    private var events: [ReputationEvent] {
-        allEvents
-            .filter { $0.userId == user.discordUserId && $0.guildId == user.guildId }
-            .sorted { $0.createdAt > $1.createdAt }
+    init(user: UserMemory) {
+        self.user = user
+        let userId = user.discordUserId
+        let guildId = user.guildId
+        var descriptor = FetchDescriptor<ReputationEvent>(
+            predicate: #Predicate { $0.userId == userId && $0.guildId == guildId },
+            sortBy: [SortDescriptor(\ReputationEvent.createdAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 25
+        _events = Query(descriptor)
     }
 
     var body: some View {

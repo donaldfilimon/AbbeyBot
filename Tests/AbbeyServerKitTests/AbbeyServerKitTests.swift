@@ -400,6 +400,36 @@ struct AbbeyServerKitTests {
         }
     }
 
+    /// A retried EventSub delivery must not append a second audit row. The ingest dedup key
+    /// carries the delivery id, and the audit is written only when the ingest actually inserted.
+    @Test func retriedChannelSocialDeliveryDoesNotDuplicateAuditRow() async throws {
+        try await withRuntime { app, runtime in
+            try await runtime.handleTwitchChannelSocial(
+                kind: "follow",
+                broadcasterLogin: "somechannel",
+                actorLogin: "someviewer",
+                detail: "new follower",
+                deliveryId: "delivery-1"
+            )
+            // Same delivery id — Twitch redelivering after a 5xx.
+            try await runtime.handleTwitchChannelSocial(
+                kind: "follow",
+                broadcasterLogin: "somechannel",
+                actorLogin: "someviewer",
+                detail: "new follower",
+                deliveryId: "delivery-1"
+            )
+
+            let followLogs = try await InteractionLog.query(on: app.db).all()
+                .filter { $0.commandName == "eventsub.follow" }
+            #expect(followLogs.count == 1)
+
+            let notes = try await MessageRepository.recent(limit: 10, on: app.db)
+                .filter { $0.authorId == "twitch-system" }
+            #expect(notes.count == 1)
+        }
+    }
+
     @Test func messageTombstoneHidesFromFullListAndSurfacesOnSince() async throws {
         try await withRuntime { app, runtime in
             try await MessageRepository.insert(

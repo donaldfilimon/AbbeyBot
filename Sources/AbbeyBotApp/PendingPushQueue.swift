@@ -5,12 +5,14 @@ import Foundation
 /// shape, but is drainable: a successful `drain` rewrites the file to keep only the
 /// entries that still failed, instead of growing forever.
 ///
-/// Not an actor — call sites (`AbbeyServerClient`) already run off the main actor via
-/// detached tasks and don't overlap enqueue/drain in practice; file writes are atomic.
+/// Queue instances targeting the same path share a coordinator. File I/O is serialized,
+/// while network sends remain outside the lock; a drain merges records appended during
+/// those awaits before it commits its rewrite.
 public struct PendingPushQueue: Sendable {
     public let url: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let coordination: Coordination
 
     public init(url: URL) {
         self.url = url
@@ -20,6 +22,7 @@ public struct PendingPushQueue: Sendable {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         self.decoder = dec
+        self.coordination = CoordinationRegistry.shared.coordination(for: url)
     }
 
     public static func defaultURL() throws -> URL {
@@ -58,7 +61,9 @@ public struct PendingPushQueue: Sendable {
             throw QueueError.encode(error.localizedDescription)
         }
         let record = Record(path: path, bodyJSON: bodyJSON, enqueuedAt: Date())
-        try appendLine(record)
+        try coordination.withLock {
+            try appendLine(record)
+        }
     }
 
     /// Attempt to resend every queued entry via `send(path, bodyJSON) -> succeeded`, in
@@ -66,8 +71,21 @@ public struct PendingPushQueue: Sendable {
     /// the number successfully sent.
     @discardableResult
     public func drain(send: (String, Data) async -> Bool) async throws -> Int {
-        let records = try readAll()
-        guard !records.isEmpty else { return 0 }
+        let records: [Record]? = try coordination.withLock {
+            guard !coordination.drainInProgress else { return nil }
+            let records = try readAll()
+            coordination.drainInProgress = true
+            return records
+        }
+        guard let records else { return 0 }
+        guard !records.isEmpty else {
+            coordination.withLock { coordination.drainInProgress = false }
+            return 0
+        }
+
+        defer {
+            coordination.withLock { coordination.drainInProgress = false }
+        }
 
         var stillPending: [Record] = []
         var sentCount = 0
@@ -79,12 +97,24 @@ public struct PendingPushQueue: Sendable {
             }
         }
 
-        try rewrite(stillPending)
+        try coordination.withLock {
+            // `enqueue` only appends while this drain is in flight and another drain is
+            // excluded, so everything after the snapshot prefix is newly queued work.
+            // Preserve it after the snapshot records whose sends failed.
+            let current = try readAll()
+            guard current.count >= records.count else {
+                throw QueueError.io("queue changed unexpectedly while draining")
+            }
+            let appendedDuringDrain = current.dropFirst(records.count)
+            try rewrite(stillPending + appendedDuringDrain)
+        }
         return sentCount
     }
 
     public func pendingCount() throws -> Int {
-        try readAll().count
+        try coordination.withLock {
+            try readAll().count
+        }
     }
 
     // MARK: - File I/O
@@ -162,5 +192,38 @@ public struct PendingPushQueue: Sendable {
         } catch {
             throw QueueError.io(error.localizedDescription)
         }
+    }
+}
+
+private final class Coordination: @unchecked Sendable {
+    private let lock = NSLock()
+    var drainInProgress = false
+
+    func withLock<T>(_ operation: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
+}
+
+/// Strongly retains one coordinator per normalized queue path. The number of queue paths
+/// is bounded in production (normally one), and sharing also protects independently
+/// constructed queue values in tests or future client instances.
+private final class CoordinationRegistry: @unchecked Sendable {
+    static let shared = CoordinationRegistry()
+
+    private let lock = NSLock()
+    private var coordinators: [String: Coordination] = [:]
+
+    func coordination(for url: URL) -> Coordination {
+        let key = url.standardizedFileURL.path
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = coordinators[key] {
+            return existing
+        }
+        let created = Coordination()
+        coordinators[key] = created
+        return created
     }
 }

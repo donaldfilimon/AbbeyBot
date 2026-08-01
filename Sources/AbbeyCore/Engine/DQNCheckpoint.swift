@@ -118,15 +118,22 @@ extension NeuralNetwork {
         guard self.topology == topology else {
             throw DQNCheckpointError.topologyMismatch(expected: self.topology, found: topology)
         }
-        self.weights = try Self.decodeWeights(rawWeights, topology: topology)
-        guard biases.count == self.weights.count else {
+        let decodedWeights = try Self.decodeWeights(rawWeights, topology: topology)
+        guard biases.count == decodedWeights.count else {
             throw DQNCheckpointError.corrupt("bias layer count")
         }
         for i in 0..<biases.count {
-            guard biases[i].count == self.weights[i].count else {
+            guard biases[i].count == decodedWeights[i].count else {
                 throw DQNCheckpointError.corrupt("bias neuron count at layer \(i)")
             }
         }
+        guard decodedWeights.allSatisfy({ $0.allSatisfy({ $0.allSatisfy(\.isFinite) }) }),
+              biases.allSatisfy({ $0.allSatisfy(\.isFinite) }) else {
+            throw DQNCheckpointError.corrupt("non-finite network value")
+        }
+
+        // Commit only after every layer and bias has passed validation.
+        self.weights = decodedWeights
         self.biases = biases
     }
 }

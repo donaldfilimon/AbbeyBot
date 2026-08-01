@@ -9,38 +9,64 @@ public enum VoiceAction: Sendable, Equatable {
 
 /// Slash / component / autocomplete routing for AbbeyBot.
 public struct InteractionRouter: Sendable {
-    public typealias AskHandler = @Sendable (_ question: String, _ userId: String, _ guildId: String, _ channelId: String) async -> String
-    public typealias RepHandler = @Sendable (_ userId: String, _ guildId: String) async -> String
-    public typealias RememberHandler = @Sendable (_ userId: String, _ guildId: String, _ fact: String) async -> String
-    public typealias ForgetHandler = @Sendable (_ userId: String, _ guildId: String, _ index: Int) async -> String
-    public typealias ContextHandler = @Sendable (_ channelId: String, _ guildId: String) async -> String
-    public typealias PersonaHandler = @Sendable (_ name: String) async -> String
-    public typealias VoiceHandler = @Sendable (_ action: VoiceAction, _ guildId: String) async -> String
-
-    private let ask: AskHandler
-    private let rep: RepHandler
-    private let remember: RememberHandler
-    private let forget: ForgetHandler
-    private let context: ContextHandler
-    private let persona: PersonaHandler
-    private let voice: VoiceHandler
+    private let handlers: DiscordSlashHandlers
+    private let accessPolicy: DiscordCommandAccessPolicy
 
     public init(
-        ask: @escaping AskHandler,
-        rep: @escaping RepHandler,
-        remember: @escaping RememberHandler,
-        forget: @escaping ForgetHandler,
-        context: @escaping ContextHandler,
-        persona: @escaping PersonaHandler,
-        voice: @escaping VoiceHandler
+        handlers: DiscordSlashHandlers,
+        accessPolicy: DiscordCommandAccessPolicy = .fromEnvironment()
     ) {
-        self.ask = ask
-        self.rep = rep
-        self.remember = remember
-        self.forget = forget
-        self.context = context
-        self.persona = persona
-        self.voice = voice
+        self.handlers = handlers
+        self.accessPolicy = accessPolicy
+    }
+
+    /// Convenience init matching the pre-2.x surface (forwards to full handlers with stubs).
+    public init(
+        ask: @escaping DiscordSlashHandlers.AskHandler,
+        rep: @escaping DiscordSlashHandlers.RepHandler,
+        remember: @escaping DiscordSlashHandlers.RememberHandler,
+        forget: @escaping DiscordSlashHandlers.ForgetHandler,
+        context: @escaping DiscordSlashHandlers.ContextHandler,
+        persona: @escaping DiscordSlashHandlers.PersonaHandler,
+        voice: @escaping DiscordSlashHandlers.VoiceHandler,
+        help: @escaping DiscordSlashHandlers.HelpHandler = { DiscordSlashLogic.helpText() },
+        status: @escaping DiscordSlashHandlers.StatusHandler = { _, _ in DiscordCopy.engineUnavailable },
+        model: @escaping DiscordSlashHandlers.ModelHandler = { _ in DiscordCopy.engineUnavailable },
+        summarize: @escaping DiscordSlashHandlers.SummarizeHandler = { _, _, _ in DiscordCopy.engineUnavailable },
+        explain: @escaping DiscordSlashHandlers.ExplainHandler = { _, _, _, _ in DiscordCopy.engineUnavailable },
+        facts: @escaping DiscordSlashHandlers.FactsHandler = { _, _ in DiscordCopy.engineUnavailable },
+        ping: @escaping DiscordSlashHandlers.PingHandler = {
+            DiscordCopy.ping(latencyMs: 0)
+        },
+        equity: @escaping DiscordSlashHandlers.EquityHandler = { _ in DiscordCopy.equityDisabled },
+        modAdvice: @escaping DiscordSlashHandlers.ModAdviceHandler = { _, _, _, _ in DiscordCopy.engineUnavailable },
+        industry: @escaping DiscordSlashHandlers.IndustryHandler = {
+            DiscordCopy.industryProfile(AppConfig.shared.industryProfile.rawValue, suffixEmpty: true)
+        },
+        audit: @escaping DiscordSlashHandlers.AuditHandler = { _, _, _, _, _ in },
+        accessPolicy: DiscordCommandAccessPolicy = .fromEnvironment()
+    ) {
+        self.handlers = DiscordSlashHandlers(
+            ask: ask,
+            rep: rep,
+            remember: remember,
+            forget: forget,
+            context: context,
+            persona: persona,
+            voice: voice,
+            help: help,
+            status: status,
+            model: model,
+            summarize: summarize,
+            explain: explain,
+            facts: facts,
+            ping: ping,
+            equity: equity,
+            modAdvice: modAdvice,
+            industry: industry,
+            audit: audit
+        )
+        self.accessPolicy = accessPolicy
     }
 
     /// 1-based forget index. Returns `nil` when missing, unparseable (caller maps to 0), or ≤ 0.
@@ -48,9 +74,22 @@ public struct InteractionRouter: Sendable {
         raw > 0 ? raw : nil
     }
 
-    /// Only `/ask` registers autocomplete; other commands get empty choices.
+    /// Commands that register autocomplete for their primary string option.
     public static func shouldProvideAutocomplete(for commandName: String) -> Bool {
-        commandName == "ask"
+        commandName == "ask" || commandName == "explain"
+    }
+
+    /// Memory, channel-context, configuration, and status responses should not be published
+    /// into the channel timeline.  Ephemerality is selected on the initial defer because
+    /// Discord does not allow changing that flag on the later edit.
+    public static func shouldRespondEphemerally(for commandName: String) -> Bool {
+        switch commandName {
+        case "facts", "remember", "forget", "rep", "context", "summarize",
+             "persona", "model", "status", "voice":
+            return true
+        default:
+            return false
+        }
     }
 
     public func handle(_ interaction: Interaction, client: any DiscordClient) async {
@@ -72,12 +111,7 @@ public struct InteractionRouter: Sendable {
         data: Interaction.ApplicationCommand,
         client: any DiscordClient
     ) async {
-        try? await client.createInteractionResponse(
-            id: interaction.id,
-            token: interaction.token,
-            payload: .deferredChannelMessageWithSource()
-        ).guardSuccess()
-
+        let started = ContinuousClock.now
         let userId = interaction.member?.user?.id.rawValue
             ?? interaction.user?.id.rawValue
             ?? ""
@@ -86,41 +120,101 @@ public struct InteractionRouter: Sendable {
             ?? interaction.channel_id?.rawValue
             ?? ""
 
-        let result: String
-        switch data.name {
+        try? await client.createInteractionResponse(
+            id: interaction.id,
+            token: interaction.token,
+            payload: .deferredChannelMessageWithSource(
+                isEphemeral: Self.shouldRespondEphemerally(for: data.name)
+            )
+        ).guardSuccess()
+
+        let targetUserId = (try? data.option(named: "user")?.requireString()) ?? userId
+        let requestedModel = try? data.option(named: "mode")?.requireString()
+        let permissions = interaction.member?.permissions
+        let isAdministrator = permissions?.contains(.administrator) == true
+        let isModerator = isAdministrator
+            || permissions?.contains(.manageGuild) == true
+            || permissions?.contains(.moderateMembers) == true
+        let mutatesGlobalState = data.name == "persona"
+            || data.name == "voice"
+            || (data.name == "model" && requestedModel != nil)
+        let authorized = accessPolicy.allows(.init(
+            commandName: data.name,
+            invokerUserId: userId,
+            targetUserId: targetUserId,
+            mutatesGlobalState: mutatesGlobalState,
+            hasAdministratorPermission: isAdministrator,
+            hasModerationPermission: isModerator
+        ))
+
+        var result: String
+        if !authorized {
+            result = DiscordCopy.notAuthorized
+        } else { switch data.name {
         case "ask":
             let question = (try? data.option(named: "question")?.requireString()) ?? ""
-            result = await ask(question, userId, guildId, channelId)
+            result = await handlers.ask(question, userId, guildId, channelId)
+        case "explain":
+            let topic = (try? data.option(named: "topic")?.requireString()) ?? ""
+            result = await handlers.explain(topic, userId, guildId, channelId)
+        case "summarize":
+            result = await handlers.summarize(channelId, guildId, userId)
         case "rep":
-            let target = (try? data.option(named: "user")?.requireString()) ?? userId
-            result = await rep(target, guildId)
+            result = await handlers.rep(targetUserId, guildId)
+        case "facts":
+            result = await handlers.facts(targetUserId, guildId)
         case "remember":
-            let target = (try? data.option(named: "user")?.requireString()) ?? userId
             let fact = (try? data.option(named: "fact")?.requireString()) ?? ""
-            result = await remember(target, guildId, fact)
+            result = await handlers.remember(targetUserId, guildId, fact)
         case "forget":
-            let target = (try? data.option(named: "user")?.requireString()) ?? userId
             let rawIndex = Int((try? data.option(named: "index")?.requireInt()) ?? 0)
             guard let index = Self.validatedForgetIndex(rawIndex) else {
                 result = DiscordCopy.invalidFactIndex
                 break
             }
-            result = await forget(target, guildId, index)
+            result = await handlers.forget(targetUserId, guildId, index)
         case "context":
-            result = await context(channelId, guildId)
+            result = await handlers.context(channelId, guildId)
         case "persona":
             let name = (try? data.option(named: "name")?.requireString()) ?? "abbey"
-            result = await persona(name)
+            result = await handlers.persona(name)
+        case "model":
+            let mode = try? data.option(named: "mode")?.requireString()
+            result = await handlers.model(mode)
+        case "status":
+            result = await handlers.status(guildId, channelId)
+        case "industry":
+            result = await handlers.industry()
+        case "equity":
+            let symbol = (try? data.option(named: "symbol")?.requireString()) ?? ""
+            result = await handlers.equity(symbol)
+        case "mod":
+            let situation = (try? data.option(named: "situation")?.requireString()) ?? ""
+            result = await handlers.modAdvice(situation, userId, guildId, channelId)
+        case "ping":
+            result = await handlers.ping()
+        case "help":
+            result = await handlers.help()
         case "voice":
             result = await handleVoice(data: data, guildId: guildId)
         default:
-            result = "Unknown command."
-        }
+            result = "Unknown command. Try `/help`."
+        } }
+
+        // Discord hard limit 2000 chars
+        let clipped = result.count > 1900 ? String(result.prefix(1890)) + "…" : result
 
         try? await client.updateOriginalInteractionResponse(
             token: interaction.token,
-            payload: .init(content: result)
+            payload: .init(content: clipped)
         ).guardSuccess()
+        await handlers.audit(
+            data.name,
+            userId,
+            guildId,
+            authorized,
+            IngestScorer.latencyMilliseconds(since: started)
+        )
     }
 
     private func handleVoice(
@@ -133,9 +227,9 @@ public struct InteractionRouter: Sendable {
         switch sub.name {
         case "join":
             let channel = (try? sub.option(named: "channel")?.requireString()) ?? ""
-            return await voice(.join(channelId: channel), guildId)
+            return await handlers.voice(.join(channelId: channel), guildId)
         case "leave":
-            return await voice(.leave, guildId)
+            return await handlers.voice(.leave, guildId)
         default:
             return DiscordCopy.voiceUnknownSubcommand
         }
@@ -154,8 +248,9 @@ public struct InteractionRouter: Sendable {
             ).guardSuccess()
             return
         }
+        let optionName = data.name == "explain" ? "topic" : "question"
         let partial = data.options?
-            .first(where: { $0.name == "question" && $0.focused == true })
+            .first(where: { $0.name == optionName && $0.focused == true })
             .flatMap { try? $0.requireString() } ?? ""
         let suggestions = IntentClassifier.suggestCompletions(for: partial)
         let choices = suggestions.prefix(25).map {

@@ -1,3 +1,4 @@
+import AbbeyCore
 import Foundation
 import Testing
 
@@ -39,5 +40,17 @@ struct SyncQueryTests {
         let parsed = raw.map { Date(timeIntervalSince1970: $0) }
 
         #expect(parsed == cursor)
+    }
+
+    @Test func encodesCompoundStableIDAfterTimestamp() {
+        let cursor = SyncPullCursor(
+            changedAt: Date(timeIntervalSince1970: 1_712_345_678.25),
+            stableID: "guild:user"
+        )
+        let items = SyncQuery.listItems(limit: 500, cursor: cursor)
+
+        #expect(items.map(\.name) == ["limit", "since", "after"])
+        #expect(items.first { $0.name == "since" }?.value == "1712345678.25")
+        #expect(items.first { $0.name == "after" }?.value == "guild:user")
     }
 }

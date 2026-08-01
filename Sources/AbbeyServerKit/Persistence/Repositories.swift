@@ -3,6 +3,32 @@ import Fluent
 import Foundation
 import Vapor
 
+/// Merge the oldest primary-timestamp and tombstone-timestamp candidates into one
+/// deterministic incremental page. Fetching up to `limit` from each source is sufficient
+/// to identify the oldest `limit` rows in their union.
+private func mergedIncrementalPage<T>(
+    primary: [T],
+    tombstones: [T],
+    limit: Int,
+    identity: (T) -> String,
+    changedAt: (T) -> Date?
+) -> [T] {
+    var unique: [String: T] = [:]
+    for row in primary + tombstones {
+        unique[identity(row)] = row
+    }
+    return Array(unique.values.sorted { lhs, rhs in
+        let lhsDate = changedAt(lhs) ?? .distantPast
+        let rhsDate = changedAt(rhs) ?? .distantPast
+        if lhsDate == rhsDate { return identity(lhs) < identity(rhs) }
+        return lhsDate < rhsDate
+    }.prefix(limit))
+}
+
+private func latestChange(_ original: Date?, _ deletedAt: Date?) -> Date? {
+    [original, deletedAt].compactMap { $0 }.max()
+}
+
 public enum MemoryForgetError: Error, Equatable {
     case noMemory
     case invalidIndex
@@ -77,9 +103,32 @@ public enum MemoryRepository {
     /// Full list (no `since`) hides tombstones. Incremental list (`since` set) includes
     /// rows whose `updatedAt` advanced — including soft-deletes — so SyncPull can remove them.
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [UserMemory] {
+        try await recent(
+            limit: limit,
+            cursor: since.map { SyncPullCursor(changedAt: $0) },
+            on: db
+        )
+    }
+
+    public static func recent(limit: Int, cursor: SyncPullCursor?, on db: any Database) async throws -> [UserMemory] {
         var query = UserMemory.query(on: db)
-        if let since {
-            query = query.filter(\.$updatedAt > since)
+        if let cursor {
+            if let after = cursor.stableID {
+                query = query.group(.or) { group in
+                    group.filter(\.$updatedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$updatedAt == cursor.changedAt)
+                        tie.filter(\.$compositeKey > after)
+                    }
+                }
+            } else {
+                query = query.filter(\.$updatedAt > cursor.changedAt)
+            }
+            return try await query
+                .sort(\.$updatedAt, .ascending)
+                .sort(\.$compositeKey, .ascending)
+                .limit(limit)
+                .all()
         } else {
             // Full list hides tombstones at the SQL level — filtering a fetched window in
             // Swift after the fact could silently drop live rows behind a dense run of
@@ -141,9 +190,32 @@ public enum ChannelRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [ChannelContext] {
+        try await recent(
+            limit: limit,
+            cursor: since.map { SyncPullCursor(changedAt: $0) },
+            on: db
+        )
+    }
+
+    public static func recent(limit: Int, cursor: SyncPullCursor?, on db: any Database) async throws -> [ChannelContext] {
         var query = ChannelContext.query(on: db)
-        if let since {
-            query = query.filter(\.$updatedAt > since)
+        if let cursor {
+            if let after = cursor.stableID {
+                query = query.group(.or) { group in
+                    group.filter(\.$updatedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$updatedAt == cursor.changedAt)
+                        tie.filter(\.$compositeKey > after)
+                    }
+                }
+            } else {
+                query = query.filter(\.$updatedAt > cursor.changedAt)
+            }
+            return try await query
+                .sort(\.$updatedAt, .ascending)
+                .sort(\.$compositeKey, .ascending)
+                .limit(limit)
+                .all()
         } else {
             query = query.filter(\.$deletedAt == nil)
         }
@@ -222,16 +294,59 @@ public enum MessageRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [GuildMessage] {
-        var query = GuildMessage.query(on: db)
-        if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$createdAt > since)
-                group.filter(\.$deletedAt > since)
+        try await recent(
+            limit: limit,
+            cursor: since.map { SyncPullCursor(changedAt: $0) },
+            on: db
+        )
+    }
+
+    public static func recent(limit: Int, cursor: SyncPullCursor?, on db: any Database) async throws -> [GuildMessage] {
+        if let cursor {
+            var primaryQuery = GuildMessage.query(on: db).filter(\.$deletedAt == nil)
+            var tombstoneQuery = GuildMessage.query(on: db)
+            if let after = cursor.stableID {
+                primaryQuery = primaryQuery.group(.or) { group in
+                    group.filter(\.$createdAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$createdAt == cursor.changedAt)
+                        tie.filter(\.$discordMessageId > after)
+                    }
+                }
+                tombstoneQuery = tombstoneQuery.group(.or) { group in
+                    group.filter(\.$deletedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$deletedAt == cursor.changedAt)
+                        tie.filter(\.$discordMessageId > after)
+                    }
+                }
+            } else {
+                primaryQuery = primaryQuery.filter(\.$createdAt > cursor.changedAt)
+                tombstoneQuery = tombstoneQuery.filter(\.$deletedAt > cursor.changedAt)
             }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await primaryQuery
+                .sort(\.$createdAt, .ascending)
+                .sort(\.$discordMessageId, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await tombstoneQuery
+                .sort(\.$deletedAt, .ascending)
+                .sort(\.$discordMessageId, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.discordMessageId },
+                changedAt: { latestChange($0.createdAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        return try await GuildMessage.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -251,16 +366,62 @@ public enum ReputationRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [ReputationEvent] {
-        var query = ReputationEvent.query(on: db)
-        if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$createdAt > since)
-                group.filter(\.$deletedAt > since)
+        try await recent(
+            limit: limit,
+            cursor: since.map { SyncPullCursor(changedAt: $0) },
+            on: db
+        )
+    }
+
+    public static func recent(limit: Int, cursor: SyncPullCursor?, on db: any Database) async throws -> [ReputationEvent] {
+        if let cursor {
+            var primaryQuery = ReputationEvent.query(on: db).filter(\.$deletedAt == nil)
+            var tombstoneQuery = ReputationEvent.query(on: db)
+            if let after = cursor.stableID {
+                guard let afterID = UUID(uuidString: after) else {
+                    throw Abort(.badRequest, reason: "invalid reputation cursor ID")
+                }
+                primaryQuery = primaryQuery.group(.or) { group in
+                    group.filter(\.$createdAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$createdAt == cursor.changedAt)
+                        tie.filter(\.$id > afterID)
+                    }
+                }
+                tombstoneQuery = tombstoneQuery.group(.or) { group in
+                    group.filter(\.$deletedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$deletedAt == cursor.changedAt)
+                        tie.filter(\.$id > afterID)
+                    }
+                }
+            } else {
+                primaryQuery = primaryQuery.filter(\.$createdAt > cursor.changedAt)
+                tombstoneQuery = tombstoneQuery.filter(\.$deletedAt > cursor.changedAt)
             }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await primaryQuery
+                .sort(\.$createdAt, .ascending)
+                .sort(\.$id, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await tombstoneQuery
+                .sort(\.$deletedAt, .ascending)
+                .sort(\.$id, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.id?.uuidString ?? "missing-id" },
+                changedAt: { latestChange($0.createdAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        return try await ReputationEvent.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -298,16 +459,62 @@ public enum InteractionRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [InteractionLog] {
-        var query = InteractionLog.query(on: db)
-        if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$createdAt > since)
-                group.filter(\.$deletedAt > since)
+        try await recent(
+            limit: limit,
+            cursor: since.map { SyncPullCursor(changedAt: $0) },
+            on: db
+        )
+    }
+
+    public static func recent(limit: Int, cursor: SyncPullCursor?, on db: any Database) async throws -> [InteractionLog] {
+        if let cursor {
+            var primaryQuery = InteractionLog.query(on: db).filter(\.$deletedAt == nil)
+            var tombstoneQuery = InteractionLog.query(on: db)
+            if let after = cursor.stableID {
+                guard let afterID = UUID(uuidString: after) else {
+                    throw Abort(.badRequest, reason: "invalid interaction cursor ID")
+                }
+                primaryQuery = primaryQuery.group(.or) { group in
+                    group.filter(\.$createdAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$createdAt == cursor.changedAt)
+                        tie.filter(\.$id > afterID)
+                    }
+                }
+                tombstoneQuery = tombstoneQuery.group(.or) { group in
+                    group.filter(\.$deletedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$deletedAt == cursor.changedAt)
+                        tie.filter(\.$id > afterID)
+                    }
+                }
+            } else {
+                primaryQuery = primaryQuery.filter(\.$createdAt > cursor.changedAt)
+                tombstoneQuery = tombstoneQuery.filter(\.$deletedAt > cursor.changedAt)
             }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await primaryQuery
+                .sort(\.$createdAt, .ascending)
+                .sort(\.$id, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await tombstoneQuery
+                .sort(\.$deletedAt, .ascending)
+                .sort(\.$id, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.id?.uuidString ?? "missing-id" },
+                changedAt: { latestChange($0.createdAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        return try await InteractionLog.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
     }
 }
 
@@ -323,16 +530,59 @@ public enum EquityRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [EquityIdea] {
-        var query = EquityIdea.query(on: db)
-        if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$generatedAt > since)
-                group.filter(\.$deletedAt > since)
+        try await recent(
+            limit: limit,
+            cursor: since.map { SyncPullCursor(changedAt: $0) },
+            on: db
+        )
+    }
+
+    public static func recent(limit: Int, cursor: SyncPullCursor?, on db: any Database) async throws -> [EquityIdea] {
+        if let cursor {
+            var primaryQuery = EquityIdea.query(on: db).filter(\.$deletedAt == nil)
+            var tombstoneQuery = EquityIdea.query(on: db)
+            if let after = cursor.stableID {
+                primaryQuery = primaryQuery.group(.or) { group in
+                    group.filter(\.$generatedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$generatedAt == cursor.changedAt)
+                        tie.filter(\.$symbol > after)
+                    }
+                }
+                tombstoneQuery = tombstoneQuery.group(.or) { group in
+                    group.filter(\.$deletedAt > cursor.changedAt)
+                    group.group(.and) { tie in
+                        tie.filter(\.$deletedAt == cursor.changedAt)
+                        tie.filter(\.$symbol > after)
+                    }
+                }
+            } else {
+                primaryQuery = primaryQuery.filter(\.$generatedAt > cursor.changedAt)
+                tombstoneQuery = tombstoneQuery.filter(\.$deletedAt > cursor.changedAt)
             }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await primaryQuery
+                .sort(\.$generatedAt, .ascending)
+                .sort(\.$symbol, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await tombstoneQuery
+                .sort(\.$deletedAt, .ascending)
+                .sort(\.$symbol, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.symbol },
+                changedAt: { latestChange($0.generatedAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$generatedAt, .descending).limit(limit).all()
+        return try await EquityIdea.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$generatedAt, .descending)
+            .limit(limit)
+            .all()
     }
 
     public static func count(on db: any Database) async throws -> Int {

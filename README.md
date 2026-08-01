@@ -65,7 +65,15 @@ CI (`.github/workflows/abbey-ci.yml`) builds the dashboard SPA (`bun test` + `bu
 2. Desktop: Discord sidebar → token (Keychain) → Connect → Register slash commands.
 3. Server: set `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` in `.env`; gateway starts on boot.
 
-Slash commands: `ask`, `rep`, `remember`, `forget`, `context`, `persona`.
+Slash commands:
+
+- Inference: `/ask`, `/explain`, `/summarize`, `/model`
+- Memory and social brain: `/rep`, `/facts`, `/remember`, `/forget`, `/context`
+- Operations: `/status`, `/ping`, `/help`, `/industry`, `/persona`
+- Safety-scoped modules: `/mod` provides Abi moderation advice only; `/equity` is a synthetic factor screen, not market data or financial advice
+- Voice: `/voice join|leave` updates muted/deafened gateway presence only; no audio capture or playback
+
+Re-register slash commands after upgrading so Discord receives the expanded registry.
 
 ## Layout
 
@@ -93,10 +101,10 @@ Dockerfile / docker-compose.yml
 - `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`, max 500)
 - `GET /` — Leaf status; Operator UI + JSON API nav; Dashboard SPA link when `Public/index.html` exists, else build hint
 
-Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” (users/channels/messages **and** reputation/interactions/equity; last-write-wins by `updatedAt` for users/channels and by `generatedAt` for equity; messages/reputation/interactions insert-if-missing; limit 500). All six entity types soft-delete via `deletedAt` tombstones that a pull applies as local hard-deletes. Failures never block local SwiftData writes.
+Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” covers users/channels/messages/reputation/interactions/equity. Per-entity compound `(changedAt, stable ID)` cursors drain 500-row pages without losing equal-timestamp overflow; users/channels use LWW by `updatedAt`, equity by `generatedAt`, and all six entity types carry `deletedAt` tombstones that pull applies as local hard-deletes. Failures never advance cursors or block local SwiftData writes.
 
-The `abbey` CLI also syncs with the same server: `/sync pull` (own persisted cursor, same LWW/tombstone rules) and `/sync push` (messages + memory facts only — see Commands above).
+The `abbey` CLI also syncs with the same server: `/sync pull` (own persisted per-entity compound cursor set, automatic legacy timestamp migration, same LWW/tombstone rules) and `/sync push` (messages + memory facts only — see Commands above).
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA (Interactions tab, equity disclaimer, teal ops theme), desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop↔server push + pull with persisted `?since=` cursors and soft-delete tombstones (all six entity types), CLI↔server sync (`/sync pull` + `/sync push`), Twitch EventSub (HMAC verify, replay dedup, chat + stream-lifecycle handling, env-gated auto-subscribe — unverified against live Twitch). Still deferred: Discord Voice **audio** (Opus/UDP); true CRDT multi-writer merge (LWW + tombstones is the sync story instead).
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA, desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop↔server push + lossless compound-cursor pull with all-six-entity tombstones, CLI↔server sync (`/sync pull` + `/sync push`), and Twitch EventSub (HMAC verify, replay dedup, chat + stream-lifecycle handling, env-gated auto-subscribe — unverified against live Twitch). Still deferred: Discord Voice **audio** (Opus/UDP); true CRDT multi-writer merge (LWW + tombstones is the sync story instead).

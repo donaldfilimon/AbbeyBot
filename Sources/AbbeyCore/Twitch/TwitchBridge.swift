@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import Logging
 
 public enum TwitchConnectionState: String, Sendable {
@@ -9,7 +10,7 @@ public enum TwitchConnectionState: String, Sendable {
 }
 
 /// Optional Twitch IRC + chat→ingest (Phase 2). Dry-run skips the socket; live path
-/// speaks IRC to `irc.chat.twitch.tv:6667` (PASS oauth / NICK / JOIN). PRIVMSG lines
+/// speaks IRC over TLS to `irc.chat.twitch.tv:6697` (PASS oauth / NICK / JOIN). PRIVMSG lines
 /// invoke `TwitchEventHooks`. No EventSub / PubSub.
 public actor TwitchBridge {
     public private(set) var state: TwitchConnectionState = .disconnected
@@ -41,6 +42,7 @@ public actor TwitchBridge {
         var hooks: TwitchEventHooks
         var host: String
         var port: Int
+        var useTLS: Bool
     }
 
     /// - Parameters:
@@ -80,16 +82,62 @@ public actor TwitchBridge {
     ///   - channel: channel to JOIN (without `#`).
     ///   - dryRun: when true, marks connected without opening a socket.
     ///   - hooks: PRIVMSG → engine ingest callbacks.
-    ///   - host/port: real Twitch IRC by default; overridable so tests can point at a local
-    ///     listener instead of mocking `TwitchIRCConnection`.
     public func connect(
         oauthToken: String,
         login: String,
         channel: String,
         dryRun: Bool = AppConfig.shared.dryRun,
+        hooks: TwitchEventHooks = TwitchEventHooks()
+    ) async {
+        await connect(
+            oauthToken: oauthToken,
+            login: login,
+            channel: channel,
+            dryRun: dryRun,
+            hooks: hooks,
+            host: "irc.chat.twitch.tv",
+            port: 6697,
+            useTLS: true
+        )
+    }
+
+    /// Explicit test-only transport for real-socket state-machine tests. It is internal (only
+    /// reachable through `@testable import AbbeyCore`) and rejects non-loopback hosts, so a
+    /// production caller cannot accidentally send a Twitch OAuth credential over cleartext.
+    func connectInsecureLoopbackForTesting(
+        oauthToken: String,
+        login: String,
+        channel: String,
         hooks: TwitchEventHooks = TwitchEventHooks(),
-        host: String = "irc.chat.twitch.tv",
-        port: Int = 6667
+        host: String = "127.0.0.1",
+        port: Int
+    ) async {
+        guard Self.isLoopback(host) else {
+            state = .failed
+            lastError = "Insecure Twitch IRC test transport is restricted to loopback"
+            return
+        }
+        await connect(
+            oauthToken: oauthToken,
+            login: login,
+            channel: channel,
+            dryRun: false,
+            hooks: hooks,
+            host: host,
+            port: port,
+            useTLS: false
+        )
+    }
+
+    private func connect(
+        oauthToken: String,
+        login: String,
+        channel: String,
+        dryRun: Bool,
+        hooks: TwitchEventHooks,
+        host: String,
+        port: Int,
+        useTLS: Bool
     ) async {
         self.hooks = hooks
         self.isDryRun = dryRun
@@ -127,7 +175,15 @@ public actor TwitchBridge {
         // Clean slate first: cancels any prior readTask/reconnectTask and clears the old
         // reconnectParams, so the params set right after aren't immediately wiped out.
         await disconnect()
-        let params = ConnectionParams(oauthToken: oauthToken, login: nick, channel: chan, hooks: hooks, host: host, port: port)
+        let params = ConnectionParams(
+            oauthToken: oauthToken,
+            login: nick,
+            channel: chan,
+            hooks: hooks,
+            host: host,
+            port: port,
+            useTLS: useTLS
+        )
         reconnectParams = params
         reconnectAttempt = 0
         await openConnection(params)
@@ -153,7 +209,11 @@ public actor TwitchBridge {
         lastError = nil
 
         do {
-            let conn = try await TwitchIRCConnection.connect(host: params.host, port: params.port)
+            let conn = try await TwitchIRCConnection.connect(
+                host: params.host,
+                port: params.port,
+                useTLS: params.useTLS
+            )
             let pass = params.oauthToken.hasPrefix("oauth:") ? params.oauthToken : "oauth:\(params.oauthToken)"
             try await conn.send("PASS \(pass)")
             try await conn.send("NICK \(params.login)")
@@ -252,9 +312,18 @@ public actor TwitchBridge {
         let jitter = Double.random(in: -jitterRange...jitterRange)
         return max(0.5, capped + jitter)
     }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "127.0.0.1", "::1", "localhost": return true
+        default: return false
+        }
+    }
 }
 
-/// Minimal line-oriented TCP client for Twitch IRC (no TLS — Twitch allows 6667 cleartext).
+/// Minimal line-oriented Twitch IRC client. Production calls always set up certificate-
+/// validated TLS before the streams are opened; plaintext exists only for the internal,
+/// loopback-restricted state-machine test helper above.
 actor TwitchIRCConnection {
     private let input: InputStream
     private let output: OutputStream
@@ -265,13 +334,47 @@ actor TwitchIRCConnection {
         self.output = output
     }
 
-    static func connect(host: String, port: Int) async throws -> TwitchIRCConnection {
+    static func connect(host: String, port: Int, useTLS: Bool) async throws -> TwitchIRCConnection {
         var readStream: Unmanaged<CFReadStream>?
         var writeStream: Unmanaged<CFWriteStream>?
         CFStreamCreatePairWithSocketToHost(nil, host as CFString, UInt32(port), &readStream, &writeStream)
-        guard let input = readStream?.takeRetainedValue() as InputStream?,
-              let output = writeStream?.takeRetainedValue() as OutputStream?
+        guard let cfInput = readStream?.takeRetainedValue(),
+              let cfOutput = writeStream?.takeRetainedValue()
         else {
+            throw TwitchIRCError.streamCreateFailed
+        }
+
+        if useTLS {
+            let sslSettings = [
+                kCFStreamSSLPeerName as String: host,
+                kCFStreamSSLValidatesCertificateChain as String: true,
+            ] as CFDictionary
+            let sslSettingsKey = CFStreamPropertyKey(kCFStreamPropertySSLSettings)
+            let securityLevelKey = CFStreamPropertyKey(kCFStreamPropertySocketSecurityLevel)
+            guard CFReadStreamSetProperty(cfInput, sslSettingsKey, sslSettings),
+                  CFWriteStreamSetProperty(cfOutput, sslSettingsKey, sslSettings),
+                  CFReadStreamSetProperty(
+                      cfInput,
+                      securityLevelKey,
+                      kCFStreamSocketSecurityLevelNegotiatedSSL
+                  ),
+                  CFWriteStreamSetProperty(
+                      cfOutput,
+                      securityLevelKey,
+                      kCFStreamSocketSecurityLevelNegotiatedSSL
+                  )
+            else {
+                CFReadStreamClose(cfInput)
+                CFWriteStreamClose(cfOutput)
+                throw TwitchIRCError.tlsConfigurationFailed
+            }
+        }
+
+        guard let input = cfInput as InputStream?,
+              let output = cfOutput as OutputStream?
+        else {
+            CFReadStreamClose(cfInput)
+            CFWriteStreamClose(cfOutput)
             throw TwitchIRCError.streamCreateFailed
         }
         input.open()
@@ -334,6 +437,7 @@ actor TwitchIRCConnection {
 
 enum TwitchIRCError: Error, LocalizedError, Sendable {
     case streamCreateFailed
+    case tlsConfigurationFailed
     case streamOpenFailed
     case encodeFailed
     case writeFailed
@@ -342,6 +446,7 @@ enum TwitchIRCError: Error, LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .streamCreateFailed: return "Twitch IRC stream create failed"
+        case .tlsConfigurationFailed: return "Twitch IRC TLS configuration failed"
         case .streamOpenFailed: return "Twitch IRC stream open failed"
         case .encodeFailed: return "Twitch IRC encode failed"
         case .writeFailed: return "Twitch IRC write failed"

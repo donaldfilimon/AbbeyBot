@@ -73,12 +73,92 @@ struct TwitchEventSubHandlerTests {
         ) == .notificationAcknowledged(subscriptionType: "channel.chat.message"))
     }
 
-    @Test func otherNotificationTypesIgnoreBodyAndStayLogOnly() {
+    @Test func unknownNotificationTypesIgnoreBodyAndStayLogOnly() {
+        #expect(TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "channel.raid",
+            subscriptionStatus: "enabled",
+            body: Self.chatMessageBody
+        ) == .notificationAcknowledged(subscriptionType: "channel.raid"))
+    }
+
+    @Test func followNotificationBecomesChannelSocialEvent() {
+        let body = Data("""
+        {
+          "event": {
+            "broadcaster_user_login": "somechannel",
+            "user_login": "newfollower",
+            "followed_at": "2026-07-31T12:00:00Z"
+          }
+        }
+        """.utf8)
         #expect(TwitchEventSubHandler.handle(
             messageType: "notification",
             subscriptionType: "channel.follow",
             subscriptionStatus: "enabled",
-            body: Self.chatMessageBody
+            body: body
+        ) == .notificationChannelSocial(event: .init(
+            kind: "channel.follow",
+            broadcasterLogin: "somechannel",
+            actorLogin: "newfollower",
+            detail: "followed"
+        )))
+    }
+
+    @Test func subscribeNotificationBecomesChannelSocialEvent() {
+        let body = Data("""
+        {
+          "event": {
+            "broadcaster_user_login": "somechannel",
+            "user_login": "subscriber",
+            "tier": "2000",
+            "is_gift": false
+          }
+        }
+        """.utf8)
+        #expect(TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "channel.subscribe",
+            subscriptionStatus: "enabled",
+            body: body
+        ) == .notificationChannelSocial(event: .init(
+            kind: "channel.subscribe",
+            broadcasterLogin: "somechannel",
+            actorLogin: "subscriber",
+            detail: "subscribed tier=2000"
+        )))
+    }
+
+    @Test func cheerNotificationBecomesChannelSocialEvent() {
+        let body = Data("""
+        {
+          "event": {
+            "broadcaster_user_login": "somechannel",
+            "user_login": "cheerer",
+            "bits": 250,
+            "message": "great stream"
+          }
+        }
+        """.utf8)
+        #expect(TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "channel.cheer",
+            subscriptionStatus: "enabled",
+            body: body
+        ) == .notificationChannelSocial(event: .init(
+            kind: "channel.cheer",
+            broadcasterLogin: "somechannel",
+            actorLogin: "cheerer",
+            detail: "cheered bits=250 great stream"
+        )))
+    }
+
+    @Test func malformedChannelSocialPayloadFallsBackToAcknowledged() {
+        #expect(TwitchEventSubHandler.handle(
+            messageType: "notification",
+            subscriptionType: "channel.follow",
+            subscriptionStatus: "enabled",
+            body: Data("{\"event\": {\"user_login\": \"viewer\"}}".utf8)
         ) == .notificationAcknowledged(subscriptionType: "channel.follow"))
     }
 
@@ -181,9 +261,15 @@ struct TwitchEventSubHandlerTests {
         ) == .ignored(messageType: "something_new", subscriptionType: "channel.update"))
     }
 
-    @Test func logLineMentionsNoProductSideEffectForFollowNotifications() {
-        let line = TwitchEventSubHandler.logLine(for: .notificationAcknowledged(subscriptionType: "channel.follow"))
+    @Test func channelSocialLogLineNamesEventActorAndBroadcaster() {
+        let line = TwitchEventSubHandler.logLine(for: .notificationChannelSocial(event: .init(
+            kind: "channel.follow",
+            broadcasterLogin: "somechannel",
+            actorLogin: "newfollower",
+            detail: "followed"
+        )))
         #expect(line.contains("channel.follow"))
-        #expect(line.contains("no product side-effect"))
+        #expect(line.contains("somechannel"))
+        #expect(line.contains("newfollower"))
     }
 }

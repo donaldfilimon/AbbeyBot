@@ -1,3 +1,4 @@
+import AbbeyCore
 import Foundation
 
 /// Query-string construction for AbbeyServer's list endpoints, kept separate from
@@ -8,11 +9,21 @@ import Foundation
 enum SyncQuery {
     static let maxLimit = 500
 
-    static func listItems(limit: Int, since: Date?) -> [URLQueryItem] {
+    static func listItems(limit: Int, cursor: SyncPullCursor?) -> [URLQueryItem] {
         var items = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), maxLimit)))]
-        if let since {
-            items.append(URLQueryItem(name: "since", value: String(since.timeIntervalSince1970)))
+        if let cursor {
+            items.append(URLQueryItem(
+                name: SyncPullCursorWire.timeQuery,
+                value: String(cursor.changedAt.timeIntervalSince1970)
+            ))
+            if let stableID = cursor.stableID {
+                items.append(URLQueryItem(name: SyncPullCursorWire.idQuery, value: stableID))
+            }
         }
         return items
+    }
+
+    static func listItems(limit: Int, since: Date?) -> [URLQueryItem] {
+        listItems(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) })
     }
 }

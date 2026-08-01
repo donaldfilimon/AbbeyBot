@@ -77,49 +77,25 @@ struct AbbeyBotApp: App {
             schema: schema,
             isStoredInMemoryOnly: false
         )
+        let fallback = ModelConfiguration(isStoredInMemoryOnly: true)
         do {
-            let container = try ModelContainer(for: schema, configurations: [configuration])
-            return (container, false)
-        } catch {
-            // Lightweight migration cannot rewrite attribute types (e.g. EquityIdea.factorBreakdown
-            // Binary Data → Codable). Move the on-disk store aside (not delete — keeps it available
-            // for manual recovery/inspection) and retry with a fresh store before degrading.
-            NSLog("AbbeyBot: persistent store open failed (%@); backing up %@",
-                  error.localizedDescription, configuration.url.path)
-            Self.backUpStoreFiles(at: configuration.url)
-            do {
-                let container = try ModelContainer(for: schema, configurations: [configuration])
-                return (container, false)
-            } catch {
-                let fallback = ModelConfiguration(isStoredInMemoryOnly: true)
-                do {
-                    let container = try ModelContainer(for: schema, configurations: [fallback])
-                    return (container, true)
-                } catch {
-                    fatalError("AbbeyBot: could not construct any ModelContainer: \(error)")
+            let result = try ModelContainerBootstrap<ModelContainer>.make(
+                persistent: {
+                    try ModelContainer(for: schema, configurations: [configuration])
+                },
+                inMemory: {
+                    try ModelContainer(for: schema, configurations: [fallback])
                 }
+            )
+            if let persistentError = result.persistentErrorDescription {
+                NSLog(
+                    "AbbeyBot: persistent store open failed (%@); original store left untouched; using in-memory degraded mode",
+                    persistentError
+                )
             }
-        }
-    }
-
-    /// Renames the SQLite store and its `-wal`/`-shm` sidecars aside (timestamped `.bak-<epoch>`
-    /// suffix) so SwiftData can recreate a fresh schema, without discarding the old data — it stays
-    /// on disk next to the live store for manual recovery/inspection.
-    private static func backUpStoreFiles(at url: URL) {
-        let fm = FileManager.default
-        let suffix = ".bak-\(Int(Date().timeIntervalSince1970))"
-        let candidates = [
-            url,
-            URL(fileURLWithPath: url.path + "-wal"),
-            URL(fileURLWithPath: url.path + "-shm")
-        ]
-        for file in candidates where fm.fileExists(atPath: file.path) {
-            let backupURL = URL(fileURLWithPath: file.path + suffix)
-            do {
-                try fm.moveItem(at: file, to: backupURL)
-            } catch {
-                NSLog("AbbeyBot: failed to back up store file %@: %@", file.path, error.localizedDescription)
-            }
+            return (result.container, result.degraded)
+        } catch {
+            fatalError("AbbeyBot: could not construct any ModelContainer: \(error)")
         }
     }
 }

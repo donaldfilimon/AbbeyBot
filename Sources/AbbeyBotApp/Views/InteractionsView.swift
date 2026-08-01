@@ -3,7 +3,15 @@ import SwiftUI
 import SwiftData
 
 struct InteractionsView: View {
-    @Query(sort: \InteractionLog.createdAt, order: .reverse) private var interactions: [InteractionLog]
+    @Query private var interactions: [InteractionLog]
+
+    init() {
+        var descriptor = FetchDescriptor<InteractionLog>(
+            sortBy: [SortDescriptor(\InteractionLog.createdAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 500
+        _interactions = Query(descriptor)
+    }
 
     var body: some View {
         Group {
@@ -39,5 +47,6 @@ struct InteractionsView: View {
             }
         }
         .navigationTitle("Interactions")
+        .navigationSubtitle("Showing the 500 most recent interaction records")
     }
 }

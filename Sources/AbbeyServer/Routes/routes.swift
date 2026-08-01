@@ -91,14 +91,50 @@ private func clampedLimit(_ req: Request, default defaultLimit: Int = 100, max m
     return min(max(raw, 1), maxLimit)
 }
 
-/// Incremental-sync cursor: `?since=<unix epoch seconds>`. Absent/unparseable → nil (full scan, existing behavior).
-private func sinceParam(_ req: Request) -> Date? {
-    guard let raw = req.query[Double.self, at: "since"] else { return nil }
-    return Date(timeIntervalSince1970: raw)
+/// Compound incremental cursor. `after` is meaningful only with `since`; legacy clients
+/// that send only `since` retain timestamp-only strict-`>` behavior.
+private func syncCursorParam(_ req: Request) -> SyncPullCursor? {
+    guard let raw = req.query[Double.self, at: SyncPullCursorWire.timeQuery], raw >= 0 else {
+        return nil
+    }
+    return SyncPullCursor(
+        changedAt: Date(timeIntervalSince1970: raw),
+        stableID: req.query[String.self, at: SyncPullCursorWire.idQuery]
+    )
+}
+
+private func latestChange(_ original: Date?, _ deletedAt: Date?) -> Date? {
+    [original, deletedAt].compactMap { $0 }.max()
+}
+
+/// Preserve the public JSON-array body while publishing a full-precision server cursor in
+/// headers. Sync clients consume the headers; the SPA and existing callers ignore them.
+private func syncListResponse<T: Content>(
+    _ rows: [T],
+    boundary: SyncPullCursor?,
+    highWatermark: Date
+) throws -> Response {
+    let response = Response(status: .ok)
+    try response.content.encode(rows)
+    response.headers.replaceOrAdd(
+        name: SyncPullCursorWire.highWatermarkHeader,
+        value: String(highWatermark.timeIntervalSince1970)
+    )
+    if let boundary {
+        response.headers.replaceOrAdd(
+            name: SyncPullCursorWire.timeHeader,
+            value: String(boundary.changedAt.timeIntervalSince1970)
+        )
+        if let stableID = boundary.stableID {
+            response.headers.replaceOrAdd(name: SyncPullCursorWire.idHeader, value: stableID)
+        }
+    }
+    return response
 }
 
 func routes(_ app: Application) throws {
     TwitchEventSubRoutes.register(on: app)
+    SocialRoutes.register(on: app)
 
     app.get("health") { req async -> HealthDTO in
         let runtime = req.application.botRuntime
@@ -114,11 +150,13 @@ func routes(_ app: Application) throws {
         return try await req.fileio.asyncStreamFile(at: indexPath)
     }
 
-    app.get("api", "metrics") { req async -> MetricsDTO in
-        await req.application.botRuntime.metricsSnapshot()
+    app.get("api", "metrics") { req async throws -> MetricsDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return await req.application.botRuntime.metricsSnapshot()
     }
 
     app.get("api", "status") { req async throws -> StatusDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
@@ -149,14 +187,21 @@ func routes(_ app: Application) throws {
         }
         let messageId = body.discordMessageId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedId = (messageId?.isEmpty == false) ? messageId! : UUID().uuidString
-        let ingested = await req.application.botRuntime.ingestMessage(
+        let outcome = await req.application.botRuntime.ingestMessageOutcome(
             content: content,
             channelId: body.channelId.isEmpty ? "api" : body.channelId,
             guildId: body.guildId.isEmpty ? "api" : body.guildId,
             authorId: body.authorId.isEmpty ? "api" : body.authorId,
             discordMessageId: resolvedId
         )
-        return IngestResponseDTO(ok: true, discordMessageId: resolvedId, duplicate: !ingested)
+        switch outcome {
+        case .inserted:
+            return IngestResponseDTO(ok: true, discordMessageId: resolvedId, duplicate: false)
+        case .duplicate:
+            return IngestResponseDTO(ok: true, discordMessageId: resolvedId, duplicate: true)
+        case .failed:
+            throw Abort(.serviceUnavailable, reason: "message persistence failed; retry this request")
+        }
     }
 
     // Keyed shared-state reads/writes for the desktop app's sync client. Distinct from
@@ -290,37 +335,80 @@ func routes(_ app: Application) throws {
         return try await SyncStatusRepository.current(on: req.db)
     }
 
-    app.get("api", "users") { req async throws -> [UserMemory] in
+    app.get("api", "users") { req async throws -> Response in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await MemoryRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
+        let highWatermark = Date()
+        let cursor = syncCursorParam(req)
+        let rows = try await MemoryRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
+        let boundary = rows.last.flatMap { row in
+            row.updatedAt.map { SyncPullCursor(changedAt: $0, stableID: row.compositeKey) }
+        }
+        return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "channels") { req async throws -> [ChannelContext] in
+    app.get("api", "channels") { req async throws -> Response in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await ChannelRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
+        let highWatermark = Date()
+        let cursor = syncCursorParam(req)
+        let rows = try await ChannelRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
+        let boundary = rows.last.flatMap { row in
+            row.updatedAt.map { SyncPullCursor(changedAt: $0, stableID: row.compositeKey) }
+        }
+        return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "messages") { req async throws -> [GuildMessage] in
+    app.get("api", "messages") { req async throws -> Response in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await MessageRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
+        let highWatermark = Date()
+        let cursor = syncCursorParam(req)
+        let rows = try await MessageRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
+        let boundary = rows.last.flatMap { row in
+            latestChange(row.createdAt, row.deletedAt).map {
+                SyncPullCursor(changedAt: $0, stableID: row.discordMessageId)
+            }
+        }
+        return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "reputation") { req async throws -> [ReputationEvent] in
+    app.get("api", "reputation") { req async throws -> Response in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await ReputationRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
+        let highWatermark = Date()
+        let cursor = syncCursorParam(req)
+        let rows = try await ReputationRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
+        let boundary: SyncPullCursor? = rows.last.flatMap { row -> SyncPullCursor? in
+            guard let id = row.id, let changedAt = latestChange(row.createdAt, row.deletedAt) else { return nil }
+            return SyncPullCursor(changedAt: changedAt, stableID: id.uuidString)
+        }
+        return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "interactions") { req async throws -> [InteractionLog] in
+    app.get("api", "interactions") { req async throws -> Response in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await InteractionRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
+        let highWatermark = Date()
+        let cursor = syncCursorParam(req)
+        let rows = try await InteractionRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
+        let boundary: SyncPullCursor? = rows.last.flatMap { row -> SyncPullCursor? in
+            guard let id = row.id, let changedAt = latestChange(row.createdAt, row.deletedAt) else { return nil }
+            return SyncPullCursor(changedAt: changedAt, stableID: id.uuidString)
+        }
+        return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "equity") { req async throws -> [EquityIdea] in
+    app.get("api", "equity") { req async throws -> Response in
         try AbbeyAPIAuth.requireTokenIfConfigured(req)
-        return try await EquityRepository.recent(limit: clampedLimit(req), since: sinceParam(req), on: req.db)
+        let highWatermark = Date()
+        let cursor = syncCursorParam(req)
+        let rows = try await EquityRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
+        let boundary = rows.last.flatMap { row in
+            latestChange(row.generatedAt, row.deletedAt).map {
+                SyncPullCursor(changedAt: $0, stableID: row.symbol)
+            }
+        }
+        return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
     app.get { req async throws -> View in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
