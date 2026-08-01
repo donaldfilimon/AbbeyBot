@@ -103,6 +103,12 @@ private struct DiscordUntrackedVoiceLeaveOperation: Sendable {
     let signal: DiscordVoiceLeaveSignal
 }
 
+private struct DiscordDetachedGatewayState: Sendable {
+    let gateway: (any DiscordGatewayDriver)?
+    let trackedLeaveSignal: DiscordVoiceLeaveSignal?
+    let untrackedLeaveSignal: DiscordVoiceLeaveSignal?
+}
+
 public enum DiscordConnectionState: String, Sendable {
     case disconnected
     case connecting
@@ -198,7 +204,7 @@ public actor DiscordBridge {
     public private(set) var voiceChannelId: String?
     public private(set) var voiceGuildId: String?
 
-    private var gateway: BotGatewayManager?
+    private var gateway: (any DiscordGatewayDriver)?
     private var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
     private var voiceGatewayHandshake = VoiceGatewayHandshake()
     private var voiceHandshakeDeadlineTask: Task<Void, Never>?
@@ -210,6 +216,7 @@ public actor DiscordBridge {
     private var lifecycle = DiscordGatewayLifecycle()
     private let voiceHandshakeTimeout: Duration
     private let voiceHandshakeSleep: @Sendable (Duration) async throws -> Void
+    private let gatewayFactory: DiscordGatewayDriverFactory
     private let logger = Logger(label: "AbbeyBot.DiscordBridge")
 
     public init() {
@@ -217,14 +224,17 @@ public actor DiscordBridge {
         self.voiceHandshakeSleep = { duration in
             try await Task.sleep(for: duration)
         }
+        self.gatewayFactory = DiscordGatewayDrivers.production
     }
 
     init(
         voiceHandshakeTimeout: Duration,
-        voiceHandshakeSleep: @escaping @Sendable (Duration) async throws -> Void
+        voiceHandshakeSleep: @escaping @Sendable (Duration) async throws -> Void,
+        gatewayFactory: @escaping DiscordGatewayDriverFactory = DiscordGatewayDrivers.production
     ) {
         self.voiceHandshakeTimeout = max(.milliseconds(1), voiceHandshakeTimeout)
         self.voiceHandshakeSleep = voiceHandshakeSleep
+        self.gatewayFactory = gatewayFactory
     }
 
     public var client: (any DiscordClient)? {
@@ -257,62 +267,49 @@ public actor DiscordBridge {
         }
         let generation = lifecycle.beginConnecting()
 
-        let bot = await BotGatewayManager(
-            token: token,
-            presence: .init(
-                activities: [.init(name: presenceActivityName, type: .listening)],
-                status: .online,
-                afk: false
-            ),
-            intents: [
-                .guildMessages,
-                .messageContent,
-                .guildMembers,
-                .directMessages,
-                .guildMessageReactions,
-                .guildVoiceStates
-            ]
+        let driver = await gatewayFactory(
+            .init(token: token, presenceActivityName: presenceActivityName)
         )
-        self.gateway = bot
+        guard lifecycle.isCurrent(generation), state == .connecting else {
+            await driver.disconnect()
+            return
+        }
+        self.gateway = driver
 
         eventTask = Task { [weak self] in
-            for await event in await bot.events {
-                guard !Task.isCancelled, let self else { return }
-                await self.handleGatewayEvent(event, hooks: hooks, generation: generation)
+            do {
+                for try await input in await driver.makeEvents() {
+                    guard !Task.isCancelled, let self else { return }
+                    switch input {
+                    case .gateway(let event):
+                        await self.handleGatewayEvent(event, hooks: hooks, generation: generation)
+                    case .barrier(let barrier):
+                        await barrier.resolve()
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                await self?.noteEventStreamEnded(generation: generation)
+            } catch {
+                guard !Task.isCancelled else { return }
+                await self?.noteEventStreamFailed(generation: generation)
             }
-            guard !Task.isCancelled else { return }
-            await self?.noteEventStreamEnded(generation: generation)
         }
 
-        await bot.connect()
+        await driver.connect()
     }
 
     public func disconnect() async {
+        let generation = lifecycle.generation
         // Keep consuming Gateway events while the bounded voice-leave barrier
         // waits for Discord's self Voice State Update acknowledgement.
         if let guildId = voiceGuildId ?? voiceGatewayHandshake.activeGuildID {
             _ = await leaveVoiceAndWaitForAcknowledgement(guildId: guildId)
         }
-        let untrackedLeaveSignal = untrackedVoiceLeaveOperation?.signal
-        untrackedVoiceLeaveOperation = nil
-        lifecycle.disconnect()
-        eventTask?.cancel()
-        eventTask = nil
-        voiceHandshakeDeadlineTask?.cancel()
-        voiceHandshakeDeadlineTask = nil
-        voiceLeaveSendTask?.cancel()
-        voiceLeaveSendTask = nil
-        await gateway?.disconnect()
-        gateway = nil
-        botUserId = nil
-        voiceChannelId = nil
-        voiceGuildId = nil
-        voiceGatewayCredentials = nil
-        voiceGatewayHandshake.reset()
-        await resolveVoiceLeaveOperation(.gatewayClosed)
-        if let untrackedLeaveSignal {
-            await untrackedLeaveSignal.resolve(.gatewayClosed)
-        }
+        // A voice timeout may have closed this epoch and allowed a replacement
+        // connection to start while this leave waiter was suspended.
+        guard lifecycle.isCurrent(generation) else { return }
+        let detached = detachGatewayState(disconnectLifecycle: true)
+        await finishGatewayTeardown(detached, completion: .gatewayClosed)
     }
 
     /// Appear in a voice channel via gateway `Voice State Update` (self-mute + self-deaf).
@@ -486,34 +483,52 @@ extension DiscordBridge {
 
     private func noteEventStreamEnded(generation: DiscordGatewayLifecycle.Generation) async {
         guard lifecycle.eventStreamEnded(generation: generation) else { return }
-        voiceHandshakeDeadlineTask?.cancel()
-        voiceHandshakeDeadlineTask = nil
-        await resolveVoiceLeaveOperation(.gatewayClosed)
-        await resolveUntrackedVoiceLeaveOperation(.gatewayClosed)
-        botUserId = nil
-        voiceChannelId = nil
-        voiceGuildId = nil
-        voiceGatewayCredentials = nil
-        voiceGatewayHandshake.reset()
-        gateway = nil
-        eventTask = nil
+        let detached = detachGatewayState(disconnectLifecycle: false)
+        await finishGatewayTeardown(detached, completion: .gatewayClosed)
         logger.error("Discord bridge failure: \(DiscordGatewayLifecycle.streamEndedError)")
     }
 
     private func noteEventStreamFailed(generation: DiscordGatewayLifecycle.Generation) async {
         guard lifecycle.eventStreamFailed(generation: generation) else { return }
+        let detached = detachGatewayState(disconnectLifecycle: false)
+        await finishGatewayTeardown(detached, completion: .gatewayClosed)
+        logger.error("Discord bridge failure: \(DiscordGatewayLifecycle.streamFailedError)")
+    }
+
+    private func detachGatewayState(
+        disconnectLifecycle: Bool
+    ) -> DiscordDetachedGatewayState {
+        if disconnectLifecycle {
+            lifecycle.disconnect()
+        }
         voiceHandshakeDeadlineTask?.cancel()
         voiceHandshakeDeadlineTask = nil
-        await resolveVoiceLeaveOperation(.gatewayClosed)
-        await resolveUntrackedVoiceLeaveOperation(.gatewayClosed)
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
+        eventTask?.cancel()
+        eventTask = nil
+        let detached = DiscordDetachedGatewayState(
+            gateway: gateway,
+            trackedLeaveSignal: voiceLeaveCoordinator.completeCurrent(),
+            untrackedLeaveSignal: untrackedVoiceLeaveOperation?.signal
+        )
+        gateway = nil
+        untrackedVoiceLeaveOperation = nil
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
         voiceGatewayCredentials = nil
         voiceGatewayHandshake.reset()
-        gateway = nil
-        eventTask = nil
-        logger.error("Discord bridge failure: \(DiscordGatewayLifecycle.streamFailedError)")
+        return detached
+    }
+
+    private func finishGatewayTeardown(
+        _ detached: DiscordDetachedGatewayState,
+        completion: DiscordVoiceLeaveCompletion
+    ) async {
+        await detached.gateway?.disconnect()
+        await detached.trackedLeaveSignal?.resolve(completion)
+        await detached.untrackedLeaveSignal?.resolve(completion)
     }
 
     /// Begins correlation before Gateway opcode 4 is sent.
@@ -572,7 +587,7 @@ extension DiscordBridge {
     }
 
     private func startUntrackedVoiceLeave(
-        gateway: BotGatewayManager,
+        gateway: any DiscordGatewayDriver,
         guildID: String
     ) -> DiscordVoiceLeaveSignal {
         nextUntrackedVoiceLeaveID &+= 1
@@ -722,23 +737,6 @@ extension DiscordBridge {
             voiceChannelId = nil
         }
         Task { await signal.resolve(completion) }
-    }
-
-    private func resolveVoiceLeaveOperation(_ completion: DiscordVoiceLeaveCompletion) async {
-        voiceLeaveSendTask?.cancel()
-        voiceLeaveSendTask = nil
-        guard let signal = voiceLeaveCoordinator.completeCurrent() else { return }
-        await signal.resolve(completion)
-    }
-
-    private func resolveUntrackedVoiceLeaveOperation(
-        _ completion: DiscordVoiceLeaveCompletion
-    ) async {
-        guard let operation = untrackedVoiceLeaveOperation else { return }
-        untrackedVoiceLeaveOperation = nil
-        voiceLeaveSendTask?.cancel()
-        voiceLeaveSendTask = nil
-        await operation.signal.resolve(completion)
     }
 
     /// Transfers ephemeral credentials to the internal media controller once.
