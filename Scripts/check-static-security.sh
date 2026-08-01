@@ -36,8 +36,6 @@ echo "======== security: high-confidence secret signatures ========"
 # Report filenames only so a real credential is never echoed into CI logs.
 secret_pattern='(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,})'
 if git grep -IlE "$secret_pattern" -- . \
-  ':(exclude)Tests/**' \
-  ':(exclude)docs/**' \
   ':(exclude)Package.resolved' >/tmp/abbey-secret-files.txt; then
   echo "SECURITY_FAIL: possible committed credential signature(s) in:" >&2
   sed 's/^/  /' /tmp/abbey-secret-files.txt >&2

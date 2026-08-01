@@ -106,8 +106,9 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 - [x] Current dashboard: Biome, 4 Vitest files / 17 tests, production build, and packed-resource
       assertion green.
 - [x] Current static/security hygiene gate green.
-- [ ] Run the updated `Scripts/verify-all.sh`, which now covers static/security, dashboard,
-      all five Swift test bundles, desktop launch, server smoke, and CLI smoke.
+- [x] Updated `Scripts/verify-all.sh` green across static/security, dashboard, all five Swift test
+      bundles, desktop launch, server smoke, and CLI smoke. This supersedes the historical partial
+      and interrupted runs documented below.
 
 ### Institutional memory worth keeping
 

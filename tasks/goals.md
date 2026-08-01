@@ -68,7 +68,7 @@ status: done
   **Lesson for next reader:** a green report from one point in this session does not stay green —
   this file was edited again afterward by another concurrent agent in this same shared tree. The
   gate belongs to the code on disk right now, not to whichever run was quoted most recently.
-- **Full-repo `verify-all.sh` currently unreliable as a gate — not this goal's fault.** A run at
+- **Historical transient full-gate failure, now resolved.** A run at
   02:00 hit `error: cannot find 'SyncTransportPolicy' in scope` in
   `Sources/AbbeyCore/AppConfig+Validation.swift` during the release build step; that file and its
   call site belong to unrelated concurrent work (new `Sources/AbbeyCore/Sync/SyncTransportPolicy.swift`,
@@ -78,10 +78,10 @@ status: done
   background command that ran this used `cmd > log; echo "EXIT:$?" >> log` — the reported
   background-task "exit code 0" reflects the trailing `echo`, always 0, **not** `verify-all.sh`'s
   real result (which was 1). The real result only lives in the log's own `EXIT:` line. Use `&&` or
-  check the in-log `EXIT:` marker, never the wrapper task's reported exit code.
-- **Final gate for this goal, verified against the code on disk after the `.ignoreExisting()` fix
-  (not a full-repo `verify-all.sh`, per the note above — that gate is currently unreliable for
-  reasons unrelated to this goal):** isolated `swift build --target AbbeyServerKit` exit 0;
+  check the in-log `EXIT:` marker, never the wrapper task's reported exit code. A later combined
+  `Scripts/verify-all.sh` run completed green and is the current release authority.
+- **Historical migration-scoped gate, superseded by the later combined green gate:** isolated
+  `swift build --target AbbeyServerKit` exit 0;
   `TwitchEventSubMigrationUpgradeTests` 4/4 green; `Scripts/run-server-smoke.sh` green end-to-end
   including the migration boot path and live `/api/ingest` + list-API + tombstone assertions;
   `swift test --filter 'AbbeyCoreTests|AbbeyCLITests|AbbeyServerKitTests|AbbeyServerTests'` — 255
