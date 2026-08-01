@@ -20,6 +20,13 @@ public enum IncrementalSyncCursor {
         let effectiveLimit = min(max(limit, 1), 500)
         let safeUpperBound = serverHighWatermark ?? attemptStartedAt
         guard rowCount >= effectiveLimit else {
+            // Short page: no stable ID on this boundary — a bare `changedAt` degrades this
+            // stream to strict `timestamp > since` until the next full page re-establishes a
+            // tie-breaker. Acceptable: `safeUpperBound` is captured once per request essentially
+            // "now" relative to the read, while every row's `changedAt` was set at its own,
+            // necessarily earlier, write — an exact collision would need a row to land in that
+            // same instant, which sub-millisecond `Date` precision makes vanishingly unlikely in
+            // practice even though both timestamps share the server's clock domain.
             return SyncPullCursor(changedAt: safeUpperBound)
         }
         guard let serverBoundary else { return previous }

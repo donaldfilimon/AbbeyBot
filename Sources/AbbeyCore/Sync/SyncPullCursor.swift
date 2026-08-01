@@ -28,13 +28,13 @@ public enum SyncPullEntity: String, CaseIterable, Codable, Sendable {
 
 /// Independently advancing cursors prevent one saturated entity stream from forcing all
 /// other endpoints to refetch the same rows.
+///
+/// Backed by one dictionary rather than six optional fields so a seventh entity is one
+/// `SyncPullEntity` case, not five separate edits. `SyncPullEntity`'s `String` raw values match
+/// the wire/file keys the six-field struct used to synthesize, so existing persisted cursor
+/// files (`SyncCursorFileStore`, `SyncCursorStore`) decode unchanged.
 public struct SyncPullCursorSet: Codable, Equatable, Sendable {
-    public var users: SyncPullCursor?
-    public var channels: SyncPullCursor?
-    public var messages: SyncPullCursor?
-    public var reputation: SyncPullCursor?
-    public var interactions: SyncPullCursor?
-    public var equity: SyncPullCursor?
+    private var values: [SyncPullEntity: SyncPullCursor]
 
     public init(
         users: SyncPullCursor? = nil,
@@ -44,47 +44,24 @@ public struct SyncPullCursorSet: Codable, Equatable, Sendable {
         interactions: SyncPullCursor? = nil,
         equity: SyncPullCursor? = nil
     ) {
-        self.users = users
-        self.channels = channels
-        self.messages = messages
-        self.reputation = reputation
-        self.interactions = interactions
-        self.equity = equity
+        var values: [SyncPullEntity: SyncPullCursor] = [:]
+        values[.users] = users
+        values[.channels] = channels
+        values[.messages] = messages
+        values[.reputation] = reputation
+        values[.interactions] = interactions
+        values[.equity] = equity
+        self.values = values
     }
 
     public init(legacyTimestamp: Date) {
         let cursor = SyncPullCursor(changedAt: legacyTimestamp)
-        self.init(
-            users: cursor,
-            channels: cursor,
-            messages: cursor,
-            reputation: cursor,
-            interactions: cursor,
-            equity: cursor
-        )
+        self.values = Dictionary(uniqueKeysWithValues: SyncPullEntity.allCases.map { ($0, cursor) })
     }
 
     public subscript(entity: SyncPullEntity) -> SyncPullCursor? {
-        get {
-            switch entity {
-            case .users: users
-            case .channels: channels
-            case .messages: messages
-            case .reputation: reputation
-            case .interactions: interactions
-            case .equity: equity
-            }
-        }
-        set {
-            switch entity {
-            case .users: users = newValue
-            case .channels: channels = newValue
-            case .messages: messages = newValue
-            case .reputation: reputation = newValue
-            case .interactions: interactions = newValue
-            case .equity: equity = newValue
-            }
-        }
+        get { values[entity] }
+        set { values[entity] = newValue }
     }
 
     public var earliestChangedAt: Date? {
