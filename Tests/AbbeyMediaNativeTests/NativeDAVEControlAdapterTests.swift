@@ -5,6 +5,16 @@ import Testing
 
 @Suite("Native DAVE control adapter")
 struct NativeDAVEControlAdapterTests {
+    @Test("native factory creates one fail-closed component bundle per join")
+    func nativeFactoryBundle() {
+        let factory = DiscordVoiceNativeControlSessionFactory()
+        let components = factory.makeSessionComponents()
+
+        #expect(factory.mediaAdapterAvailability == .unavailable)
+        #expect(components.gateway is DiscordVoiceGatewaySession)
+        #expect(components.udp is DiscordVoiceUDPSessionAdapter)
+    }
+
     @Test("initial bootstrap creates one shared native session and reset destroys access")
     func initialBootstrapAndReset() async throws {
         let adapter = NativeDAVEControlAdapter()
