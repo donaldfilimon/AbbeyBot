@@ -19,9 +19,12 @@ final class AbbeyEngine {
     let personaRouter: ABIRouter
     let inferenceRouter: InferenceRouter
     var equityEngine = EquityResearchEngine()
+    /// Local WDBX segment store (`~/.abbey/wdbx/`). Optional if init fails.
+    let wdbxStore: WDBXStore?
 
     private(set) var lastEvent: AbbeyEvent?
     private(set) var lastDQNAction: Int?
+    private(set) var lastStrategy: StrategyAction = .answer
     private(set) var discordState: DiscordConnectionState = .disconnected
     private(set) var discordLastError: String?
     private(set) var discordBotUserId: String?
@@ -49,10 +52,13 @@ final class AbbeyEngine {
         self.socialBrain = SocialBrain(modelContainer: modelContainer, eventBus: bus, decay: { config.reputationDecay })
         let checkpointURL = try? DQNCheckpointStore.defaultURL()
         let journalURL = try? ExperienceJournalStore.defaultURL()
+        let wdbxFacade = try? WDBXMemoryFacade.default()
+        self.wdbxStore = try? WDBXStore()
         self.dqnAgent = DQNAgent(
-            topology: [8, 32, 16, 3],
+            topology: DQNAgent.defaultTopology,
             checkpointURL: checkpointURL,
-            experienceJournalURL: journalURL
+            experienceJournalURL: journalURL,
+            wdbxFacade: wdbxFacade
         )
         self.scheduler = AbbeyScheduler(
             modelContainer: modelContainer,
@@ -98,30 +104,24 @@ final class AbbeyEngine {
                     guard let self else { return }
                     let botNick = (await self.twitchBridge.loginNick ?? "").lowercased()
                     if !botNick.isEmpty, msg.login == botNick { return }
-                    await self.ingestMessage(
+                    let outcome = await self.ingestMessage(
                         content: msg.text,
                         channelId: msg.channel,
                         guildId: "twitch",
                         authorId: msg.login,
                         discordMessageId: "twitch-\(UUID().uuidString)"
                     )
+                    guard case .inserted(let strategy) = outcome else { return }
                     if await self.scheduler.isCoolingDown(userId: msg.login, guildId: "twitch") {
                         return
                     }
-                    let intent = IntentClassifier.classify(msg.text)
-                    let persona = await self.personaRouter.route(intent: intent)
-                    let context = await self.personaContext(
-                        authorId: msg.login,
+                    guard let reply = await self.craftReply(
+                        content: msg.text,
+                        channelId: msg.channel,
                         guildId: "twitch",
-                        channelId: msg.channel
-                    )
-                    let response = await persona.respond(
-                        to: msg.text,
-                        context: context,
-                        inference: self.inferenceRouter
-                    )
-                    let reply = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !reply.isEmpty else { return }
+                        authorId: msg.login,
+                        strategy: strategy
+                    )?.trimmingCharacters(in: .whitespacesAndNewlines), !reply.isEmpty else { return }
                     await self.twitchBridge.sendPrivmsg(channel: msg.channel, text: reply)
                     await self.scheduler.markReplied(userId: msg.login, guildId: "twitch")
                 }
@@ -171,7 +171,11 @@ final class AbbeyEngine {
         let attemptStartedAt = Date()
 
         do {
-            let counts = try await SyncPull.run(into: modelContainer, since: cursor)
+            let counts = try await SyncPull.run(
+                into: modelContainer,
+                since: cursor,
+                attemptStartedAt: attemptStartedAt
+            )
             SyncStatus.shared.recordPullSuccess(
                 users: counts.usersUpserted,
                 channels: counts.channelsUpserted,
@@ -180,12 +184,12 @@ final class AbbeyEngine {
                 interactions: counts.interactionsInserted,
                 equity: counts.equityUpserted
             )
-            cursorStore.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: true)
+            cursorStore.applyPullOutcome(nextCursor: counts.nextCursor, succeeded: true)
             await socialBrain.warmCache()
         } catch {
             print("[sync] pull failed: \(error)")
             SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
-            cursorStore.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: false)
+            cursorStore.applyPullOutcome(nextCursor: nil, succeeded: false)
         }
 
         await reportSyncStatusToServer()
@@ -234,13 +238,14 @@ final class AbbeyEngine {
     }
 
     /// Persist message, run shared ingest scoring, update reputation.
+    @discardableResult
     func ingestMessage(
         content: String,
         channelId: String,
         guildId: String,
         authorId: String,
         discordMessageId: String? = nil
-    ) async {
+    ) async -> MessageIngestOutcome {
         let started = ContinuousClock.now
         let context = ModelContext(modelContainer)
         let message = GuildMessage(
@@ -262,7 +267,18 @@ final class AbbeyEngine {
         if intent == .personaSwitch {
             await personaRouter.setPersona(named: PersonaName.resolve(content))
         }
-        try? context.save()
+        do {
+            try context.save()
+        } catch {
+            logInteraction(
+                commandName: "ingestMessage",
+                userId: authorId,
+                guildId: guildId,
+                succeeded: false,
+                latencyMs: IngestScorer.latencyMilliseconds(since: started)
+            )
+            return .failed
+        }
 
         Task.detached(priority: .utility) {
             await AbbeyServerClient.shared.ingest(
@@ -291,9 +307,13 @@ final class AbbeyEngine {
             authorInteractionCount: authorInteractionCount,
             channelMessageCount: channelActivity,
             dqnAgent: dqnAgent,
-            intent: intent
+            intent: intent,
+            wdbx: wdbxStore,
+            authorId: authorId,
+            channelId: channelId
         )
         lastDQNAction = scored.action
+        lastStrategy = scored.strategy
         await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
 
         logInteraction(
@@ -303,6 +323,7 @@ final class AbbeyEngine {
             succeeded: true,
             latencyMs: IngestScorer.latencyMilliseconds(since: started)
         )
+        return .inserted(strategy: scored.strategy)
     }
 
     func personaContext(authorId: String, guildId: String, channelId: String) async -> PersonaContext {
@@ -317,6 +338,53 @@ final class AbbeyEngine {
         ).first?.facts) ?? []
         let reputation = await socialBrain.reputation(userId: authorId, guildId: guildId)
         return PersonaContext(channelSummary: summary, userFacts: facts, reputation: reputation)
+    }
+
+    private func craftReply(
+        content: String,
+        channelId: String,
+        guildId: String,
+        authorId: String,
+        strategy: StrategyAction
+    ) async -> String? {
+        let intent = IntentClassifier.classify(content)
+        if strategy == .refuse && (intent == .modRequest || intent == .command) {
+            return "I won’t take automated moderation actions from chat. Use a human moderator or `/mod` for advice only."
+        }
+
+        let persona = await personaRouter.route(intent: intent)
+        var context = await personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
+        if strategy == .retrieve, let store = wdbxStore {
+            let reputationBefore = await socialBrain.reputation(userId: authorId, guildId: guildId)
+            let query = SentimentAnalyzer.analyze(
+                text: content,
+                authorReputation: reputationBefore,
+                recentReactionCount: 0,
+                mentionsSomeone: content.contains("@"),
+                isReply: false,
+                timestamp: .now,
+                channelMessageCountInWindow: 0,
+                authorInteractionCount: 0,
+                isDirectMessage: guildId == "DM"
+            )
+            let hits = store.search(
+                query: query,
+                guildId: guildId,
+                channelId: channelId,
+                userId: authorId,
+                limit: 5
+            )
+            let retrieved = hits.compactMap { $0.record.payload["contentPreview"] }
+            if !retrieved.isEmpty {
+                context = PersonaContext(
+                    channelSummary: context.channelSummary,
+                    userFacts: context.userFacts + retrieved,
+                    reputation: context.reputation
+                )
+            }
+        }
+        let directed = strategy.replyDirective(userText: content, retrievedFacts: context.userFacts)
+        return await persona.respond(to: directed, context: context, inference: inferenceRouter).text
     }
 
     func logInteraction(commandName: String, userId: String, guildId: String, succeeded: Bool, latencyMs: Double) {
@@ -495,8 +563,8 @@ final class AbbeyEngine {
     private func makeMessageIngress() -> MessageIngress {
         MessageIngress(
             ingest: { [weak self] content, channelId, guildId, authorId, messageId in
-                guard let self else { return }
-                await self.ingestMessage(
+                guard let self else { return .failed }
+                return await self.ingestMessage(
                     content: content,
                     channelId: channelId,
                     guildId: guildId,
@@ -504,13 +572,15 @@ final class AbbeyEngine {
                     discordMessageId: messageId
                 )
             },
-            craftReply: { [weak self] content, channelId, guildId, authorId in
+            craftReply: { [weak self] content, channelId, guildId, authorId, strategy in
                 guard let self else { return nil }
-                let intent = IntentClassifier.classify(content)
-                let persona = await self.personaRouter.route(intent: intent)
-                let context = await self.personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
-                let response = await persona.respond(to: content, context: context, inference: self.inferenceRouter)
-                return response.text
+                return await self.craftReply(
+                    content: content,
+                    channelId: channelId,
+                    guildId: guildId,
+                    authorId: authorId,
+                    strategy: strategy
+                )
             },
             isCoolingDown: { [weak self] userId, guildId in
                 guard let self else { return false }
@@ -578,6 +648,99 @@ final class AbbeyEngine {
                 let message = await self.performVoice(action, guildId: guildId)
                 await self.refreshDiscordStatus()
                 return message
+            },
+            help: { DiscordSlashLogic.helpText() },
+            status: { [weak self] _, _ in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let persona = await self.personaRouter.currentPersona().name
+                let discord = await self.discordState.rawValue
+                return DiscordCopy.statusReport(
+                    persona: persona,
+                    inference: DiscordSlashLogic.displayInferenceMode(AppConfig.shared.inferenceMode),
+                    discord: discord,
+                    messages: self.metrics.messagesIngestedThisSession,
+                    inferenceCalls: self.metrics.totalInferenceCalls,
+                    inferenceFailures: self.metrics.totalInferenceFailures,
+                    lastInferenceError: self.metrics.lastInferenceFailureMessage ?? "",
+                    industry: AppConfig.shared.industryProfile.rawValue,
+                    equityEnabled: AppConfig.shared.equityModuleEnabled,
+                    dryRun: AppConfig.shared.dryRun
+                )
+            },
+            model: { raw in
+                if let raw, !raw.isEmpty {
+                    guard let mode = DiscordSlashLogic.resolveInferenceMode(raw) else {
+                        return DiscordCopy.modelUnknown
+                    }
+                    AppConfig.shared.inferenceMode = mode
+                    return DiscordCopy.modelSet(DiscordSlashLogic.displayInferenceMode(mode))
+                }
+                return DiscordCopy.modelCurrent(
+                    DiscordSlashLogic.displayInferenceMode(AppConfig.shared.inferenceMode)
+                )
+            },
+            summarize: { [weak self] channelId, guildId, userId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let persona = await self.personaRouter.route(intent: .question)
+                let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+                let prompt = """
+                Summarize this Discord channel memory for an operator. Be concise (≤ 8 bullets). \
+                Call out open questions, tone, and any reputation/facts signals.
+
+                Channel summary:
+                \(context.channelSummary.isEmpty ? "(empty)" : context.channelSummary)
+                """
+                return await persona.respond(to: prompt, context: context, inference: self.inferenceRouter).text
+            },
+            explain: { [weak self] topic, userId, guildId, channelId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let trimmed = topic.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return DiscordCopy.emptyTopic }
+                let persona = await self.personaRouter.route(intent: .question)
+                let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+                let prompt = "Explain clearly for a skilled engineer: \(trimmed)"
+                return await persona.respond(to: prompt, context: context, inference: self.inferenceRouter).text
+            },
+            facts: { [weak self] userId, guildId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let context = ModelContext(self.modelContainer)
+                let key = ReputationMath.cacheKey(userId: userId, guildId: guildId)
+                let facts = (try? context.fetch(
+                    FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
+                ).first?.facts) ?? []
+                return DiscordSlashLogic.formatFacts(userId: userId, facts: facts)
+            },
+            ping: {
+                let start = ContinuousClock.now
+                return DiscordCopy.ping(latencyMs: IngestScorer.latencyMilliseconds(since: start))
+            },
+            equity: { symbol in
+                DiscordSlashLogic.formatEquity(
+                    symbol: symbol,
+                    enabled: AppConfig.shared.equityModuleEnabled
+                )
+            },
+            modAdvice: { [weak self] situation, userId, guildId, channelId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let trimmed = situation.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return DiscordCopy.emptySituation }
+                let persona = await self.personaRouter.route(intent: .modRequest)
+                let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+                let prompt = """
+                Moderation advice only — do not claim you executed kicks, bans, or purges. \
+                Recommend proportionate steps, what to document, and when to escalate.
+
+                Situation:
+                \(trimmed)
+                """
+                return await persona.respond(to: prompt, context: context, inference: self.inferenceRouter).text
+            },
+            industry: {
+                let profile = AppConfig.shared.industryProfile
+                return DiscordCopy.industryProfile(
+                    profile.rawValue,
+                    suffixEmpty: profile.promptSuffix.isEmpty
+                )
             }
         )
     }

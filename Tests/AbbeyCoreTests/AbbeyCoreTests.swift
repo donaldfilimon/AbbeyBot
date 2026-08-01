@@ -200,7 +200,7 @@ struct AbbeyCoreTests {
     }
 
     @Test func commandRegistryNonEmpty() {
-        #expect(CommandRegistry.all.count == 7)
+        #expect(CommandRegistry.all.count == 17)
         #expect(CommandRegistry.all.contains(where: { $0.name == "voice" }))
     }
 
@@ -233,6 +233,7 @@ struct AbbeyCoreTests {
         #expect(await router.route(intent: .greeting).name == "Abbey")
         #expect(await router.route(intent: .smallTalk).name == "Abbey")
         #expect(await router.route(intent: .unknown).name == "Abbey")
+        #expect(await router.currentPersona().name == "Abbey")
         await router.setPersona(named: "aviva")
         #expect(await router.route(intent: .unknown).name == "Aviva")
     }

@@ -4,20 +4,45 @@ import Vapor
 /// Env-gated EventSub auto-subscribe at server boot.
 ///
 /// Off by default. When `ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` and the full env contract is
-/// present, boot fetches an app access token and creates webhook subscriptions for the types
-/// with product side-effects (`channel.chat.message`, `stream.online`, `stream.offline`) via
-/// `TwitchHelixClient`. Any missing/invalid config or Helix failure logs a warning and skips —
-/// it never crashes boot. Claim-honest: this flow is unverified against Twitch's live API;
-/// the `webhook_callback_verification` handshake needs a publicly reachable HTTPS callback
-/// this environment can't provide.
+/// present, boot fetches an app access token and creates webhook subscriptions for chat,
+/// stream lifecycle, follow, subscribe, and cheer events via `TwitchHelixClient`. Missing or
+/// invalid configuration skips the whole flow. A failure for one subscription is logged and
+/// does not prevent later event types from being attempted. Boot never crashes. Claim-honest:
+/// this flow is unverified against Twitch's live API; the `webhook_callback_verification`
+/// handshake needs a publicly reachable HTTPS callback this environment can't provide.
 public enum TwitchEventSubAutoSubscriber {
-    public static let subscriptionVersion = "1"
+    public struct SubscriptionSpec: Equatable, Sendable {
+        public let type: String
+        public let version: String
+        /// Additional Twitch condition key populated with `TWITCH_BOT_USER_ID`.
+        /// Chat uses `user_id`; follow v2 uses `moderator_user_id`.
+        public let botUserConditionKey: String?
 
-    /// Subscriptions created when auto-subscribe is enabled (types with product side-effects).
-    public static let subscriptionSpecs: [(type: String, needsBotUserId: Bool)] = [
-        (TwitchEventSubHandler.chatMessageSubscriptionType, true),
-        (TwitchEventSubHandler.streamOnlineSubscriptionType, false),
-        (TwitchEventSubHandler.streamOfflineSubscriptionType, false)
+        public init(type: String, version: String, botUserConditionKey: String? = nil) {
+            self.type = type
+            self.version = version
+            self.botUserConditionKey = botUserConditionKey
+        }
+
+        public func condition(broadcasterUserId: String, botUserId: String) -> [String: String] {
+            var condition = ["broadcaster_user_id": broadcasterUserId]
+            if let botUserConditionKey {
+                condition[botUserConditionKey] = botUserId
+            }
+            return condition
+        }
+    }
+
+    /// Twitch's EventSub wire contract varies by event type. In particular, `channel.follow`
+    /// is version 2 and requires the moderator user id; subscribe and cheer remain version 1
+    /// with a broadcaster-only condition.
+    public static let subscriptionSpecs: [SubscriptionSpec] = [
+        .init(type: TwitchEventSubHandler.chatMessageSubscriptionType, version: "1", botUserConditionKey: "user_id"),
+        .init(type: TwitchEventSubHandler.streamOnlineSubscriptionType, version: "1"),
+        .init(type: TwitchEventSubHandler.streamOfflineSubscriptionType, version: "1"),
+        .init(type: TwitchEventSubHandler.followSubscriptionType, version: "2", botUserConditionKey: "moderator_user_id"),
+        .init(type: TwitchEventSubHandler.subscribeSubscriptionType, version: "1"),
+        .init(type: TwitchEventSubHandler.cheerSubscriptionType, version: "1"),
     ]
 
     /// Kept for callers that still reference the chat-only constant.
@@ -103,7 +128,7 @@ public enum TwitchEventSubAutoSubscriber {
 
     /// Runs the subscribe flow when configured. Returns whether **all** subscription requests
     /// were accepted by Helix. Never throws; every non-ready path logs and returns false.
-    /// A mid-list Helix failure warns, skips the remaining types, and returns false — boot continues.
+    /// Individual subscription failures are isolated so later event types are still attempted.
     @discardableResult
     public static func subscribeIfConfigured(
         app: Application,
@@ -129,17 +154,26 @@ public enum TwitchEventSubAutoSubscriber {
                 clientId: config.clientId,
                 clientSecret: config.clientSecret
             )
+            let token: String
             do {
-                let token = try await helix.fetchAppAccessToken()
-                for spec in subscriptionSpecs {
-                    var condition = ["broadcaster_user_id": config.broadcasterUserId]
-                    if spec.needsBotUserId {
-                        condition["user_id"] = config.botUserId
-                    }
+                token = try await helix.fetchAppAccessToken()
+            } catch {
+                app.logger.warning(
+                    "Twitch EventSub auto-subscribe token request failed (boot continues): \(OperatorFacingError.message(error))"
+                )
+                return false
+            }
+
+            var allSucceeded = true
+            for spec in subscriptionSpecs {
+                do {
                     try await helix.createSubscription(
                         type: spec.type,
-                        version: subscriptionVersion,
-                        condition: condition,
+                        version: spec.version,
+                        condition: spec.condition(
+                            broadcasterUserId: config.broadcasterUserId,
+                            botUserId: config.botUserId
+                        ),
                         callbackURL: config.callbackURL,
                         webhookSecret: config.webhookSecret,
                         appAccessToken: token
@@ -147,14 +181,14 @@ public enum TwitchEventSubAutoSubscriber {
                     app.logger.info(
                         "Twitch EventSub auto-subscribe: \(spec.type) subscription requested for broadcaster \(config.broadcasterUserId) → \(config.callbackURL)"
                     )
+                } catch {
+                    allSucceeded = false
+                    app.logger.warning(
+                        "Twitch EventSub auto-subscribe: \(spec.type) failed; continuing with remaining types: \(OperatorFacingError.message(error))"
+                    )
                 }
-                return true
-            } catch {
-                app.logger.warning(
-                    "Twitch EventSub auto-subscribe failed (boot continues): \(OperatorFacingError.message(error))"
-                )
-                return false
             }
+            return allSucceeded
         }
     }
 }

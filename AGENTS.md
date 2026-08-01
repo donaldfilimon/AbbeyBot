@@ -57,6 +57,34 @@ CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run s
 3. Optional: Dev guild ID → Register slash commands
 4. Settings operating mode `liveDiscord` + auto-connect optional
 
+### Social APIs (Twitch + multi-network understanding)
+
+| Surface | Shipped |
+|---------|---------|
+| Twitch IRC + EventSub chat/stream | Yes — ingest/reply; HMAC webhook |
+| Twitch follow/subscribe/cheer | Yes — parse + interaction log + soft ingest |
+| Helix users/streams | Client methods (unit-testable; live needs creds) |
+| Social catalog | `GET /api/social/catalog` (+ markdown) |
+| YouTube / X / Bluesky / Mastodon webhooks | `POST /api/social/{platform}/webhook` parsers → ingest (not full live SDKs) |
+
+PubSub won't ship. Live EventSub handshake still needs public HTTPS.
+
+### Slash surface (desktop + server)
+
+| Command | Backend path |
+|---------|----------------|
+| `/ask`, `/explain`, `/summarize` | Active persona + `InferenceRouter` (Foundation Models when `inferenceMode=onDevice`, else remote / deterministic floor) |
+| `/model [ondevice\|remote\|floor]` | `AppConfig.inferenceMode` |
+| `/status` | Persona, Discord state, metrics, industry, equity flag, dry-run |
+| `/rep`, `/facts`, `/remember`, `/forget`, `/context` | Social brain / memory (SwiftData or Fluent) |
+| `/persona` | Abbey / Aviva / Abi |
+| `/mod` | Abi moderation **advice only** (does not kick/ban) |
+| `/equity` | Synthetic `FactorScreen` when equity module enabled — not market data |
+| `/industry`, `/ping`, `/help` | Config / health / command list |
+| `/voice join\|leave` | Gateway **presence** only (no audio) |
+
+Re-register slash commands after upgrade so Discord sees the expanded set.
+
 ## UI surfaces (shipped)
 
 | Surface | What exists |
@@ -135,11 +163,13 @@ Binds the Abbey self-learning system prompt for operators, agents, and implement
 
 Operate as a safe, useful, continuously improving community assistant. Learn from explicit user feedback, moderation outcomes, retrieval success, and testable system signals. Never silently execute generated code, never bypass platform rules, and never treat reinforcement learning rewards as permission to ignore safety constraints.
 
-### Reinforcement learning (strategy only)
+### Reinforcement learning (strategy dispatch — shipped)
 
-`DQNAgent` in AbbeyCore drives strategy selection among allowed actions (answer, clarify, retrieve, refuse, etc.). RL improves routing among those actions; it does **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
+`DQNAgent` topology **`[8, 64, 32, 4]`** selects `StrategyAction`: **answer / clarify / retrieve / refuse**. `IngestScorer.scoreAndLearn` writes an **action-conditioned** reward, non-identical `nextState`, trains a minibatch, and upserts into local WDBX. `craftReply` **routes on `lastStrategy`** (clarify/retrieve prompts, cosine retrieval for `.retrieve`, hard refuse for mod/command + `.refuse`). RL does **not** weaken kick/ban gates.
 
-**Open gap (as of the backprop fix below):** the network's math is now correct, but `DQNAgent.selectAction`'s 3-wide output is currently consumed only for dashboard display (`AbbeyEngine.lastDQNAction`) — nothing routes a real answer/clarify/retrieve/refuse decision through it yet, and `IngestScorer`'s `remember(Experience(...))` call passes a reward independent of the chosen action with `nextState == state`/`done: true` hardcoded, so there is no action-conditioned learning signal even once dispatch exists. Real strategy dispatch is planned as follow-up work, not yet built — don't describe this as shipped until it routes an actual decision.
+**Neural acceleration:** `NeuralMath` / network dots use **Accelerate/vDSP** on Apple platforms (AMX/NEON) — not CUDA.
+
+**Local WDBX:** `~/.abbey/wdbx/` segmented JSONL (`WDBXStore`) + experience journal. **Not** Zig abi WDBX; no throughput claims. Old checkpoints with `[8,32,16,3]` fail topology load and re-init.
 
 ### Phase 1 runtime (shipped)
 
@@ -148,7 +178,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Config validate before startup | `AppConfig.validateForStartup(scope:)` — `.desktop` (GUI) enforces `liveDiscord` token unless dry-run; `.headless` (server/CLI via `configureRuntime`) skips that UserDefaults gate so HTTP can boot without a token. Also: remoteCompatible URL; sync URL http(s)+host; cooldown/decay ranges. |
 | Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge` / `TwitchBridge` skip sockets, log `dry-run: would connect`. |
 | Durable checkpoints | `DQNAgent.save/load` + `DQNCheckpointStore` default `~/.abbey/dqn-checkpoint.json`; `*.bak` before overwrite; load on engine start; save every 100 learn steps with target sync. |
-| Correct backprop + full fan-in | `NeuralNetwork.train()` previously propagated error to hidden layers by summing raw weight *values* (never multiplying by that neuron's delta) and never applied the ReLU derivative anywhere, including the output layer's own gradient — hidden layers received no gradient connected to the loss. Separately, weight vectors were fixed at 8 SIMD lanes regardless of a layer's real fan-in, so layers wider than 8 (this network's actual topology is `[8, 32, 16, 3]`; layers 1 and 2 have fan-in 32 and 16) silently discarded most of their input on every forward pass. Fixed: weight vectors are now sized to each layer's declared fan-in, and backprop computes `delta[j] = (Σᵢ weight[i][j]·delta[i])·relu'(z[j])` at every layer using pre-update weights. Verified with a numerical (finite-difference) gradient check, not just "loss goes down" — see `Tests/AbbeyCoreTests/NeuralNetworkBackpropTests.swift`. Checkpoint format changed (`weights[layer][neuron]` is now a `[Float]` sized to fan-in, not a fixed 8-lane array); a pre-fix checkpoint fails `decodeWeights` validation and is treated like any other unreadable checkpoint (`.corrupt`), not silently reinterpreted. This fixes the network's math; it does **not** make `DQNAgent` drive real action dispatch — see the open gap below. |
+| Correct backprop + full fan-in + Accelerate | Fan-in-correct dense layers + ReLU backprop (see `NeuralNetworkBackpropTests`). Dots via `NeuralMath` / Accelerate vDSP. Topology now `[8, 64, 32, 4]` with live strategy dispatch — see RL section above. |
 
 ### Phase 2 runtime (shipped)
 

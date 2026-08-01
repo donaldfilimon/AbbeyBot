@@ -32,8 +32,13 @@ struct DashboardView: View {
                     MetricCard(title: "Live Discord ingests", value: "\(engine.liveIngestCount)")
                     MetricCard(title: "Discord state", value: engine.discordState.displayName)
                     if let action = engine.lastDQNAction {
-                        MetricCard(title: "Last DQN action", value: dqnLabel(action))
+                        MetricCard(title: "Last DQN strategy", value: dqnLabel(action, strategy: engine.lastStrategy))
                     }
+                    MetricCard(
+                        title: "WDBX records",
+                        value: "\(engine.wdbxStore?.recordCount ?? 0)"
+                    )
+                    MetricCard(title: "NN accel", value: NeuralMath.accelerationBackend)
                     if let consolidated = engine.metrics.lastConsolidationAt {
                         MetricCard(title: "Last consolidation", value: relative(consolidated))
                     }
@@ -172,13 +177,8 @@ struct DashboardView: View {
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func dqnLabel(_ action: Int) -> String {
-        switch action {
-        case 0: return "0 · reply"
-        case 1: return "1 · hold"
-        case 2: return "2 · escalate"
-        default: return "\(action)"
-        }
+    private func dqnLabel(_ action: Int, strategy: StrategyAction) -> String {
+        "\(action) · \(strategy.label)"
     }
 
     private func relative(_ date: Date) -> String {

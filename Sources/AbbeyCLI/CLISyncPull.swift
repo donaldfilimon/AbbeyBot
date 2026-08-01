@@ -43,8 +43,23 @@ enum CLISyncPull {
                 on: runtime.database
             )
 
+            let effectiveLimit = 500
+            let nextCursor = IncrementalSyncCursor.next(
+                previous: since,
+                attemptStartedAt: startedAt,
+                limit: effectiveLimit,
+                pages: [
+                    .init(count: users.count, newestChangeAt: users.compactMap(\.updatedAt).max()),
+                    .init(count: channels.count, newestChangeAt: channels.compactMap(\.updatedAt).max()),
+                    .init(count: messages.count, newestChangeAt: messages.compactMap { changeDate($0.createdAt, $0.deletedAt) }.max()),
+                    .init(count: reputation.count, newestChangeAt: reputation.compactMap { changeDate($0.createdAt, $0.deletedAt) }.max()),
+                    .init(count: interactions.count, newestChangeAt: interactions.compactMap { changeDate($0.createdAt, $0.deletedAt) }.max()),
+                    .init(count: equity.count, newestChangeAt: equity.compactMap { changeDate($0.generatedAt, $0.deletedAt) }.max())
+                ]
+            )
+
             do {
-                try cursorStore.saveLastPullSuccess(startedAt)
+                try cursorStore.applyPullOutcome(nextCursor: nextCursor, succeeded: true)
             } catch {
                 return [
                     "Pulled from \(client.baseURL): \(counts.summary).",
@@ -65,5 +80,9 @@ enum CLISyncPull {
     private static func format(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         return formatter.string(from: date)
+    }
+
+    private static func changeDate(_ original: Date?, _ deletedAt: Date?) -> Date? {
+        [original, deletedAt].compactMap { $0 }.max()
     }
 }

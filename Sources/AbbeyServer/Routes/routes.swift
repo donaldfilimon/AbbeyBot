@@ -99,6 +99,7 @@ private func sinceParam(_ req: Request) -> Date? {
 
 func routes(_ app: Application) throws {
     TwitchEventSubRoutes.register(on: app)
+    SocialRoutes.register(on: app)
 
     app.get("health") { req async -> HealthDTO in
         let runtime = req.application.botRuntime
@@ -114,11 +115,13 @@ func routes(_ app: Application) throws {
         return try await req.fileio.asyncStreamFile(at: indexPath)
     }
 
-    app.get("api", "metrics") { req async -> MetricsDTO in
-        await req.application.botRuntime.metricsSnapshot()
+    app.get("api", "metrics") { req async throws -> MetricsDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        return await req.application.botRuntime.metricsSnapshot()
     }
 
     app.get("api", "status") { req async throws -> StatusDTO in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)

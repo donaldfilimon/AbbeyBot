@@ -1,5 +1,29 @@
 import Foundation
 
+/// Exactly one durable owner for each DQN experience.
+public enum DQNExperiencePersistence: Sendable {
+    case journal(ExperienceJournal)
+    case memory(WDBXMemoryFacade)
+
+    fileprivate func append(_ experience: Experience) throws {
+        switch self {
+        case .journal(let journal):
+            try journal.append(experience)
+        case .memory(let memory):
+            try memory.remember(experience)
+        }
+    }
+
+    fileprivate func loadRecent(limit: Int) throws -> [Experience] {
+        switch self {
+        case .journal(let journal):
+            return try journal.loadRecent(limit: limit)
+        case .memory(let memory):
+            return try memory.recent(limit: limit)
+        }
+    }
+}
+
 /// Deep Q-Network agent driving Abbey's self-learning loop: MessageCreate → WDBX/local
 /// ingest → reward on reactions → `learn()`.
 ///
@@ -15,26 +39,35 @@ import Foundation
 ///      `NeuralNetwork.forwardLogits` for why. This is the flagged-not-silent fix for
 ///      the "softmax on Q-values" open decision.
 public actor DQNAgent {
+    /// Default topology: 8-d projected state → hidden → 4 strategy actions
+    /// (`StrategyAction`: answer / clarify / retrieve / refuse).
+    /// Changing this invalidates old checkpoints (topology mismatch → re-init).
+    public static let defaultTopology: [Int] = [8, 64, 32, 4]
+
     private(set) var online: NeuralNetwork
     private(set) var target: NeuralNetwork
     private var buffer: ReplayBuffer
     private var rng: SplitMix64
     private let seed: UInt64
     private let checkpointURL: URL?
-    private let experienceJournal: ExperienceJournal?
+    private let experiencePersistence: DQNExperiencePersistence?
 
     public let gamma: Float
     public private(set) var epsilon: Float
     private(set) var stepCount = 0
+    /// Last selected strategy (for dashboards / craftReply).
+    public private(set) var lastStrategy: StrategyAction = .answer
+    public private(set) var lastQValues: [Float] = []
 
     public init(
-        topology: [Int],
+        topology: [Int] = DQNAgent.defaultTopology,
         gamma: Float = 0.99,
         epsilon: Float = 0.1,
         bufferCapacity: Int = 10_000,
         seed: UInt64 = 42,
         checkpointURL: URL? = nil,
-        experienceJournalURL: URL? = nil
+        experienceJournalURL: URL? = nil,
+        wdbxFacade: WDBXMemoryFacade? = nil
     ) {
         self.online = NeuralNetwork(topology: topology, seed: seed)
         self.target = online
@@ -44,11 +77,34 @@ public actor DQNAgent {
         self.gamma = gamma
         self.epsilon = epsilon
         self.checkpointURL = checkpointURL
-        if let experienceJournalURL {
-            self.experienceJournal = ExperienceJournal(url: experienceJournalURL)
+        if let wdbxFacade {
+            self.experiencePersistence = .memory(wdbxFacade)
+        } else if let experienceJournalURL {
+            self.experiencePersistence = .journal(ExperienceJournal(url: experienceJournalURL))
         } else {
-            self.experienceJournal = nil
+            self.experiencePersistence = nil
         }
+    }
+
+    /// Preferred constructor: the caller chooses one persistence owner explicitly.
+    public init(
+        topology: [Int] = DQNAgent.defaultTopology,
+        gamma: Float = 0.99,
+        epsilon: Float = 0.1,
+        bufferCapacity: Int = 10_000,
+        seed: UInt64 = 42,
+        checkpointURL: URL? = nil,
+        experiencePersistence: DQNExperiencePersistence?
+    ) {
+        self.online = NeuralNetwork(topology: topology, seed: seed)
+        self.target = online
+        self.buffer = ReplayBuffer(capacity: bufferCapacity)
+        self.rng = SplitMix64(seed: seed &+ 1)
+        self.seed = seed
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.checkpointURL = checkpointURL
+        self.experiencePersistence = experiencePersistence
     }
 
     /// Load checkpoint from disk when present. No-op if URL missing or file absent.
@@ -60,8 +116,8 @@ public actor DQNAgent {
 
     /// Replay recent journal lines into the in-memory buffer (append-only file unchanged).
     public func loadExperienceJournalIfPresent(limit: Int = 10_000) throws {
-        guard let journal = experienceJournal else { return }
-        let experiences = try journal.loadRecent(limit: limit)
+        guard let experiencePersistence else { return }
+        let experiences = try experiencePersistence.loadRecent(limit: limit)
         for experience in experiences {
             buffer.add(experience)
         }
@@ -117,8 +173,19 @@ public actor DQNAgent {
         guard blob.topology == online.topology else {
             throw DQNCheckpointError.topologyMismatch(expected: online.topology, found: blob.topology)
         }
-        try online.applyCheckpoint(weights: blob.onlineWeights, biases: blob.onlineBiases, topology: blob.topology)
-        try target.applyCheckpoint(weights: blob.targetWeights, biases: blob.targetBiases, topology: blob.topology)
+        guard blob.epsilon.isFinite, (0...1).contains(blob.epsilon), blob.gamma.isFinite, blob.stepCount >= 0 else {
+            throw DQNCheckpointError.corrupt("invalid scalar state")
+        }
+
+        // Decode and validate into copies. A corrupt target network must not leave the
+        // live online network (or scalar state) partially updated.
+        var candidateOnline = online
+        var candidateTarget = target
+        try candidateOnline.applyCheckpoint(weights: blob.onlineWeights, biases: blob.onlineBiases, topology: blob.topology)
+        try candidateTarget.applyCheckpoint(weights: blob.targetWeights, biases: blob.targetBiases, topology: blob.topology)
+
+        online = candidateOnline
+        target = candidateTarget
         stepCount = blob.stepCount
         epsilon = blob.epsilon
     }
@@ -140,18 +207,24 @@ public actor DQNAgent {
     /// ε-greedy action selection over raw Q-values.
     public func selectAction(state: [Float]) -> Int {
         guard let actionCount = online.topology.last, actionCount > 0 else { return 0 }
-        if Float.random(in: 0...1, using: &rng) < epsilon {
-            return Int.random(in: 0..<actionCount, using: &rng)
-        }
         let qValues = online.forwardLogits(state)
-        guard let best = qValues.enumerated().max(by: { $0.element < $1.element }) else { return 0 }
-        return best.offset
+        lastQValues = qValues
+        let action: Int
+        if Float.random(in: 0...1, using: &rng) < epsilon {
+            action = Int.random(in: 0..<actionCount, using: &rng)
+        } else if let best = qValues.enumerated().max(by: { $0.element < $1.element }) {
+            action = best.offset
+        } else {
+            action = 0
+        }
+        lastStrategy = StrategyAction.from(raw: action)
+        return action
     }
 
     public func remember(_ experience: Experience) {
         buffer.add(experience)
-        if let journal = experienceJournal {
-            try? journal.append(experience)
+        if let experiencePersistence {
+            try? experiencePersistence.append(experience)
         }
     }
 
@@ -179,6 +252,13 @@ public actor DQNAgent {
             if let url = checkpointURL {
                 try? save(to: url)
             }
+            epsilon = max(0.05, epsilon * 0.995)
         }
+    }
+
+    public func bufferCount() -> Int { buffer.count }
+
+    public func accelerationInfo() -> String {
+        NeuralMath.accelerationBackend
     }
 }

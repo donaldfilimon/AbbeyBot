@@ -77,20 +77,29 @@ struct SyncCursorStoreTests {
         let prior = Date(timeIntervalSince1970: 1_700_000_000)
         store.record(prior)
 
-        store.applyPullOutcome(attemptStartedAt: Date(timeIntervalSince1970: 1_800_000_000), succeeded: false)
+        store.applyPullOutcome(nextCursor: Date(timeIntervalSince1970: 1_800_000_000), succeeded: false)
 
         #expect(store.lastPullSuccessAt == prior)
     }
 
-    /// Success stamps the attempt *start*, not completion, so in-flight server writes
-    /// are refetched next time instead of being skipped permanently.
-    @Test func successfulPullRecordsAttemptStartNotALaterTime() {
+    /// The pull planner may select a returned full-page boundary instead of pull start.
+    @Test func successfulPullRecordsPlannedCursor() {
         let defaults = makeDefaults()
         let store = SyncCursorStore(defaults: defaults)
         let attemptStartedAt = Date(timeIntervalSince1970: 1_700_000_100)
 
-        store.applyPullOutcome(attemptStartedAt: attemptStartedAt, succeeded: true)
+        store.applyPullOutcome(nextCursor: attemptStartedAt, succeeded: true)
 
         #expect(store.lastPullSuccessAt == attemptStartedAt)
+    }
+
+    @Test func successfulNilCursorResetsToFullPull() {
+        let defaults = makeDefaults()
+        let store = SyncCursorStore(defaults: defaults)
+        store.record(Date(timeIntervalSince1970: 1_700_000_000))
+
+        store.applyPullOutcome(nextCursor: nil, succeeded: true)
+
+        #expect(store.lastPullSuccessAt == nil)
     }
 }

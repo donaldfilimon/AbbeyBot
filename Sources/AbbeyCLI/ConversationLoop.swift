@@ -136,14 +136,24 @@ final class ConversationLoop {
 
     private func handleChat(_ text: String) async {
         let channelId = currentChannelId
-        await runtime.ingestMessage(
+        let outcome = await runtime.ingestMessageOutcome(
             content: text,
             channelId: channelId,
             guildId: "cli",
             authorId: "local",
             discordMessageId: UUID().uuidString
         )
-        let reply = await runtime.reply(to: text, userId: "local", guildId: "cli", channelId: channelId)
+        guard case .inserted(let strategy) = outcome else {
+            print("Message was not persisted; no reply was generated.")
+            return
+        }
+        let reply = await runtime.reply(
+            to: text,
+            userId: "local",
+            guildId: "cli",
+            channelId: channelId,
+            strategy: strategy
+        )
         await printStreamed(reply)
     }
 

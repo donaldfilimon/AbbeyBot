@@ -3,6 +3,32 @@ import Fluent
 import Foundation
 import Vapor
 
+/// Merge the oldest primary-timestamp and tombstone-timestamp candidates into one
+/// deterministic incremental page. Fetching up to `limit` from each source is sufficient
+/// to identify the oldest `limit` rows in their union.
+private func mergedIncrementalPage<T>(
+    primary: [T],
+    tombstones: [T],
+    limit: Int,
+    identity: (T) -> String,
+    changedAt: (T) -> Date?
+) -> [T] {
+    var unique: [String: T] = [:]
+    for row in primary + tombstones {
+        unique[identity(row)] = row
+    }
+    return Array(unique.values.sorted { lhs, rhs in
+        let lhsDate = changedAt(lhs) ?? .distantPast
+        let rhsDate = changedAt(rhs) ?? .distantPast
+        if lhsDate == rhsDate { return identity(lhs) < identity(rhs) }
+        return lhsDate < rhsDate
+    }.prefix(limit))
+}
+
+private func latestChange(_ original: Date?, _ deletedAt: Date?) -> Date? {
+    [original, deletedAt].compactMap { $0 }.max()
+}
+
 public enum MemoryForgetError: Error, Equatable {
     case noMemory
     case invalidIndex
@@ -80,6 +106,7 @@ public enum MemoryRepository {
         var query = UserMemory.query(on: db)
         if let since {
             query = query.filter(\.$updatedAt > since)
+            return try await query.sort(\.$updatedAt, .ascending).limit(limit).all()
         } else {
             // Full list hides tombstones at the SQL level — filtering a fetched window in
             // Swift after the fact could silently drop live rows behind a dense run of
@@ -144,6 +171,7 @@ public enum ChannelRepository {
         var query = ChannelContext.query(on: db)
         if let since {
             query = query.filter(\.$updatedAt > since)
+            return try await query.sort(\.$updatedAt, .ascending).limit(limit).all()
         } else {
             query = query.filter(\.$deletedAt == nil)
         }
@@ -222,16 +250,30 @@ public enum MessageRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [GuildMessage] {
-        var query = GuildMessage.query(on: db)
         if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$createdAt > since)
-                group.filter(\.$deletedAt > since)
-            }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await GuildMessage.query(on: db)
+                .filter(\.$createdAt > since)
+                .sort(\.$createdAt, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await GuildMessage.query(on: db)
+                .filter(\.$deletedAt > since)
+                .sort(\.$deletedAt, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.discordMessageId },
+                changedAt: { latestChange($0.createdAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        return try await GuildMessage.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -251,16 +293,30 @@ public enum ReputationRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [ReputationEvent] {
-        var query = ReputationEvent.query(on: db)
         if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$createdAt > since)
-                group.filter(\.$deletedAt > since)
-            }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await ReputationEvent.query(on: db)
+                .filter(\.$createdAt > since)
+                .sort(\.$createdAt, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await ReputationEvent.query(on: db)
+                .filter(\.$deletedAt > since)
+                .sort(\.$deletedAt, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.id?.uuidString ?? "missing-id" },
+                changedAt: { latestChange($0.createdAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        return try await ReputationEvent.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
     }
 
     public static func count(on db: any Database) async throws -> Int {
@@ -298,16 +354,30 @@ public enum InteractionRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [InteractionLog] {
-        var query = InteractionLog.query(on: db)
         if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$createdAt > since)
-                group.filter(\.$deletedAt > since)
-            }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await InteractionLog.query(on: db)
+                .filter(\.$createdAt > since)
+                .sort(\.$createdAt, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await InteractionLog.query(on: db)
+                .filter(\.$deletedAt > since)
+                .sort(\.$deletedAt, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.id?.uuidString ?? "missing-id" },
+                changedAt: { latestChange($0.createdAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$createdAt, .descending).limit(limit).all()
+        return try await InteractionLog.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .limit(limit)
+            .all()
     }
 }
 
@@ -323,16 +393,30 @@ public enum EquityRepository {
     }
 
     public static func recent(limit: Int, since: Date? = nil, on db: any Database) async throws -> [EquityIdea] {
-        var query = EquityIdea.query(on: db)
         if let since {
-            query = query.group(.or) { group in
-                group.filter(\.$generatedAt > since)
-                group.filter(\.$deletedAt > since)
-            }
-        } else {
-            query = query.filter(\.$deletedAt == nil)
+            let primary = try await EquityIdea.query(on: db)
+                .filter(\.$generatedAt > since)
+                .sort(\.$generatedAt, .ascending)
+                .limit(limit)
+                .all()
+            let tombstones = try await EquityIdea.query(on: db)
+                .filter(\.$deletedAt > since)
+                .sort(\.$deletedAt, .ascending)
+                .limit(limit)
+                .all()
+            return mergedIncrementalPage(
+                primary: primary,
+                tombstones: tombstones,
+                limit: limit,
+                identity: { $0.symbol },
+                changedAt: { latestChange($0.generatedAt, $0.deletedAt) }
+            )
         }
-        return try await query.sort(\.$generatedAt, .descending).limit(limit).all()
+        return try await EquityIdea.query(on: db)
+            .filter(\.$deletedAt == nil)
+            .sort(\.$generatedAt, .descending)
+            .limit(limit)
+            .all()
     }
 
     public static func count(on db: any Database) async throws -> Int {

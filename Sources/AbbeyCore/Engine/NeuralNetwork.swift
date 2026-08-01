@@ -148,8 +148,9 @@ public struct NeuralNetwork: Sendable {
         min(max(x, -bound), bound)
     }
 
+    /// Accelerated via `NeuralMath` (Accelerate/vDSP on Apple platforms).
     private func dot(_ weight: [Float], _ input: [Float]) -> Float {
-        zip(weight, input).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+        NeuralMath.dot(weight, input)
     }
 
     private func softmax(_ logits: [Float]) -> [Float] {

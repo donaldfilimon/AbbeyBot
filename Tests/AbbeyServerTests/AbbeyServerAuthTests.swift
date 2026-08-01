@@ -13,6 +13,9 @@ import VaporTesting
 struct AbbeyServerAuthTests {
     private func withApp<T: Sendable>(
         token: String?,
+        eventSubSecret: String? = nil,
+        allowUnsignedEventSubForTesting: Bool = false,
+        allowUnsignedSocialForTesting: Bool = false,
         _ body: @Sendable (Application) async throws -> T
     ) async throws -> T {
         unsetenv("DISCORD_BOT_TOKEN")
@@ -23,6 +26,22 @@ struct AbbeyServerAuthTests {
         } else {
             unsetenv("ABBEY_API_TOKEN")
         }
+        if let eventSubSecret {
+            setenv("TWITCH_EVENTSUB_SECRET", eventSubSecret, 1)
+        } else {
+            unsetenv("TWITCH_EVENTSUB_SECRET")
+        }
+        if allowUnsignedEventSubForTesting {
+            setenv("ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING", "1", 1)
+        } else {
+            unsetenv("ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING")
+        }
+        if allowUnsignedSocialForTesting {
+            setenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING", "1", 1)
+        } else {
+            unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
+        }
+        unsetenv("ABBEY_DRY_RUN")
 
         let app = try await Application.make(.testing)
         do {
@@ -30,11 +49,17 @@ struct AbbeyServerAuthTests {
             let result = try await body(app)
             try await app.asyncShutdown()
             unsetenv("ABBEY_API_TOKEN")
+            unsetenv("TWITCH_EVENTSUB_SECRET")
+            unsetenv("ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING")
+            unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
             unsetenv("DATABASE_URL")
             return result
         } catch {
             try? await app.asyncShutdown()
             unsetenv("ABBEY_API_TOKEN")
+            unsetenv("TWITCH_EVENTSUB_SECRET")
+            unsetenv("ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING")
+            unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
             unsetenv("DATABASE_URL")
             throw error
         }
@@ -44,6 +69,18 @@ struct AbbeyServerAuthTests {
         var headers = HTTPHeaders()
         headers.bearerAuthorization = BearerAuthorization(token: token)
         return headers
+    }
+
+    private func jsonHeaders(token: String? = nil) -> HTTPHeaders {
+        var headers = token.map(bearerHeaders) ?? HTTPHeaders()
+        headers.contentType = .json
+        return headers
+    }
+
+    private func jsonBody(_ string: String) -> ByteBuffer {
+        var buffer = ByteBufferAllocator().buffer(capacity: string.utf8.count)
+        buffer.writeString(string)
+        return buffer
     }
 
     @Test func getStateUserRejectsWithoutTokenWhenConfigured() async throws {
@@ -95,6 +132,146 @@ struct AbbeyServerAuthTests {
     @Test func getStateChannelStaysOpenWhenTokenUnset() async throws {
         try await withApp(token: nil) { app in
             try await app.testing().test(.GET, "/api/state/channel?guildId=g1&channelId=c1") { res in
+                #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func healthRemainsPublicWhenTokenConfigured() async throws {
+        try await withApp(token: "secret-token") { app in
+            try await app.testing().test(.GET, "/health") { res in
+                #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func metricsAndStatusRejectWithoutConfiguredTokenHeader() async throws {
+        try await withApp(token: "secret-token") { app in
+            try await app.testing().test(.GET, "/api/metrics") { res in
+                #expect(res.status == .unauthorized)
+            }
+            try await app.testing().test(.GET, "/api/status") { res in
+                #expect(res.status == .unauthorized)
+            }
+        }
+    }
+
+    @Test func metricsAndStatusAcceptConfiguredTokenHeader() async throws {
+        try await withApp(token: "secret-token") { app in
+            let headers = bearerHeaders("secret-token")
+            try await app.testing().test(.GET, "/api/metrics", headers: headers) { res in
+                #expect(res.status == .ok)
+            }
+            try await app.testing().test(.GET, "/api/status", headers: headers) { res in
+                #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func socialCatalogUsesConfiguredOperatorToken() async throws {
+        try await withApp(token: "secret-token") { app in
+            try await app.testing().test(.GET, "/api/social/catalog") { res in
+                #expect(res.status == .unauthorized)
+            }
+            try await app.testing().test(
+                .GET,
+                "/api/social/catalog",
+                headers: bearerHeaders("secret-token")
+            ) { res in
+                #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func genericSocialWebhookFailsClosedWhenSharedTokenIsMissing() async throws {
+        try await withApp(token: nil) { app in
+            try await app.testing().test(
+                .POST,
+                "/api/social/youtube/webhook",
+                headers: jsonHeaders(),
+                body: jsonBody(#"{"text":"hello","channelId":"c1","author":"u1"}"#)
+            ) { res in
+                #expect(res.status == .serviceUnavailable)
+            }
+        }
+    }
+
+    @Test func genericSocialWebhookRequiresAndAcceptsConfiguredToken() async throws {
+        let body = jsonBody(#"{"text":"hello","channelId":"c1","author":"u1","videoId":"m1"}"#)
+        try await withApp(token: "secret-token") { app in
+            try await app.testing().test(
+                .POST,
+                "/api/social/youtube/webhook",
+                headers: jsonHeaders(),
+                body: body
+            ) { res in
+                #expect(res.status == .unauthorized)
+            }
+            try await app.testing().test(
+                .POST,
+                "/api/social/youtube/webhook",
+                headers: jsonHeaders(token: "secret-token"),
+                body: body
+            ) { res in
+                #expect(res.status == .ok)
+                #expect(res.body.string.contains("social-accepted-youtube"))
+            }
+        }
+    }
+
+    @Test func genericSocialWebhookBypassIsExplicitAndTestingOnly() async throws {
+        try await withApp(
+            token: nil,
+            allowUnsignedSocialForTesting: true
+        ) { app in
+            try await app.testing().test(
+                .POST,
+                "/api/social/youtube/webhook",
+                headers: jsonHeaders(),
+                body: jsonBody(#"{"text":"dry run","channelId":"c1","author":"u1"}"#)
+            ) { res in
+                #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func twitchEventSubFailsClosedWhenSecretIsMissing() async throws {
+        try await withApp(token: nil) { app in
+            try await app.testing().test(
+                .POST,
+                "/api/twitch/eventsub",
+                headers: jsonHeaders(),
+                body: jsonBody(#"{"subscription":{"type":"unknown","status":"enabled"}}"#)
+            ) { res in
+                #expect(res.status == .serviceUnavailable)
+            }
+        }
+    }
+
+    @Test func twitchEventSubRejectsUnsignedDeliveryWhenSecretIsConfigured() async throws {
+        try await withApp(token: nil, eventSubSecret: "eventsub-secret") { app in
+            try await app.testing().test(
+                .POST,
+                "/api/twitch/eventsub",
+                headers: jsonHeaders(),
+                body: jsonBody(#"{"subscription":{"type":"unknown","status":"enabled"}}"#)
+            ) { res in
+                #expect(res.status == .forbidden)
+            }
+        }
+    }
+
+    @Test func twitchEventSubUnsignedBypassIsExplicitAndTestingOnly() async throws {
+        try await withApp(
+            token: nil,
+            allowUnsignedEventSubForTesting: true
+        ) { app in
+            try await app.testing().test(
+                .POST,
+                "/api/twitch/eventsub",
+                headers: jsonHeaders(),
+                body: jsonBody(#"{"subscription":{"type":"unknown","status":"enabled"}}"#)
+            ) { res in
                 #expect(res.status == .ok)
             }
         }

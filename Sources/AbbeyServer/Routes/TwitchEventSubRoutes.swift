@@ -57,8 +57,20 @@ enum TwitchEventSubRoutes {
                     throw Abort(.forbidden, reason: "Invalid Twitch EventSub signature")
                 }
             } else {
+                guard AbbeyAPIAuth.allowsExplicitWebhookBypass(
+                    req,
+                    switchName: "ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING"
+                ) else {
+                    req.logger.error(
+                        "Twitch EventSub webhook rejected: TWITCH_EVENTSUB_SECRET is not configured"
+                    )
+                    throw Abort(
+                        .serviceUnavailable,
+                        reason: "TWITCH_EVENTSUB_SECRET must be configured before enabling EventSub"
+                    )
+                }
                 req.logger.warning(
-                    "Twitch EventSub webhook: TWITCH_EVENTSUB_SECRET not configured, skipping signature verification"
+                    "Twitch EventSub signature bypass active for dry-run/testing"
                 )
             }
 
@@ -122,6 +134,15 @@ enum TwitchEventSubRoutes {
                 )
                 handled = true
                 outcomeLabel = "stream-offline"
+            case .notificationChannelSocial(let event):
+                await req.application.botRuntime.handleTwitchChannelSocial(
+                    kind: event.kind,
+                    broadcasterLogin: event.broadcasterLogin,
+                    actorLogin: event.actorLogin,
+                    detail: event.detail
+                )
+                handled = true
+                outcomeLabel = "channel-social"
             case .notificationAcknowledged:
                 handled = false
                 outcomeLabel = "notification"

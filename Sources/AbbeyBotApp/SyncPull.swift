@@ -1,3 +1,4 @@
+import AbbeyCore
 import Foundation
 import SwiftData
 
@@ -29,6 +30,8 @@ enum SyncPull {
         var reputationInserted: Int
         var interactionsInserted: Int
         var equityUpserted: Int
+        /// Minimum safe `?since=` boundary for the next pull.
+        var nextCursor: Date?
     }
 
     /// Fetch list endpoints (`limit` clamped to 500) and upsert into `container`.
@@ -46,14 +49,16 @@ enum SyncPull {
         into container: ModelContainer,
         client: AbbeyServerClient = .shared,
         limit: Int = defaultLimit,
-        since: Date? = nil
+        since: Date? = nil,
+        attemptStartedAt: Date = .now
     ) async throws -> Counts {
-        async let usersTask = client.fetchUsers(limit: limit, since: since)
-        async let channelsTask = client.fetchChannels(limit: limit, since: since)
-        async let messagesTask = client.fetchMessages(limit: limit, since: since)
-        async let reputationTask = client.fetchReputation(limit: limit, since: since)
-        async let interactionsTask = client.fetchInteractions(limit: limit, since: since)
-        async let equityTask = client.fetchEquity(limit: limit, since: since)
+        let effectiveLimit = min(max(limit, 1), defaultLimit)
+        async let usersTask = client.fetchUsers(limit: effectiveLimit, since: since)
+        async let channelsTask = client.fetchChannels(limit: effectiveLimit, since: since)
+        async let messagesTask = client.fetchMessages(limit: effectiveLimit, since: since)
+        async let reputationTask = client.fetchReputation(limit: effectiveLimit, since: since)
+        async let interactionsTask = client.fetchInteractions(limit: effectiveLimit, since: since)
+        async let equityTask = client.fetchEquity(limit: effectiveLimit, since: since)
 
         let users = try await usersTask
         let channels = try await channelsTask
@@ -71,14 +76,33 @@ enum SyncPull {
         let equityUpserted = try upsertEquity(equity, into: context)
         try context.save()
 
+        let nextCursor = IncrementalSyncCursor.next(
+            previous: since,
+            attemptStartedAt: attemptStartedAt,
+            limit: effectiveLimit,
+            pages: [
+                .init(count: users.count, newestChangeAt: users.compactMap(\.updatedAt).max()),
+                .init(count: channels.count, newestChangeAt: channels.compactMap(\.updatedAt).max()),
+                .init(count: messages.count, newestChangeAt: messages.compactMap { Self.changeDate($0.createdAt, $0.deletedAt) }.max()),
+                .init(count: reputation.count, newestChangeAt: reputation.compactMap { Self.changeDate($0.createdAt, $0.deletedAt) }.max()),
+                .init(count: interactions.count, newestChangeAt: interactions.compactMap { Self.changeDate($0.createdAt, $0.deletedAt) }.max()),
+                .init(count: equity.count, newestChangeAt: equity.compactMap { Self.changeDate($0.generatedAt, $0.deletedAt) }.max())
+            ]
+        )
+
         return Counts(
             usersUpserted: usersUpserted,
             channelsUpserted: channelsUpserted,
             messagesInserted: messagesInserted,
             reputationInserted: reputationInserted,
             interactionsInserted: interactionsInserted,
-            equityUpserted: equityUpserted
+            equityUpserted: equityUpserted,
+            nextCursor: nextCursor
         )
+    }
+
+    private static func changeDate(_ original: Date?, _ deletedAt: Date?) -> Date? {
+        [original, deletedAt].compactMap { $0 }.max()
     }
 
     // MARK: - Upserts

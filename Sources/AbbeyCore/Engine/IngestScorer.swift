@@ -1,14 +1,34 @@
 import Foundation
 
 /// Shared sentiment → DQN step used by Desktop `AbbeyEngine` and server `BotRuntime`.
-/// Persistence stays in each host; this owns only the pure scoring/learning loop.
+/// Persistence stays in each host; this owns scoring, strategy selection, and learning.
 public struct IngestScoreResult: Sendable {
     public let intent: IntentClassifier.Intent
     public let action: Int
+    public let strategy: StrategyAction
     public let quality: Double
+    public let state: [Float]
+    public let reward: Float
+
+    public init(
+        intent: IntentClassifier.Intent,
+        action: Int,
+        strategy: StrategyAction,
+        quality: Double,
+        state: [Float],
+        reward: Float
+    ) {
+        self.intent = intent
+        self.action = action
+        self.strategy = strategy
+        self.quality = quality
+        self.state = state
+        self.reward = reward
+    }
 }
 
 public enum IngestScorer: Sendable {
+    /// Select strategy, write experience (action-conditioned reward), train one step, upsert into local WDBX.
     public static func scoreAndLearn(
         content: String,
         guildId: String,
@@ -20,7 +40,10 @@ public enum IngestScorer: Sendable {
         recentReactionCount: Int = 0,
         mentionsSomeone: Bool? = nil,
         isReply: Bool = false,
-        timestamp: Date = .now
+        timestamp: Date = .now,
+        wdbx: WDBXStore? = nil,
+        authorId: String = "",
+        channelId: String = ""
     ) async -> IngestScoreResult {
         let intent = intent ?? IntentClassifier.classify(content)
         let fullState = SentimentAnalyzer.analyze(
@@ -36,11 +59,46 @@ public enum IngestScorer: Sendable {
         )
         let state = SentimentAnalyzer.projectToNetworkInput(fullState)
         let action = await dqnAgent.selectAction(state: state)
+        let strategy = StrategyAction.from(raw: action)
+        let reward = strategy.shapedReward(intent: intent, quality: intent.quality)
+
+        // One-step transition: nextState is a lightly decayed copy so bootstrapping is not
+        // identical to `state` (was a hard-coded `nextState == state` / done:true dead end).
+        let nextState = state.map { $0 * 0.95 }
+        let done = intent == .unknown || strategy == .refuse
+
         await dqnAgent.remember(
-            Experience(state: state, action: action, reward: Float(intent.quality), nextState: state, done: true)
+            Experience(state: state, action: action, reward: reward, nextState: nextState, done: done)
         )
         await dqnAgent.learn()
-        return IngestScoreResult(intent: intent, action: action, quality: intent.quality)
+
+        if let wdbx {
+            try? wdbx.upsert(
+                WDBXRecord(
+                    id: UUID().uuidString,
+                    vector: fullState,
+                    payload: [
+                        "kind": "ingest",
+                        "guildId": guildId,
+                        "channelId": channelId,
+                        "userId": authorId,
+                        "strategy": strategy.label,
+                        "intent": intent.rawValue,
+                        "contentPreview": String(content.prefix(240)),
+                    ],
+                    createdAt: timestamp
+                )
+            )
+        }
+
+        return IngestScoreResult(
+            intent: intent,
+            action: action,
+            strategy: strategy,
+            quality: intent.quality,
+            state: state,
+            reward: reward
+        )
     }
 
     public static func latencyMilliseconds(since started: ContinuousClock.Instant) -> Double {

@@ -266,6 +266,41 @@ struct ServerSyncApplyTests {
             #expect(counts.summary.contains("1 users"))
         }
     }
+
+    @Test func incrementalMessagePagesAreOldestChangeFirstAndIncludeTombstones() async throws {
+        try await withRuntime { app, _ in
+            let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+            func insert(_ id: String, createdOffset: TimeInterval, deletedOffset: TimeInterval? = nil) async throws {
+                let row = GuildMessage(
+                    discordMessageId: id,
+                    channelId: "c1",
+                    guildId: "g1",
+                    authorId: "u1",
+                    content: id
+                )
+                try await row.create(on: app.db)
+                row.createdAt = base.addingTimeInterval(createdOffset)
+                row.deletedAt = deletedOffset.map { base.addingTimeInterval($0) }
+                try await row.save(on: app.db)
+            }
+
+            try await insert("m1", createdOffset: 10)
+            try await insert("m2", createdOffset: 20)
+            try await insert("m3", createdOffset: 30)
+            try await insert("old-deleted", createdOffset: 1, deletedOffset: 25)
+
+            let firstPage = try await MessageRepository.recent(limit: 2, since: base, on: app.db)
+            #expect(firstPage.map(\.discordMessageId) == ["m1", "m2"])
+
+            let secondPage = try await MessageRepository.recent(
+                limit: 2,
+                since: base.addingTimeInterval(20),
+                on: app.db
+            )
+            #expect(secondPage.map(\.discordMessageId) == ["old-deleted", "m3"])
+        }
+    }
 }
 
 @Suite("Sync cursor file store")
@@ -333,5 +368,20 @@ struct SyncCursorFileStoreTests {
 
         #expect(abs(pull.loadLastSuccess()!.timeIntervalSince1970 - 1_000) < 0.001)
         #expect(abs(push.loadLastSuccess()!.timeIntervalSince1970 - 2_000) < 0.001)
+    }
+
+    @Test func failedOutcomePreservesCursorAndSuccessfulNilClearsIt() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-cursor-outcome-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = SyncCursorFileStore(fileURL: url)
+        let original = Date(timeIntervalSince1970: 1_000)
+        try store.saveLastPullSuccess(original)
+
+        try store.applyPullOutcome(nextCursor: Date(timeIntervalSince1970: 2_000), succeeded: false)
+        #expect(store.loadLastPullSuccess() == original)
+
+        try store.applyPullOutcome(nextCursor: nil, succeeded: true)
+        #expect(store.loadLastPullSuccess() == nil)
     }
 }

@@ -65,7 +65,15 @@ CI (`.github/workflows/abbey-ci.yml`) builds the dashboard SPA (`bun test` + `bu
 2. Desktop: Discord sidebar → token (Keychain) → Connect → Register slash commands.
 3. Server: set `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` in `.env`; gateway starts on boot.
 
-Slash commands: `ask`, `rep`, `remember`, `forget`, `context`, `persona`.
+Slash commands:
+
+- Inference: `/ask`, `/explain`, `/summarize`, `/model`
+- Memory and social brain: `/rep`, `/facts`, `/remember`, `/forget`, `/context`
+- Operations: `/status`, `/ping`, `/help`, `/industry`, `/persona`
+- Safety-scoped modules: `/mod` provides Abi moderation advice only; `/equity` is a synthetic factor screen, not market data or financial advice
+- Voice: `/voice join|leave` updates muted/deafened gateway presence only; no audio capture or playback
+
+Re-register slash commands after upgrading so Discord receives the expanded registry.
 
 ## Layout
 
