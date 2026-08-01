@@ -35,6 +35,19 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
         )
     }
 
+    /// Claim-honesty gate: a nonzero DAVE advertisement offers Discord an E2EE
+    /// capability this client must be able to honor with real frame
+    /// encryption. MLS control-plane availability alone cannot protect Opus
+    /// frames, so the advertised version stays 0 until the media adapters are
+    /// fully wired.
+    static func advertisedDAVEProtocolVersion(
+        for availability: DiscordVoiceMediaAdapterAvailability
+    ) -> Int {
+        availability == .fullyWired
+            ? Int(NativeMediaVersions.maximumDAVEProtocolVersion)
+            : 0
+    }
+
     private func makeGatewayClient(
         daveAdapter: NativeDAVEControlAdapter
     ) -> DiscordVoiceGatewaySession {
@@ -42,8 +55,8 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
             mediaAttestation: .portableUnavailable,
             daveControlHandler: daveAdapter.controlHandler,
             configuration: DiscordVoiceGatewaySessionConfiguration(
-                maximumDAVEProtocolVersion: Int(
-                    NativeMediaVersions.maximumDAVEProtocolVersion
+                maximumDAVEProtocolVersion: Self.advertisedDAVEProtocolVersion(
+                    for: mediaAdapterAvailability
                 )
             )
         )

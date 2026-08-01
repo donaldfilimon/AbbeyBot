@@ -15,6 +15,21 @@ struct NativeDAVEControlAdapterTests {
         #expect(components.udp is DiscordVoiceUDPSessionAdapter)
     }
 
+    @Test("nonzero DAVE is advertised only when media adapters are fully wired")
+    func daveAdvertisementGatedOnMediaAvailability() {
+        #expect(
+            DiscordVoiceNativeControlSessionFactory.advertisedDAVEProtocolVersion(
+                for: .unavailable
+            ) == 0
+        )
+        #expect(
+            DiscordVoiceNativeControlSessionFactory.advertisedDAVEProtocolVersion(
+                for: .fullyWired
+            ) == Int(NativeMediaVersions.maximumDAVEProtocolVersion)
+        )
+        #expect(NativeMediaVersions.maximumDAVEProtocolVersion > 0)
+    }
+
     @Test("initial bootstrap creates one shared native session and reset destroys access")
     func initialBootstrapAndReset() async throws {
         let adapter = NativeDAVEControlAdapter()
