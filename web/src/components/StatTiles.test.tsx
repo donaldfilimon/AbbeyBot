@@ -16,10 +16,11 @@ const status: StatusResponse = {
   liveIngestCount: 6,
   inferenceCalls: 88,
   inferenceFailures: 2,
+  twitchStreamLive: true,
 };
 
 describe("StatTiles", () => {
-  it("renders all twelve status fields with labels matching status.leaf", () => {
+  it("renders all thirteen status fields with labels matching status.leaf", () => {
     render(<StatTiles status={status} error={null} />);
 
     expect(screen.getByText("Database")).toBeInTheDocument();
@@ -36,6 +37,16 @@ describe("StatTiles", () => {
     expect(screen.getByText("Live Discord ingest")).toBeInTheDocument();
     expect(screen.getByText("Inference calls")).toBeInTheDocument();
     expect(screen.getByText("Inference failures")).toBeInTheDocument();
+    expect(screen.getByText("Twitch stream")).toBeInTheDocument();
+    expect(screen.getByText("live")).toBeInTheDocument();
+  });
+
+  it("formats twitchStreamLive null as unknown and false as offline", () => {
+    render(<StatTiles status={{ ...status, twitchStreamLive: null }} error={null} />);
+    expect(screen.getByText("unknown")).toBeInTheDocument();
+
+    render(<StatTiles status={{ ...status, twitchStreamLive: false }} error={null} />);
+    expect(screen.getByText("offline")).toBeInTheDocument();
   });
 
   it("shows a loading placeholder for every tile before data arrives", () => {
@@ -43,7 +54,7 @@ describe("StatTiles", () => {
 
     const grid = screen.getByTestId("stat-grid");
     const placeholders = grid.querySelectorAll("dd");
-    expect(placeholders.length).toBe(12);
+    expect(placeholders.length).toBe(13);
     for (const dd of placeholders) {
       expect(dd.textContent).toBe("…");
     }

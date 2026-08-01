@@ -200,7 +200,7 @@ struct AbbeyCoreTests {
     }
 
     @Test func commandRegistryNonEmpty() {
-        #expect(CommandRegistry.all.count == 7)
+        #expect(CommandRegistry.all.count == 17)
         #expect(CommandRegistry.all.contains(where: { $0.name == "voice" }))
     }
 
@@ -233,8 +233,20 @@ struct AbbeyCoreTests {
         #expect(await router.route(intent: .greeting).name == "Abbey")
         #expect(await router.route(intent: .smallTalk).name == "Abbey")
         #expect(await router.route(intent: .unknown).name == "Abbey")
+        #expect(await router.currentPersona().name == "Abbey")
         await router.setPersona(named: "aviva")
         #expect(await router.route(intent: .unknown).name == "Aviva")
+    }
+
+    @Test func naturalPersonaSwitchIsRequestScoped() async {
+        let router = ABIRouter(eventBus: EventBus())
+        await router.setPersona(named: "aviva")
+
+        #expect(await router.route(intent: .personaSwitch, userText: "switch to abi").name == "Abi")
+        #expect(await router.currentPersona().name == "Aviva")
+        #expect(IntentClassifier.classify("How does a Swift switch statement work?") == .question)
+        #expect(IntentClassifier.classify("switch to abi") == .personaSwitch)
+        #expect(IntentClassifier.classify("be abbey please") == .personaSwitch)
     }
 
     @Test func memoryFactExtract() {

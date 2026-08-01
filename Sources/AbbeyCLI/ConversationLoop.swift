@@ -89,6 +89,26 @@ final class ConversationLoop {
                     }
                 }
 
+            case .sync(nil):
+                let snapshot = await runtime.syncStatusSnapshot()
+                let shared = CLISyncStatusReport.sharesServerDatabase(
+                    environment: ProcessInfo.processInfo.environment
+                )
+                print(CLISyncStatusReport.render(snapshot, sharesServerDatabase: shared))
+
+            case .sync("pull"):
+                for line in await CLISyncPull.run(runtime: runtime) {
+                    print(line)
+                }
+
+            case .sync("push"):
+                for line in await CLISyncPush.run(runtime: runtime) {
+                    print(line)
+                }
+
+            case .sync(let argument?):
+                print("Unknown /sync argument '\(argument)'. Usage: /sync (status), /sync pull, or /sync push.")
+
             case .exit:
                 break replLoop
 
@@ -107,20 +127,33 @@ final class ConversationLoop {
           /clear           Start a new conversation (fresh channel context).
           /model [mode]    Show or set the inference mode (\(InferenceMode.allCases.map(\.rawValue).joined(separator: ", "))).
           /validate <src>  Static CodeProposalValidator (not a sandbox).
+          /sync            Show the desktop-reported sync status in this database (read-only).
+          /sync pull       Pull server rows into this database (ABBEY_SYNC_SERVER_URL; cursor at ~/.abbey/cli-sync-cursor).
+          /sync push       Push local messages + memory facts to the server (cursor at ~/.abbey/cli-sync-push-cursor).
           /exit, /quit     Quit.
         """)
     }
 
     private func handleChat(_ text: String) async {
         let channelId = currentChannelId
-        await runtime.ingestMessage(
+        let outcome = await runtime.ingestMessageOutcome(
             content: text,
             channelId: channelId,
             guildId: "cli",
             authorId: "local",
             discordMessageId: UUID().uuidString
         )
-        let reply = await runtime.reply(to: text, userId: "local", guildId: "cli", channelId: channelId)
+        guard case .inserted(let strategy) = outcome else {
+            print("Message was not persisted; no reply was generated.")
+            return
+        }
+        let reply = await runtime.reply(
+            to: text,
+            userId: "local",
+            guildId: "cli",
+            channelId: channelId,
+            strategy: strategy
+        )
         await printStreamed(reply)
     }
 

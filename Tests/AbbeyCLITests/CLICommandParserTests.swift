@@ -61,4 +61,23 @@ struct CLICommandParserTests {
         #expect(CLICommandParser.parse("/validate") == .validate(""))
         #expect(CLICommandParser.parse("/validate func x() {}") == .validate("func x() {}"))
     }
+
+    @Test func syncBareIsStatus() {
+        #expect(CLICommandParser.parse("/sync") == .sync(nil))
+        #expect(CLICommandParser.parse("/SYNC") == .sync(nil))
+    }
+
+    @Test func syncPullParsesArgumentCaseInsensitively() {
+        #expect(CLICommandParser.parse("/sync pull") == .sync("pull"))
+        #expect(CLICommandParser.parse("/sync PULL") == .sync("pull"))
+    }
+
+    @Test func syncPushParsesArgumentCaseInsensitively() {
+        #expect(CLICommandParser.parse("/sync push") == .sync("push"))
+        #expect(CLICommandParser.parse("/sync PUSH") == .sync("push"))
+    }
+
+    @Test func syncUnknownArgumentIsPassedThroughLowercased() {
+        #expect(CLICommandParser.parse("/sync now") == .sync("now"))
+    }
 }

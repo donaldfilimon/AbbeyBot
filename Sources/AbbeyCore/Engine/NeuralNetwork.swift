@@ -1,34 +1,48 @@
 import Foundation
 
-/// Feed-forward network, SIMD8-accelerated per-neuron dot products. This is Donald's
-/// own design (see references/brain.md in the skill) — no external ML library.
+/// Feed-forward network, dense per-neuron weight vectors sized to each layer's actual
+/// fan-in. This is Donald's own design (see references/brain.md in the skill) — no
+/// external ML library.
 ///
-/// Corrected from the reference draft in two ways, both purely mechanical (not a
+/// Corrected from the reference draft in three ways, all purely mechanical (not a
 /// design change, so not flagged as an open decision):
 ///   1. `forward` is non-mutating. It reads `weights`/`biases` but never writes them,
 ///      so marking it `mutating` was incorrect and caused spurious `await` call sites
 ///      when `NeuralNetwork` is a stored property of an actor (DQNAgent) — a plain
 ///      synchronous struct method call needs no `await` even from within an actor.
-///   2. The SIMD8 packing pads/truncates to exactly 8 scalars *before* constructing the
-///      SIMD8 value, using a concrete `[Float]` (not a slice) so the element count the
-///      `SIMD8(_:)` sequence initializer receives is unambiguous.
+///   2. Weight vectors were originally packed into a fixed-width `SIMD8<Float>` per
+///      neuron regardless of that layer's real fan-in, truncating/padding to 8 lanes.
+///      For this network's actual topology (`[8, 32, 16, 3]`), layers 1 and 2 have
+///      fan-in 32 and 16 — every `dot()` silently discarded most of their input, on
+///      every forward pass, not just at the external input boundary. Weight vectors are
+///      now plain `[Float]` sized to the declared fan-in (`topology[layerIndex]`), so
+///      every layer actually consumes what it's fed.
+///   3. `train()`'s backward pass propagated error to the previous layer by summing raw
+///      weight *values* — never multiplying by that neuron's delta, and never applying
+///      the ReLU derivative anywhere (including the output layer's own gradient). Hidden
+///      layers therefore never received a gradient connected to the loss, and the output
+///      layer's own gradient was wrong whenever a neuron had been clamped to 0. Backprop
+///      now computes `delta[j] = (Σᵢ weight[i][j] · delta[i]) · relu'(z[j])` at every
+///      layer, using pre-update weights (propagation ran on already-updated weights
+///      before this fix).
 public struct NeuralNetwork: Sendable {
-    public var weights: [[SIMD8<Float>]]     // weights[layer][neuron], padded/truncated to 8 lanes
+    public var weights: [[[Float]]]          // weights[layer][neuron][lane], lane count == that layer's fan-in
     public var biases: [[Float]]             // biases[layer][neuron]
     public let topology: [Int]               // e.g. [128, 64, 32, 3]
 
     public init(topology: [Int], seed: UInt64 = 0) {
         self.topology = topology
         var generator = SplitMix64(seed: seed)
-        var w: [[SIMD8<Float>]] = []
+        var w: [[[Float]]] = []
         var b: [[Float]] = []
         for layerIndex in 1..<topology.count {
             let neuronCount = topology[layerIndex]
-            var layerWeights: [SIMD8<Float>] = []
+            let fanIn = topology[layerIndex - 1]
+            var layerWeights: [[Float]] = []
             var layerBiases: [Float] = []
             for _ in 0..<neuronCount {
-                let scalars = (0..<8).map { _ in Float.random(in: -0.5...0.5, using: &generator) }
-                layerWeights.append(SIMD8<Float>(scalars))
+                let scalars = (0..<fanIn).map { _ in Float.random(in: -0.5...0.5, using: &generator) }
+                layerWeights.append(scalars)
                 layerBiases.append(0)
             }
             w.append(layerWeights)
@@ -38,12 +52,10 @@ public struct NeuralNetwork: Sendable {
         self.biases = b
     }
 
-    /// Runs one forward pass. Each layer collapses its input vector to 8 packed lanes
-    /// (dot-producted against each neuron's SIMD8 weight vector), so this network only
-    /// ever "sees" the first 8 dimensions of whatever it's fed — that's a real
-    /// architectural constraint of this design, not a bug: inputs wider than 8 (e.g.
-    /// SentimentAnalyzer's 18-dimensional state) must be projected down before calling
-    /// `forward`. See `SentimentAnalyzer.projectToNetworkInput`.
+    /// Runs one forward pass. Each layer's neurons dot-product against its full declared
+    /// fan-in — no truncation. The external input (e.g. SentimentAnalyzer's 18-dimensional
+    /// state) must still be projected down to `topology[0]` before calling `forward`. See
+    /// `SentimentAnalyzer.projectToNetworkInput`.
     public func forward(_ input: [Float]) -> [Float] {
         var activation = input
         for layerIndex in 0..<weights.count {
@@ -86,56 +98,59 @@ public struct NeuralNetwork: Sendable {
     /// `var NeuralNetwork` (DQNAgent stores `online`/`target` as `var` properties).
     public mutating func train(input: [Float], target: [Float], learningRate: Float = 0.001) {
         var activations: [[Float]] = [input]
+        var preActivations: [[Float]] = []
         var current = input
         for layerIndex in 0..<weights.count {
             let layerWeights = weights[layerIndex]
             let layerBiases = biases[layerIndex]
-            current = zip(layerWeights, layerBiases).map { weight, bias in
-                relu(dot(weight, current) + bias)
-            }
+            let z = zip(layerWeights, layerBiases).map { weight, bias in dot(weight, current) + bias }
+            preActivations.append(z)
+            current = z.map(relu)
             activations.append(current)
         }
 
         // Output layer error as MSE on logits (DQN Bellman targets). Softmax is reserved
         // for `forward(_:)` classification consumers — do not apply it here.
-        var delta = zip(activations.last ?? [], target).map { $0 - $1 }
+        let outputError = zip(activations.last ?? [], target).map { $0 - $1 }
+        var delta = zip(outputError, preActivations[weights.count - 1]).map { $0 * reluDerivative($1) }
 
         for layerIndex in stride(from: weights.count - 1, through: 0, by: -1) {
             let inputToLayer = activations[layerIndex]
+            var propagated = [Float](repeating: 0, count: inputToLayer.count)
             for neuronIndex in 0..<weights[layerIndex].count {
                 let gradient = clip(delta[neuronIndex], to: 1.0)
                 biases[layerIndex][neuronIndex] -= learningRate * gradient
-                var updated = weights[layerIndex][neuronIndex]
-                for lane in 0..<min(8, inputToLayer.count) {
+                let weightVector = weights[layerIndex][neuronIndex]
+                if layerIndex > 0 {
+                    for previousNeuron in 0..<inputToLayer.count {
+                        propagated[previousNeuron] += weightVector[previousNeuron] * gradient
+                    }
+                }
+                var updated = weightVector
+                for lane in 0..<inputToLayer.count {
                     updated[lane] -= learningRate * gradient * inputToLayer[lane]
                 }
                 weights[layerIndex][neuronIndex] = updated
             }
             // Propagate error to the previous layer (skipped for the input layer).
             if layerIndex > 0 {
-                delta = (0..<inputToLayer.count).map { previousNeuron in
-                    weights[layerIndex].reduce(Float(0)) { partial, weight in
-                        let lane = previousNeuron < 8 ? weight[previousNeuron] : 0
-                        return partial + lane
-                    }
-                }
+                let previousPreActivation = preActivations[layerIndex - 1]
+                delta = zip(propagated, previousPreActivation).map { $0 * reluDerivative($1) }
             }
         }
     }
 
     private func relu(_ x: Float) -> Float { max(0, x) }
 
+    private func reluDerivative(_ preActivation: Float) -> Float { preActivation > 0 ? 1 : 0 }
+
     private func clip(_ x: Float, to bound: Float) -> Float {
         min(max(x, -bound), bound)
     }
 
-    private func dot(_ weight: SIMD8<Float>, _ input: [Float]) -> Float {
-        var padded = Array(input.prefix(8))
-        if padded.count < 8 {
-            padded.append(contentsOf: repeatElement(0, count: 8 - padded.count))
-        }
-        let vector = SIMD8<Float>(padded)
-        return (weight * vector).sum()
+    /// Accelerated via `NeuralMath` (Accelerate/vDSP on Apple platforms).
+    private func dot(_ weight: [Float], _ input: [Float]) -> Float {
+        NeuralMath.dot(weight, input)
     }
 
     private func softmax(_ logits: [Float]) -> [Float] {

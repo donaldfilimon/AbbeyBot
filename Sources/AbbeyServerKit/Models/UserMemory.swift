@@ -29,6 +29,16 @@ public final class UserMemory: Model, Content, @unchecked Sendable {
     @Timestamp(key: "updated_at", on: .update)
     public var updatedAt: Date?
 
+    /// Original server clock for rows mirrored by CLI `/sync pull`.
+    @OptionalField(key: "source_updated_at")
+    public var sourceUpdatedAt: Date?
+
+    /// Soft-delete tombstone for desktop↔server sync. Nil means live; non-nil means the
+    /// row should be removed on pull (and excluded from full-list endpoints). Cleared if
+    /// a later `remember` / channel bump resurrects the row.
+    @OptionalField(key: "deleted_at")
+    public var deletedAt: Date?
+
     public init() {}
 
     public init(

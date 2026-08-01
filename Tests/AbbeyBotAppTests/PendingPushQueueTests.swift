@@ -59,4 +59,71 @@ struct PendingPushQueueTests {
         try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "two"])
         #expect(try queue.pendingCount() == 2)
     }
+
+    @Test func enqueueDuringAwaitedDrainIsPreserved() async throws {
+        let (queue, url) = makeQueue()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "snapshot"])
+        let concurrentWriter = PendingPushQueue(url: url)
+        let gate = DrainGate()
+
+        let draining = Task {
+            try await queue.drain { _, _ in
+                await gate.markSendStartedAndWaitForRelease()
+                return true
+            }
+        }
+
+        await gate.waitUntilSendStarted()
+        try concurrentWriter.enqueue(
+            path: "/api/state/remember",
+            jsonObjectBody: ["fact": "arrived during drain"]
+        )
+        await gate.releaseSend()
+
+        #expect(try await draining.value == 1)
+        #expect(try queue.pendingCount() == 1)
+
+        var replayedPaths: [String] = []
+        #expect(try await queue.drain { path, _ in
+            replayedPaths.append(path)
+            return true
+        } == 1)
+        #expect(replayedPaths == ["/api/state/remember"])
+        #expect(try queue.pendingCount() == 0)
+    }
+}
+
+private actor DrainGate {
+    private var sendStarted = false
+    private var sendReleased = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markSendStartedAndWaitForRelease() async {
+        sendStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+
+        guard !sendReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilSendStarted() async {
+        guard !sendStarted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseSend() {
+        sendReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
 }

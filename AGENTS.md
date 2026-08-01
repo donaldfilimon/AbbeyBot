@@ -36,12 +36,19 @@ bash Scripts/run-server.sh   # server (loads .env if present)
 bash Scripts/run-abbey.sh    # abbey CLI (loads .env if present)
 ```
 
-Bare `swift run` works when using the Xcode toolchain and `--build-path "${TMPDIR}/AbbeyBot.build"` (Desktop trees otherwise hit iCloud xattr codesign failures). Do not use PATH swiftly for the GUI.
-Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
+Bare `swift run` fails when `TOOLCHAINS=swift` (swiftly / DEVELOPMENT-SNAPSHOT) is exported — SwiftData `@Query` / `\.modelContext` break. Prefer `bash Scripts/run.sh` or `bash Scripts/swift-run.sh` (both `unset TOOLCHAINS` + Xcode). Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
+
+## Browserbase Functions (`functions/`)
+
+Optional serverless browser automation (not part of `verify-all`). Bun package; starter scrapes HN. Setup: `cd functions && cp .env.example .env` (fill `BROWSERBASE_*` from https://browserbase.com/settings), then `bun run dev` / `bun run deploy`. See `functions/README.md`.
 
 CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run swiftlang/swift:nightly-6.4.x-bookworm` — official `library/swift:6.4-*` not published yet) builds `web/` (bun), runs dashboard SPA tests, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`. Desktop job disabled (`if: false`) pending a self-hosted macOS 27 runner — GitHub-hosted `macos-*` runners don't satisfy the pin.
 
-**GitHub Actions (private repo):** hosted workflows currently fail at **startup** with **0 jobs** until Billing → Actions spending/quota is enabled for this repository. Until then, **`bash Scripts/verify-all.sh` is the gate of record** (not a green CI badge). After billing is unblocked, re-run the **Abbey CI** (`abbey-ci`) workflow on the branch under test.
+**Gate of record:** `bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change). Static and security failures must pass or be documented as accepted exceptions before ship. **GitHub Actions (`abbey-ci`)** is secondary until billing is unblocked — hosted workflows currently fail at **startup** with **0 jobs** until Billing → Actions spending/quota is enabled; re-run Abbey CI after unblock.
+
+**Continuation:** “finish all”, “do all”, “continue”, “continue with all”, and equivalent requests mean run the narrowest honest gate for the scoped change plus any ship steps the user asked for — not an intermediate green alone.
+
+**Narrow smokes:** desktop → `run-smoke.sh`; server → `run-server-smoke.sh`; CLI → `run-cli-smoke.sh`.
 
 ## Discord live path (desktop)
 
@@ -49,6 +56,34 @@ CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run s
 2. Discord tab → paste token (Keychain) → Connect
 3. Optional: Dev guild ID → Register slash commands
 4. Settings operating mode `liveDiscord` + auto-connect optional
+
+### Social APIs (Twitch + multi-network understanding)
+
+| Surface | Shipped |
+|---------|---------|
+| Twitch IRC + EventSub chat/stream | Yes — ingest/reply; HMAC webhook |
+| Twitch follow/subscribe/cheer | Yes — parse + interaction log + soft ingest |
+| Helix users/streams | Client methods (unit-testable; live needs creds) |
+| Social catalog | `GET /api/social/catalog` (+ markdown) |
+| YouTube / X / Bluesky / Mastodon webhooks | `POST /api/social/{platform}/webhook` parsers → ingest (not full live SDKs) |
+
+PubSub won't ship. Live EventSub handshake still needs public HTTPS.
+
+### Slash surface (desktop + server)
+
+| Command | Backend path |
+|---------|----------------|
+| `/ask`, `/explain`, `/summarize` | Active persona + `InferenceRouter` (Foundation Models when `inferenceMode=onDevice`, else remote / deterministic floor) |
+| `/model [ondevice\|remote\|floor]` | `AppConfig.inferenceMode` |
+| `/status` | Persona, Discord state, metrics, industry, equity flag, dry-run |
+| `/rep`, `/facts`, `/remember`, `/forget`, `/context` | Social brain / memory (SwiftData or Fluent) |
+| `/persona` | Abbey / Aviva / Abi |
+| `/mod` | Abi moderation **advice only** (does not kick/ban) |
+| `/equity` | Synthetic `FactorScreen` when equity module enabled — not market data |
+| `/industry`, `/ping`, `/help` | Config / health / command list |
+| `/voice join\|leave` | Gateway **presence** only (no audio) |
+
+Re-register slash commands after upgrade so Discord sees the expanded set.
 
 ## UI surfaces (shipped)
 
@@ -72,13 +107,13 @@ ABBEY_PACKAGE_ROLE=server /usr/bin/xcrun --toolchain default swift run AbbeyBot 
 # without Docker: DATABASE_URL=sqlite://${TMPDIR}/abbey.sqlite …
 ```
 
-Routes: `GET /health`, `GET /dashboard` (React SPA when `web/` is built into `Sources/AbbeyServer/Resources/Public/`), `GET /api/metrics`, `GET /api/status`, `GET /api/sync-status` (last desktop-reported sync outcome — Sync tab), `POST /api/ingest` / `POST /api/state/*` (`remember`/`forget`/`sync-status`) / list `GET /api/users|channels|messages|reputation|interactions|equity` (optional `ABBEY_API_TOKEN` when set — Bearer or `X-Abbey-Token`; leave unset for open local SPA list tabs), `GET /api/state/user|channel`, `GET /` (Leaf: Operator UI + JSON API; dashboard link only if built). Optional `?limit=` (default 100, max 500) and `?since=<unix epoch seconds>` (incremental cursor) on list endpoints.
+Routes: `GET /health`, `GET /dashboard` (React SPA when `web/` is built into `Sources/AbbeyServer/Resources/Public/`), `GET /api/metrics`, `GET /api/status`, `GET /api/sync-status` (last desktop-reported sync outcome — Sync tab), `POST /api/ingest` / `POST /api/state/*` (`remember`/`forget`/`tombstone/{user,channel,message,reputation,interaction,equity}`/`sync-status`) / list `GET /api/users|channels|messages|reputation|interactions|equity` / keyed `GET /api/state/user|channel` (optional `ABBEY_API_TOKEN` when set — Bearer or `X-Abbey-Token`, gating all of the above uniformly; leave unset for open local SPA list tabs), `GET /` (Leaf: Operator UI + JSON API; dashboard link only if built). Optional `?limit=` (default 100, max 500) and `?since=<unix epoch seconds>` (incremental cursor) on list endpoints. `Tests/AbbeyServerTests/` covers this route layer directly via `VaporTesting` (HTTP-level, not just `BotRuntime`/`Repositories` calls) — currently just auth gating on the keyed state routes.
 
 Deploy: `Dockerfile` (Bun SPA stage → `swiftlang/swift:nightly-6.4.x-bookworm`, copies `AbbeyBot_AbbeyServer.resources`), `docker-compose.yml`, `deploy/abbeybot.service`. Presence activity: bridge default `"AbbeyBot"`; server passes `"AbbeyServer"`. Linux CI (`abbey-ci.yml`) builds `web/` with Bun (frozen lockfile + `bun test` + `bun run build`) before the Swift docker build so SPM packs dashboard assets.
 
 Server smoke (`Scripts/run-server-smoke.sh`) uses compose Postgres when Docker is up; otherwise `sqlite://` file under `$TMPDIR` (`${TMPDIR}/AbbeyBot.server.build`). Asserts `/health`, Leaf `GET /`, `/dashboard` (200 if built, 404 skip if not), `/api/status`, `POST /api/ingest`, list endpoints, and `/api/state` remember/user/channel.
 
-Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — durable **push** (ingest/remember/forget/sync-status; failed POSTs retry via a JSONL outbox at `~/.abbey/pending-pushes.jsonl`, flushed on the next pull attempt) plus **pull** on launch and Settings “Pull now”, using `?since=` cursors to fetch only rows changed since the last pull. Users/channels use **last-write-wins by `updatedAt`** (an unsynced local edit newer than the remote row survives instead of being clobbered — not resilient to clock skew); equity is still server-wins; messages insert-if-missing by Discord id; reputation/interactions insert-if-missing by Fluent `id`→`serverId`, rows without id skipped; limit 500. Failures never block local SwiftData writes; Settings shows last push/pull outcome for the session, and the SPA's Sync tab shows the server's view of the same (desktop-reported).
+Desktop optional sync: Settings → Server sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — durable **push** (ingest/remember/forget/sync-status; failed POSTs retry via a JSONL outbox at `~/.abbey/pending-pushes.jsonl`, flushed on the next pull attempt) plus **pull** on launch and Settings “Pull now”. Pulls use independent compound `(changedAt, stable ID)` cursors for users, channels, messages, reputation, interactions, and equity. Requests send `?since=<unix epoch>&after=<stable ID>`; list bodies remain JSON arrays and the server publishes the exact next boundary in `X-Abbey-Sync-Cursor-Time` / `X-Abbey-Sync-Cursor-ID` headers. `SyncCursorStore` persists the v2 cursor set in `UserDefaults`; an existing `abbey.sync.lastPullSuccessAt` timestamp is conservatively expanded across all six streams and rewritten after the next successful pull. Missing or corrupt state degrades to an oldest-first full bootstrap (`since=0`) rather than a bogus cursor. A short page advances that entity through pull start; a full 500-row page advances only through the server-issued last-row boundary, so overflow and more than 500 identical-timestamp changes drain without loss. Desktop and CLI share `SyncPullCursor`, `SyncPullCursorSet`, and `IncrementalSyncCursor`. Event/equity tombstones are ordered by `deletedAt`, so an old row deleted recently is not starved by its creation timestamp. The cursor never advances beyond pull start. **Residual clock caveat:** pull-start guards and LWW compare wall clocks, so a desktop clock ahead of the server can still skip later server writes until clocks converge. Users/channels use LWW by `updatedAt`; equity uses LWW by `generatedAt`. Full lists filter tombstones at SQL level; incremental lists include them so clients hard-delete local rows. Messages insert-if-missing by Discord ID; reputation/interactions insert-if-missing by Fluent ID; limit 500. Failures never advance cursors or block local SwiftData writes; Settings shows session outcomes and the SPA Sync tab shows the desktop-reported server view.
 
 ## CLI ops
 
@@ -89,6 +124,8 @@ ABBEY_CLI_USE_SERVER_DATABASE=1 bash Scripts/run-abbey.sh
 ```
 
 Default local DB: `~/.abbey/abbey.sqlite` (directory auto-created), single-user, independent of the server's Postgres. `Scripts/run-abbey.sh` sources `.env` for Discord/`ABBEY_*` knobs but **clears `DATABASE_URL` unless** `ABBEY_CLI_USE_SERVER_DATABASE=1`. To override without the wrapper, export `DATABASE_URL` (same postgres/sqlite conventions as the server) before `swift run AbbeyBot cli`. Discord connects live under the same `DISCORD_BOT_TOKEN` / `DISCORD_DEV_GUILD_ID` env vars as the server when set; otherwise local-only with a warning logged.
+
+REPL commands: `/help`, `/clear`, `/model [mode]`, `/validate <src>`, `/sync`, `/sync pull`, `/sync push`, `/exit`. `/sync` is **read-only** — it prints the desktop-reported `sync_status_records` row visible in the CLI's own database (`BotRuntime.syncStatusSnapshot()`). On the default local SQLite DB there is no such row, so it says so and points at `ABBEY_CLI_USE_SERVER_DATABASE=1`. `/sync pull` reads `ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`, fetches all six list endpoints with the per-entity compound cursor set at `~/.abbey/cli-sync-cursor`, and applies rows via `ServerSyncApply` using the same LWW/tombstone rules as desktop `SyncPull`. A legacy one-line epoch cursor migrates automatically to the v2 JSON cursor set; progress advances only after a fully successful pull. `/sync push` pushes **messages + user memory facts only** to `POST /api/ingest` (preserving `discordMessageId`; duplicate skips are idempotent) and `POST /api/state/remember`, with a separate cursor at `~/.abbey/cli-sync-push-cursor`. Reputation/interactions are re-derived by ingest; equity and tombstones have no CLI write surface. Unconfigured URL prints how to configure instead of faking a sync.
 
 ## Shared core (finalized)
 
@@ -110,7 +147,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 - Natural-language persona switch on ingest (`IntentClassifier.personaSwitch` → `PersonaName.resolve`)
 - Desktop **Personas** tab (`PersonaSwitcherView`)
 
-**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
+**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. `DQNAgent` learns a 3-wide strategy head and surfaces the chosen index for dashboard display — it does **not** yet dispatch answer/clarify/retrieve/refuse (see Learning & Safety Policy open gap). Do not claim a 10k req/s WDBX inference engine here.
 
 **Live dispatch:** `AbbeyEngine` and `BotRuntime` call `ABIRouter.route(intent:)` (via `IntentClassifier`) on message ingress `craftReply` and slash `/ask` — not only `currentPersona()`.
 
@@ -126,9 +163,16 @@ Binds the Abbey self-learning system prompt for operators, agents, and implement
 
 Operate as a safe, useful, continuously improving community assistant. Learn from explicit user feedback, moderation outcomes, retrieval success, and testable system signals. Never silently execute generated code, never bypass platform rules, and never treat reinforcement learning rewards as permission to ignore safety constraints.
 
-### Reinforcement learning (strategy only)
+### Reinforcement learning (strategy dispatch — shipped)
 
-`DQNAgent` in AbbeyCore drives strategy selection among allowed actions (answer, clarify, retrieve, refuse, etc.). RL improves routing among those actions; it does **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
+`DQNAgent` topology **`[8, 64, 32, 4]`** selects `StrategyAction`: **answer / clarify / retrieve / refuse**. `IngestScorer.scoreAndLearn` writes an **action-conditioned** reward, non-identical `nextState`, trains a minibatch, and upserts into local WDBX. `craftReply` **routes on `lastStrategy`** (clarify/retrieve prompts, cosine retrieval for `.retrieve`, hard refuse for mod/command + `.refuse`). RL does **not** weaken kick/ban gates.
+
+**Neural acceleration:** `NeuralMath` / network dots use **Accelerate/vDSP** on Apple platforms (AMX/NEON) — not CUDA.
+### Reinforcement learning (strategy only — dispatch not shipped)
+
+`DQNAgent` in AbbeyCore is the intended strategy selector among allowed actions (answer, clarify, retrieve, refuse, etc.). When that dispatch ships, RL will improve routing among those actions only — it must **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
+
+**Local WDBX:** `~/.abbey/wdbx/` segmented JSONL (`WDBXStore`) + experience journal. **Not** Zig abi WDBX; no throughput claims. Old checkpoints with `[8,32,16,3]` fail topology load and re-init.
 
 ### Phase 1 runtime (shipped)
 
@@ -137,6 +181,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Config validate before startup | `AppConfig.validateForStartup(scope:)` — `.desktop` (GUI) enforces `liveDiscord` token unless dry-run; `.headless` (server/CLI via `configureRuntime`) skips that UserDefaults gate so HTTP can boot without a token. Also: remoteCompatible URL; sync URL http(s)+host; cooldown/decay ranges. |
 | Dry-run | `ABBEY_DRY_RUN=1` / `AppConfig.dryRun` — `DiscordBridge` / `TwitchBridge` skip sockets, log `dry-run: would connect`. |
 | Durable checkpoints | `DQNAgent.save/load` + `DQNCheckpointStore` default `~/.abbey/dqn-checkpoint.json`; `*.bak` before overwrite; load on engine start; save every 100 learn steps with target sync. |
+| Correct backprop + full fan-in + Accelerate | Fan-in-correct dense layers + ReLU backprop (see `NeuralNetworkBackpropTests`). Dots via `NeuralMath` / Accelerate vDSP. Topology now `[8, 64, 32, 4]` with live strategy dispatch — see RL section above. |
 
 ### Phase 2 runtime (shipped)
 
@@ -145,7 +190,7 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 | Experience journal | Append-only JSONL `~/.abbey/dqn-experience.jsonl` via `ExperienceJournal`; `DQNAgent.remember` appends; engines call `loadExperienceJournalIfPresent()` on start into the in-memory replay buffer. |
 | Generated-code validator | `CodeProposalValidator.validate` / `acceptOrThrow` — static reject of shell/process/dlopen/network/rm patterns (not a sandbox). |
 | Rollback FS | `RollbackStore` snapshots under `~/.abbey/rollback/<name>/`; `restore` / `restoreFromBak`; checkpoint saves also snapshot when managed. |
-| Twitch IRC + chat→ingest/reply | `TwitchBridge` + `TwitchIRCParser` — PRIVMSG → ingest (`guildId=twitch`) + persona reply via IRC; dry-run logs sends. EventSub: `POST /api/twitch/eventsub` verifies HMAC-SHA256 (`Twitch-Eventsub-Message-Signature`, `TwitchEventSubSignature` in AbbeyServerKit) plus a 10-min replay window when `TWITCH_EVENTSUB_SECRET` is set (unset skips verification, logs a warning); rejects with 403 on mismatch. `TwitchHelixClient` (AbbeyServerKit) can fetch an app access token and create subscriptions via Helix, but is not wired to server boot and has not been run against live Twitch — needs a real public HTTPS callback this environment doesn't have. **Not shipped:** message-id replay dedup, per-event-type business logic, auto-subscribe on boot, PubSub. |
+| Twitch IRC + chat→ingest/reply | `TwitchBridge` + `TwitchIRCParser` — PRIVMSG → ingest (`guildId=twitch`) + persona reply via IRC; dry-run logs sends. A clean peer-closed IRC connection correctly flips `state` to `.failed` with a descriptive `lastError` (verified with a real local-socket test, not a mock), and `TwitchBridge` then retries the connection itself with exponential backoff + jitter (2s base, 60s cap; both injectable for tests), cancelled cleanly by an explicit `disconnect()`. Caveat found while building this: a reconnect attempt launched from the internal retry `Task` was observed, in ad hoc local testing, taking far longer (~76s) to actually complete a connection than the original directly-awaited `connect()` call does (well under a second) — plausibly because `TwitchIRCConnection` never schedules its CFStreams on a run loop, but this is unconfirmed. Real-world reconnect latency may not match the nominal backoff schedule; this needs runtime observation against live Twitch to know for sure. IRC and EventSub chat share one path: `BotRuntime.handleTwitchChat` (bot-nick skip, ingest, cooldown, persona reply over IRC). EventSub: `POST /api/twitch/eventsub` verifies HMAC-SHA256 (`Twitch-Eventsub-Message-Signature`, `TwitchEventSubSignature` in AbbeyServerKit) plus a 10-min replay window when `TWITCH_EVENTSUB_SECRET` is set (unset skips verification, logs a warning); rejects with 403 on mismatch. Duplicate deliveries are dropped by `Twitch-Eventsub-Message-Id` via in-memory `TwitchEventSubReplayGuard` (challenge echoes skip claim so verification retries still work). `TwitchEventSubHandler` classifies message types; `channel.chat.message` → `handleTwitchChat` (ack `outcome=notification-ingested`); `stream.online` / `stream.offline` → `handleTwitchStreamLifecycle` (updates `BotRuntime.twitchStreamLive`, publishes `AbbeyEvent.twitchStreamLifecycle`, logs an interaction; surfaced on `GET /api/status` as `twitchStreamLive`) — follow/subscribe/cheer log interactions and soft-ingest social context. Auto-subscribe on boot ships **env-gated and off by default**: `TwitchEventSubAutoSubscriber` runs in `BotLifecycleHandler.didBootAsync` (server only, not CLI) when `ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` plus `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET`/`TWITCH_EVENTSUB_SECRET`/`TWITCH_EVENTSUB_CALLBACK_URL` (https only)/`TWITCH_BROADCASTER_USER_ID`/`TWITCH_BOT_USER_ID`/`TWITCH_EVENTSUB_AUTHORIZATION_CONFIRMED=1` are all set — it fetches an app token and reconciles `channel.chat.message`, `stream.online`, `stream.offline`, `channel.follow`, `channel.subscribe`, and `channel.cheer` via `TwitchHelixClient` (HTTP 409 is idempotent success); missing configuration, unconfirmed user authorization, or any Helix failure warns and skips without crashing boot. Chat authorization needs `user:read:chat` + `user:bot` from the bot and either broadcaster `channel:bot` or moderator status; follow/subscribe/cheer need their documented broadcaster/moderator scopes. The flow has not been run against live Twitch — the `webhook_callback_verification` handshake needs a real public HTTPS callback this environment doesn't have. **Not shipped:** PubSub (Twitch-deprecated; won't ship) or a live-verified Helix handshake. |
 | Industry profile shell | `IndustryProfile` (`ABBEY_INDUSTRY_PROFILE`) — prompt suffix only; not HIPAA/GDPR product modules. |
 | WDBX memory facade | `WDBXMemoryFacade` over `ExperienceJournal` — local strategy memory name only; **not** Zig abi WDBX; no throughput claims. |
 | Decentralization stub | `DecentralizationPolicy` / `ABBEY_DECENTRALIZATION_ENABLED` — must stay false; startup validates. No blockchain node. |
@@ -158,17 +203,33 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 
 ### Verification gate = release authority
 
-`bash Scripts/verify-all.sh` (or the narrowest honest smoke for the change) is the gate of record. Static and security failures must pass or be documented as accepted exceptions before ship. GitHub Actions (`abbey-ci`) is secondary until billing is unblocked.
+See **Verify** above — gate of record, CI secondary, continuation semantics, and narrow smoke scripts.
 
 ### Still deferred
 
-- **Twitch EventSub full lifecycle / PubSub** — HMAC signature verification (with replay window) and a reusable Helix subscribe client ship (see Phase 2 table). Still deferred: message-id replay dedup, per-event-type business logic, auto-subscribe on server boot, PubSub. The subscribe flow is unverified against Twitch's live API — it needs a real public callback URL to exercise the `webhook_callback_verification` handshake, which this environment can't provide.
-- **Codegen sandbox** — static `CodeProposalValidator` only; no isolated execution sandbox.
+- **Twitch EventSub live verification / PubSub** — HMAC signature verification (with replay window), message-id replay dedup (`TwitchEventSubReplayGuard`), typed `TwitchEventSubHandler` classification, chat/stream/follow/subscribe/cheer handling, env-gated six-type auto-subscribe reconciliation (`TwitchEventSubAutoSubscriber`, off by default), and a reusable Helix subscribe client ship (see Phase 2 table). Still deferred: running the authorization + `webhook_callback_verification` handshake against Twitch through a real public HTTPS callback. PubSub is a **won't-ship** — Twitch deprecated it in favor of EventSub.
+- **Codegen sandbox** — **won't ship in this package**; `/validate` remains the static `CodeProposalValidator` reject-list only. An isolated execution sandbox would be a separate product surface; nothing here should scaffold or imply a jail.
 - **Real WDBX / blockchain** — facade + policy stubs only; Zig abi WDBX and chain nodes are out of this package.
-- Full CRDT merge, delete propagation, CLI↔desktop sync — see Deferred below (`?since=` cursors and last-write-wins for users/channels now ship).
+- **Discord Voice audio** — **won't ship in this package**; DiscordBM has no media stack. Presence (`/voice join|leave`) is the whole voice claim.
+- **CRDT merge** — **won't ship**; LWW + tombstones + CLI `/sync pull` + `/sync push` (messages + facts) is the sync story (see Deferred below). Multi-writer CRDT merge stays out.
 
 ## Deferred
 
-Discord Voice **audio** (Opus/UDP) — DiscordBM has no media stack yet, and a real implementation (Voice Gateway WS + UDP/IP-discovery + RTP + Opus codec + audio capture/playback) is a standalone effort on the order of the rest of this package combined. Deliberately out of scope; not planned alongside other sync/UI work. Voice **presence** (`/voice join|leave`, Discord tab) is shipped.
+Discord Voice **audio** (Opus/UDP) — **won't ship in this package.** DiscordBM has no media stack, and a real implementation (Voice Gateway WS + UDP/IP-discovery + RTP + Opus codec + audio capture/playback) is a standalone effort on the order of the rest of this package combined. No scaffold implying an Opus stack should land here. Voice **presence** (`/voice join|leave`, Discord tab) is shipped and is the whole voice claim.
 
-Full CRDT / CLI↔desktop sync — desktop ships **push + pull** with `?since=` incremental cursors (launch + Settings “Pull now”) and **last-write-wins by `updatedAt`** for users/channels (equity is still server-wins; messages by Discord id; reputation/interactions by Fluent id; limit 500). LWW compares each side's own wall clock — not resilient to significant clock skew between desktop and server. No CRDT merge, no delete/tombstone propagation, and the CLI still doesn't participate in sync at all (`abbey` is local-SQLite-only per its own DATABASE_URL section above).
+CRDT (won't ship) — desktop ships **push + pull** with persisted per-entity compound incremental cursors and **last-write-wins** for users/channels (`updatedAt`) and equity (`generatedAt`); all six sync entity types soft-delete via `deletedAt` tombstones that `SyncPull` applies as local hard-deletes; messages key by Discord ID and reputation/interactions by Fluent ID; page limit 500 drains through `(changedAt, stable ID)` continuation. LWW and pull-start guards compare wall clocks and remain vulnerable to significant clock skew. The CLI ships **pull + push** with the same compound pull protocol; push remains messages + memory facts only. True multi-writer CRDT/vector-clock merge remains a **won't-ship** for this package.
+
+## Learned User Preferences
+
+- Prefer terse, path-anchored findings and tables for gates/status; avoid narrative essay wrap-ups.
+- Mid-task slash-skill attaches (`/review`, `/continual-learning`, etc.) win over inventing a parallel workflow.
+- Dual review asks (“security and code quality”) mean run both Bugbot and Security Review.
+- Prefer `cursor/` branches from `origin/main`, draft PRs when offered, land via PR merge; never commit/push straight to `main` or force-push `main`.
+
+## Learned Workspace Facts
+
+- Do not commit secrets (`.env`, tokens) or local scratch (`.cursor/hooks/`). Optional `functions/` Browserbase scaffold is tracked; keep `functions/.env` / `functions/node_modules` untracked (see `functions/.gitignore`).
+- Do not commit `node_modules` — dashboard deps live under `web/node_modules` (`web/.gitignore`); Browserbase deps under `functions/node_modules`.
+- Dashboard SPA build output packs into `Sources/AbbeyServer/Resources/Public/` (gitignored unless intentionally shipping built assets).
+- Prefer repo launch wrappers (`Scripts/run.sh`, `run-server.sh`, `run-abbey.sh`, `swift-run.sh`) over hand-pasted multiline `xcrun`/`swift run` — terminal pastes often include editor line numbers or bare `--port` flags that fail.
+- Process env overrides UserDefaults for `AppConfig` knobs (`ABBEY_INFERENCE_MODE`, etc.); smoke scripts pin `ABBEY_INFERENCE_MODE=deterministicFloor` and isolate `HOME` so host GUI settings cannot block headless boots.

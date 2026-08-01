@@ -56,6 +56,48 @@ public struct ChannelStateDTO: Content {
     }
 }
 
+/// The desktop-reported sync outcome as stored in this runtime's database, plus the dialect
+/// it came from. The server never pushes or pulls; the CLI can pull (`/sync pull`) but
+/// reporting into this row stays a desktop concern.
+public struct SyncStatusSnapshotDTO: Content, Sendable {
+    public var databaseDialect: String
+    public var lastPullAt: Date?
+    public var lastPullError: String?
+    public var lastPushAt: Date?
+    public var lastPushError: String?
+    public var pendingPushCount: Int
+    public var reportedAt: Date?
+
+    public init(
+        databaseDialect: String,
+        lastPullAt: Date? = nil,
+        lastPullError: String? = nil,
+        lastPushAt: Date? = nil,
+        lastPushError: String? = nil,
+        pendingPushCount: Int = 0,
+        reportedAt: Date? = nil
+    ) {
+        self.databaseDialect = databaseDialect
+        self.lastPullAt = lastPullAt
+        self.lastPullError = lastPullError
+        self.lastPushAt = lastPushAt
+        self.lastPushError = lastPushError
+        self.pendingPushCount = pendingPushCount
+        self.reportedAt = reportedAt
+    }
+}
+
+public enum BotRuntimeEventProcessingError: Error, LocalizedError, Sendable {
+    case ingestFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .ingestFailed:
+            return "Event persistence failed; the delivery should be retried."
+        }
+    }
+}
+
 /// Headless engine: Fluent persistence + DiscordBM gateway + AbbeyCore brain.
 public actor BotRuntime {
     let app: Application
@@ -69,11 +111,17 @@ public actor BotRuntime {
     let inferenceRouter: InferenceRouter
     let discordBridge = DiscordBridge()
     let twitchBridge = TwitchBridge()
+    /// Local WDBX segment store (`~/.abbey/wdbx/`).
+    let wdbxStore: WDBXStore?
+    public private(set) var lastStrategy: StrategyAction = .answer
 
     public private(set) var discordState: DiscordConnectionState = .disconnected
     private(set) var discordLastError: String?
     private(set) var discordBotUserId: String?
     private(set) var liveIngestCount: Int = 0
+    /// Last observed Twitch EventSub stream lifecycle. `nil` until the first
+    /// `stream.online` / `stream.offline` notification arrives this process.
+    public internal(set) var twitchStreamLive: Bool?
     private var metricsListener: Task<Void, Never>?
 
     init(app: Application) {
@@ -86,11 +134,20 @@ public actor BotRuntime {
         self.eventBus = bus
         self.socialBrain = FluentSocialBrain(db: app.db, eventBus: bus, decay: { config.reputationDecay })
         let checkpointURL = try? DQNCheckpointStore.defaultURL()
-        let journalURL = try? ExperienceJournalStore.defaultURL()
+        let store = try? WDBXStore()
+        self.wdbxStore = store
+        let experiencePersistence: DQNExperiencePersistence?
+        if let wdbxFacade = try? WDBXMemoryFacade.default(store: store) {
+            experiencePersistence = .memory(wdbxFacade)
+        } else if let journalURL = try? ExperienceJournalStore.defaultURL() {
+            experiencePersistence = .journal(ExperienceJournal(url: journalURL))
+        } else {
+            experiencePersistence = nil
+        }
         self.dqnAgent = DQNAgent(
-            topology: [8, 32, 16, 3],
+            topology: DQNAgent.defaultTopology,
             checkpointURL: checkpointURL,
-            experienceJournalURL: journalURL
+            experiencePersistence: experiencePersistence
         )
         self.scheduler = FluentScheduler(
             db: app.db,
@@ -130,34 +187,7 @@ public actor BotRuntime {
         if !twitchToken.isEmpty {
             let hooks = TwitchEventHooks { [weak self] msg in
                 guard let self else { return }
-                let botNick = (await self.twitchBridge.loginNick ?? "").lowercased()
-                if !botNick.isEmpty, msg.login == botNick { return }
-                await self.ingestMessage(
-                    content: msg.text,
-                    channelId: msg.channel,
-                    guildId: "twitch",
-                    authorId: msg.login,
-                    discordMessageId: "twitch-\(UUID().uuidString)"
-                )
-                if await self.scheduler.isCoolingDown(userId: msg.login, guildId: "twitch") {
-                    return
-                }
-                let intent = IntentClassifier.classify(msg.text)
-                let persona = await self.personaRouter.route(intent: intent)
-                let context = await self.personaContext(
-                    authorId: msg.login,
-                    guildId: "twitch",
-                    channelId: msg.channel
-                )
-                let response = await persona.respond(
-                    to: msg.text,
-                    context: context,
-                    inference: self.inferenceRouter
-                )
-                let reply = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !reply.isEmpty else { return }
-                await self.twitchBridge.sendPrivmsg(channel: msg.channel, text: reply)
-                await self.scheduler.markReplied(userId: msg.login, guildId: "twitch")
+                await self.handleTwitchChat(login: msg.login, channel: msg.channel, text: msg.text)
             }
             await twitchBridge.connect(
                 oauthToken: twitchToken,
@@ -192,6 +222,7 @@ public actor BotRuntime {
         metricsListener?.cancel()
         metricsListener = nil
         await scheduler.stop()
+        await twitchBridge.disconnect()
         await discordBridge.disconnect()
         discordState = .disconnected
     }
@@ -258,59 +289,92 @@ public actor BotRuntime {
         discordState = .connected
     }
 
-    public func ingestMessage(
+    /// Ingest with a typed, message-scoped outcome.  The selected strategy travels with the
+    /// inserted message so actor reentrancy cannot apply another message's strategy later.
+    @discardableResult
+    public func ingestMessageOutcome(
         content: String,
         channelId: String,
         guildId: String,
         authorId: String,
         discordMessageId: String
-    ) async {
+    ) async -> MessageIngestOutcome {
         let started = ContinuousClock.now
+        let intent = IntentClassifier.classify(content)
+        let persisted: (authorInteractionCount: Int, channelActivity: Int)?
         do {
-            try await MessageRepository.insert(
-                discordMessageId: discordMessageId,
-                channelId: channelId,
-                guildId: guildId,
-                authorId: authorId,
-                content: content,
-                on: app.db
-            )
-            liveIngestCount += 1
-            try await ChannelRepository.bump(channelId: channelId, guildId: guildId, on: app.db)
+            persisted = try await app.db.transaction { database in
+                if try await MessageRepository.exists(discordMessageId: discordMessageId, on: database) {
+                    return nil
+                }
+                try await MessageRepository.insert(
+                    discordMessageId: discordMessageId,
+                    channelId: channelId,
+                    guildId: guildId,
+                    authorId: authorId,
+                    content: content,
+                    on: database
+                )
+                try await ChannelRepository.bump(channelId: channelId, guildId: guildId, on: database)
 
-            let intent = IntentClassifier.classify(content)
-            if intent == .memoryStore {
-                let fact = MemoryFactText.extract(from: content)
-                try await MemoryRepository.appendFact(userId: authorId, guildId: guildId, fact: fact, on: app.db)
+                if intent == .memoryStore {
+                    let fact = MemoryFactText.extract(from: content)
+                    try await MemoryRepository.appendFact(
+                        userId: authorId,
+                        guildId: guildId,
+                        fact: fact,
+                        on: database
+                    )
+                }
+
+                let interactionCount = try await UserMemory.query(on: database)
+                    .filter(\.$discordUserId == authorId)
+                    .filter(\.$guildId == guildId)
+                    .first()?.interactionCount ?? 0
+                let channelActivity = try await ChannelRepository.messageCount(
+                    channelId: channelId,
+                    guildId: guildId,
+                    on: database
+                )
+                return (interactionCount, channelActivity)
             }
-            if intent == .personaSwitch {
-                await personaRouter.setPersona(named: PersonaName.resolve(content))
+        } catch {
+            // A concurrent insert can win after the existence check. Only a confirmed
+            // durable row is a duplicate; every other storage failure remains retryable.
+            if (try? await MessageRepository.exists(discordMessageId: discordMessageId, on: app.db)) == true {
+                return .duplicate
             }
+            app.logger.error("ingest persistence failed: \(OperatorFacingError.message(error))")
+            return .failed
+        }
 
-            await eventBus.publish(.messageIngested(channelId: channelId, guildId: guildId, authorId: authorId))
-
-            let reputationBefore = await socialBrain.reputation(userId: authorId, guildId: guildId)
-            let authorInteractionCount = try await UserMemory.query(on: app.db)
-                .filter(\.$discordUserId == authorId)
-                .filter(\.$guildId == guildId)
-                .first()?.interactionCount ?? 0
-            let channelActivity = try await ChannelRepository.messageCount(
-                channelId: channelId,
-                guildId: guildId,
-                on: app.db
+        guard let persisted else {
+            app.logger.info(
+                "ingest skipped — discordMessageId=\(discordMessageId) already present (duplicate)"
             )
+            return .duplicate
+        }
+        liveIngestCount += 1
 
-            let scored = await IngestScorer.scoreAndLearn(
-                content: content,
-                guildId: guildId,
-                reputationBefore: reputationBefore,
-                authorInteractionCount: authorInteractionCount,
-                channelMessageCount: channelActivity,
-                dqnAgent: dqnAgent,
-                intent: intent
-            )
-            await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
+        await eventBus.publish(.messageIngested(channelId: channelId, guildId: guildId, authorId: authorId))
 
+        let reputationBefore = await socialBrain.reputation(userId: authorId, guildId: guildId)
+        let scored = await IngestScorer.scoreAndLearn(
+            content: content,
+            guildId: guildId,
+            reputationBefore: reputationBefore,
+            authorInteractionCount: persisted.authorInteractionCount,
+            channelMessageCount: persisted.channelActivity,
+            dqnAgent: dqnAgent,
+            intent: intent,
+            wdbx: wdbxStore,
+            authorId: authorId,
+            channelId: channelId
+        )
+        lastStrategy = scored.strategy
+        await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
+
+        do {
             try await InteractionRepository.log(
                 commandName: "ingestMessage",
                 userId: authorId,
@@ -320,8 +384,42 @@ public actor BotRuntime {
                 on: app.db
             )
         } catch {
-            app.logger.error("ingest failed: \(error)")
+            // The message transaction already committed. Audit telemetry is best-effort and
+            // must not turn a successful ingest into a misleading retryable failure.
+            app.logger.warning("ingest audit failed: \(OperatorFacingError.message(error))")
         }
+        return .inserted(strategy: scored.strategy)
+    }
+
+    /// Compatibility surface used by HTTP and existing repository tests.  New transport
+    /// paths should prefer `ingestMessageOutcome` so duplicate and failure stay distinct.
+    @discardableResult
+    public func ingestMessage(
+        content: String,
+        channelId: String,
+        guildId: String,
+        authorId: String,
+        discordMessageId: String
+    ) async -> Bool {
+        await ingestMessageOutcome(
+            content: content,
+            channelId: channelId,
+            guildId: guildId,
+            authorId: authorId,
+            discordMessageId: discordMessageId
+        ).wasInserted
+    }
+
+    /// Ingest a normalized multi-platform social envelope (YouTube / X / Bluesky / Mastodon).
+    @discardableResult
+    public func handleSocialEnvelope(_ envelope: SocialIngestEnvelope) async -> MessageIngestOutcome {
+        await ingestMessageOutcome(
+            content: envelope.text,
+            channelId: envelope.ingestChannelId,
+            guildId: envelope.ingestGuildId,
+            authorId: envelope.ingestAuthorId,
+            discordMessageId: "\(envelope.platform.rawValue)-\(envelope.messageId)"
+        )
     }
 
     func personaContext(authorId: String, guildId: String, channelId: String) async -> PersonaContext {
@@ -331,13 +429,65 @@ public actor BotRuntime {
         return PersonaContext(channelSummary: summary, userFacts: facts, reputation: reputation)
     }
 
+    private func auditSlashCommand(
+        commandName: String,
+        userId: String,
+        guildId: String,
+        succeeded: Bool,
+        latencyMs: Double
+    ) async {
+        do {
+            try await InteractionRepository.log(
+                commandName: commandName,
+                userId: userId,
+                guildId: guildId,
+                succeeded: succeeded,
+                latencyMs: latencyMs,
+                on: app.db
+            )
+        } catch {
+            app.logger.warning(
+                "slash interaction audit failed: \(OperatorFacingError.message(error))"
+            )
+        }
+    }
+
+    func craftReply(
+        content: String,
+        channelId: String,
+        guildId: String,
+        authorId: String,
+        strategy: StrategyAction
+    ) async -> String? {
+        let intent = IntentClassifier.classify(content)
+        if strategy == .refuse && (intent == .modRequest || intent == .command) {
+            return "I won’t take automated moderation actions from chat. Use a human moderator or `/mod` for advice only."
+        }
+
+        let persona = await personaRouter.route(intent: intent, userText: content)
+        // Retrieval uses the authoritative memory/channel stores in `personaContext`.
+        // WDBX holds scoped strategy vectors only, never a second copy of raw user text.
+        let context = await personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
+        let directed = strategy.replyDirective(userText: content, retrievedFacts: context.userFacts)
+        return await persona.respond(to: directed, context: context, inference: inferenceRouter).text
+    }
+
     /// Persona reply to free text, outside the Discord message/interaction flow — used by
     /// the CLI's conversation loop, mirroring `makeInteractionRouter`'s `ask` closure.
-    public func reply(to text: String, userId: String, guildId: String, channelId: String) async -> String {
-        let intent = IntentClassifier.classify(text)
-        let persona = await personaRouter.route(intent: intent)
-        let context = await personaContext(authorId: userId, guildId: guildId, channelId: channelId)
-        return await persona.respond(to: text, context: context, inference: inferenceRouter).text
+    public func reply(
+        to text: String,
+        userId: String,
+        guildId: String,
+        channelId: String,
+        strategy: StrategyAction = .answer
+    ) async -> String {
+        await craftReply(
+            content: text,
+            channelId: channelId,
+            guildId: guildId,
+            authorId: userId,
+            strategy: strategy
+        ) ?? ""
     }
 
     /// Keyed read of a user's shared state — used by the desktop app's sync client
@@ -366,6 +516,57 @@ public actor BotRuntime {
         try await MemoryRepository.forgetFact(userId: userId, guildId: guildId, index: index, on: app.db)
     }
 
+    /// Soft-delete a user-memory row so incremental sync pulls can tombstone it on desktop.
+    public func tombstoneUser(userId: String, guildId: String) async throws {
+        try await MemoryRepository.softDelete(userId: userId, guildId: guildId, on: app.db)
+    }
+
+    /// Soft-delete a channel-context row so incremental sync pulls can tombstone it on desktop.
+    public func tombstoneChannel(channelId: String, guildId: String) async throws {
+        try await ChannelRepository.softDelete(channelId: channelId, guildId: guildId, on: app.db)
+    }
+
+    public func tombstoneMessage(discordMessageId: String) async throws {
+        try await MessageRepository.softDelete(discordMessageId: discordMessageId, on: app.db)
+    }
+
+    public func tombstoneReputation(id: UUID) async throws {
+        try await ReputationRepository.softDelete(id: id, on: app.db)
+    }
+
+    public func tombstoneInteraction(id: UUID) async throws {
+        try await InteractionRepository.softDelete(id: id, on: app.db)
+    }
+
+    public func tombstoneEquity(symbol: String) async throws {
+        try await EquityRepository.softDelete(symbol: symbol, on: app.db)
+    }
+
+    /// The runtime's default Fluent database — exposed for the CLI's `/sync pull`, which
+    /// applies pulled server rows via `ServerSyncApply` without opening a second connection.
+    public var database: any Database {
+        app.db
+    }
+
+    /// The sync-status row visible in *this* runtime's database. When the CLI runs on its own
+    /// local SQLite file this is empty — the desktop reports into the server's database, so a
+    /// meaningful row only appears when `ABBEY_CLI_USE_SERVER_DATABASE=1` points both at one DB.
+    public func syncStatusSnapshot() async -> SyncStatusSnapshotDTO {
+        let dialect = app.databaseDialect
+        guard let record = try? await SyncStatusRepository.current(on: app.db) else {
+            return SyncStatusSnapshotDTO(databaseDialect: dialect)
+        }
+        return SyncStatusSnapshotDTO(
+            databaseDialect: dialect,
+            lastPullAt: record.lastPullAt,
+            lastPullError: record.lastPullError,
+            lastPushAt: record.lastPushAt,
+            lastPushError: record.lastPushError,
+            pendingPushCount: record.pendingPushCount,
+            reportedAt: record.reportedAt
+        )
+    }
+
     public func metricsSnapshot() -> MetricsDTO {
         MetricsDTO(
             messagesIngested: metrics.messagesIngestedThisSession,
@@ -383,8 +584,8 @@ public actor BotRuntime {
     private func makeMessageIngress() -> MessageIngress {
         MessageIngress(
             ingest: { [weak self] content, channelId, guildId, authorId, messageId in
-                guard let self else { return }
-                await self.ingestMessage(
+                guard let self else { return .failed }
+                return await self.ingestMessageOutcome(
                     content: content,
                     channelId: channelId,
                     guildId: guildId,
@@ -392,13 +593,15 @@ public actor BotRuntime {
                     discordMessageId: messageId
                 )
             },
-            craftReply: { [weak self] content, channelId, guildId, authorId in
+            craftReply: { [weak self] content, channelId, guildId, authorId, strategy in
                 guard let self else { return nil }
-                let intent = IntentClassifier.classify(content)
-                let persona = await self.personaRouter.route(intent: intent)
-                let context = await self.personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
-                let response = await persona.respond(to: content, context: context, inference: self.inferenceRouter)
-                return response.text
+                return await self.craftReply(
+                    content: content,
+                    channelId: channelId,
+                    guildId: guildId,
+                    authorId: authorId,
+                    strategy: strategy
+                )
             },
             isCoolingDown: { [weak self] userId, guildId in
                 guard let self else { return false }
@@ -472,6 +675,110 @@ public actor BotRuntime {
             voice: { [weak self] action, guildId in
                 guard let self else { return DiscordCopy.engineUnavailable }
                 return await self.performVoice(action, guildId: guildId)
+            },
+            help: { DiscordSlashLogic.helpText() },
+            status: { [weak self] _, _ in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let persona = await self.personaRouter.currentPersona().name
+                let snap = await self.metricsSnapshot()
+                return DiscordCopy.statusReport(
+                    persona: persona,
+                    inference: DiscordSlashLogic.displayInferenceMode(AppConfig.shared.inferenceMode),
+                    discord: snap.discordState,
+                    messages: snap.messagesIngested,
+                    inferenceCalls: snap.inferenceCalls,
+                    inferenceFailures: snap.inferenceFailures,
+                    lastInferenceError: snap.lastInferenceError,
+                    industry: AppConfig.shared.industryProfile.rawValue,
+                    equityEnabled: AppConfig.shared.equityModuleEnabled,
+                    dryRun: AppConfig.shared.dryRun
+                )
+            },
+            model: { raw in
+                if let raw, !raw.isEmpty {
+                    guard let mode = DiscordSlashLogic.resolveInferenceMode(raw) else {
+                        return DiscordCopy.modelUnknown
+                    }
+                    AppConfig.shared.inferenceMode = mode
+                    return DiscordCopy.modelSet(DiscordSlashLogic.displayInferenceMode(mode))
+                }
+                return DiscordCopy.modelCurrent(
+                    DiscordSlashLogic.displayInferenceMode(AppConfig.shared.inferenceMode)
+                )
+            },
+            summarize: { [weak self] channelId, guildId, userId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let persona = await self.personaRouter.route(intent: .question)
+                let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+                let prompt = """
+                Summarize this Discord channel memory for an operator. Be concise (≤ 8 bullets). \
+                Call out open questions, tone, and any reputation/facts signals.
+
+                Channel summary:
+                \(context.channelSummary.isEmpty ? "(empty)" : context.channelSummary)
+                """
+                return await persona.respond(to: prompt, context: context, inference: self.inferenceRouter).text
+            },
+            explain: { [weak self] topic, userId, guildId, channelId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let trimmed = topic.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return DiscordCopy.emptyTopic }
+                let persona = await self.personaRouter.route(intent: .question)
+                let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+                let prompt = "Explain clearly for a skilled engineer: \(trimmed)"
+                return await persona.respond(to: prompt, context: context, inference: self.inferenceRouter).text
+            },
+            facts: { [weak self] userId, guildId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let facts = (try? await MemoryRepository.facts(
+                    userId: userId,
+                    guildId: guildId,
+                    on: self.app.db
+                )) ?? []
+                return DiscordSlashLogic.formatFacts(userId: userId, facts: facts)
+            },
+            ping: {
+                let start = ContinuousClock.now
+                let ms = IngestScorer.latencyMilliseconds(since: start)
+                return DiscordCopy.ping(latencyMs: ms)
+            },
+            equity: { symbol in
+                DiscordSlashLogic.formatEquity(
+                    symbol: symbol,
+                    enabled: AppConfig.shared.equityModuleEnabled
+                )
+            },
+            modAdvice: { [weak self] situation, userId, guildId, channelId in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let trimmed = situation.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return DiscordCopy.emptySituation }
+                let persona = await self.personaRouter.route(intent: .modRequest)
+                let context = await self.personaContext(authorId: userId, guildId: guildId, channelId: channelId)
+                let prompt = """
+                Moderation advice only — do not claim you executed kicks, bans, or purges. \
+                Recommend proportionate steps, what to document, and when to escalate.
+
+                Situation:
+                \(trimmed)
+                """
+                return await persona.respond(to: prompt, context: context, inference: self.inferenceRouter).text
+            },
+            industry: {
+                let profile = AppConfig.shared.industryProfile
+                return DiscordCopy.industryProfile(
+                    profile.rawValue,
+                    suffixEmpty: profile.promptSuffix.isEmpty
+                )
+            },
+            audit: { [weak self] commandName, userId, guildId, succeeded, latencyMs in
+                guard let self else { return }
+                await self.auditSlashCommand(
+                    commandName: commandName,
+                    userId: userId,
+                    guildId: guildId,
+                    succeeded: succeeded,
+                    latencyMs: latencyMs
+                )
             }
         )
     }

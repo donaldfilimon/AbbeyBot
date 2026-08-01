@@ -89,6 +89,17 @@ var packageTargets: [Target] = [
         swiftSettings: [
             .swiftLanguageMode(.v6)
         ]
+    ),
+    .testTarget(
+        name: "AbbeyServerTests",
+        dependencies: [
+            "AbbeyServer",
+            .product(name: "VaporTesting", package: "vapor")
+        ],
+        path: "Tests/AbbeyServerTests",
+        swiftSettings: [
+            .swiftLanguageMode(.v6)
+        ]
     )
 ]
 
@@ -144,7 +155,8 @@ packageTargets.append(
 let package = Package(
     name: "AbbeyBot",
     platforms: [
-        .macOS(.v27)
+        .macOS(.v27),
+        .driverKit(.v27)
     ],
     products: [
         .library(name: "AbbeyCore", targets: ["AbbeyCore"]),

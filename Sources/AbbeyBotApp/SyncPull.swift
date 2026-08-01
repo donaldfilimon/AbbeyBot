@@ -1,3 +1,4 @@
+import AbbeyCore
 import Foundation
 import SwiftData
 
@@ -7,12 +8,18 @@ import SwiftData
 /// - `UserMemory` by `compositeKey` — facts, reputation, interactionCount, updatedAt
 ///   (**last-write-wins by `updatedAt`**: an unsynced local edit newer than the remote row
 ///   survives a pull instead of being clobbered; caveat — this compares each side's own wall
-///   clock, so it's not resilient to significant clock skew between desktop and server)
-/// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (same last-write-wins rule)
-/// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing
+///   clock, so it's not resilient to significant clock skew between desktop and server).
+///   When the remote row carries a non-nil `deletedAt` at least as new as the local
+///   `updatedAt`, the local SwiftData row is **hard-deleted** (tombstone application).
+/// - `ChannelContext` by `compositeKey` — summary, messageCount, updatedAt (same last-write-wins
+///   and tombstone rules)
+/// - `GuildMessage` by `discordMessageId` — insert if missing; do not clobber existing;
+///   remote `deletedAt` hard-deletes the local row
 /// - `ReputationEvent` / `InteractionLog` — insert-if-missing by Fluent `serverId` only
-///   (rows without `id` are skipped — no fragile composite identity)
-/// - `EquityIdea` by `symbol` — thesis/score/factors/generatedAt (**server wins**) or insert
+///   (rows without `id` are skipped — no fragile composite identity); remote `deletedAt` hard-deletes
+/// - `EquityIdea` by `symbol` — thesis/score/factors (**last-write-wins by `generatedAt`**:
+///   ideas are regenerated rather than edited, so the more recently generated idea wins) or insert;
+///   remote `deletedAt` hard-deletes when `deletedAt` ≥ local `generatedAt`
 enum SyncPull {
     static let defaultLimit = 500
 
@@ -23,29 +30,73 @@ enum SyncPull {
         var reputationInserted: Int
         var interactionsInserted: Int
         var equityUpserted: Int
+        /// Independently safe compound boundaries for the next pull.
+        var nextCursors: SyncPullCursorSet
+
+        /// Compatibility view for session status and older tests.
+        var nextCursor: Date? { nextCursors.earliestChangedAt }
     }
 
     /// Fetch list endpoints (`limit` clamped to 500) and upsert into `container`.
     /// Throws on network/decode/store failures; local store is only mutated after a successful fetch set.
+    ///
+    /// Pass `since` to fetch only rows the server has touched after that instant (`?since=`
+    /// cursor). Callers supply the last *successful* cursor from `SyncCursorStore`, so a failed
+    /// pull never advances past rows that were never applied. Incremental server pages are oldest
+    /// change first: a short page advances through pull start, while a full page advances only
+    /// through its newest returned change. Two caveats worth knowing:
+    /// - The pull start remains the upper bound (never completion time) and persists across launches;
+    ///   a missing/non-numeric store value degrades to a full pull.
+    /// - The server compares against its own `updatedAt` clock, so a desktop clock running ahead
+    ///   of the server can skip rows (same clock-skew family as the last-write-wins caveat above).
     @MainActor
     static func run(
         into container: ModelContainer,
         client: AbbeyServerClient = .shared,
-        limit: Int = defaultLimit
+        limit: Int = defaultLimit,
+        cursors: SyncPullCursorSet = SyncPullCursorSet(),
+        attemptStartedAt: Date = .now
     ) async throws -> Counts {
-        async let usersTask = client.fetchUsers(limit: limit)
-        async let channelsTask = client.fetchChannels(limit: limit)
-        async let messagesTask = client.fetchMessages(limit: limit)
-        async let reputationTask = client.fetchReputation(limit: limit)
-        async let interactionsTask = client.fetchInteractions(limit: limit)
-        async let equityTask = client.fetchEquity(limit: limit)
+        let effectiveLimit = min(max(limit, 1), defaultLimit)
+        let usersCursor = cursors.users ?? .initial
+        let channelsCursor = cursors.channels ?? .initial
+        let messagesCursor = cursors.messages ?? .initial
+        let reputationCursor = cursors.reputation ?? .initial
+        let interactionsCursor = cursors.interactions ?? .initial
+        let equityCursor = cursors.equity ?? .initial
 
-        let users = try await usersTask
-        let channels = try await channelsTask
-        let messages = try await messagesTask
-        let reputation = try await reputationTask
-        let interactions = try await interactionsTask
-        let equity = try await equityTask
+        async let usersTask = SyncPageDrain.run(
+            initialCursor: usersCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchUsersPage(limit: effectiveLimit, cursor: $0) }
+        async let channelsTask = SyncPageDrain.run(
+            initialCursor: channelsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchChannelsPage(limit: effectiveLimit, cursor: $0) }
+        async let messagesTask = SyncPageDrain.run(
+            initialCursor: messagesCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchMessagesPage(limit: effectiveLimit, cursor: $0) }
+        async let reputationTask = SyncPageDrain.run(
+            initialCursor: reputationCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchReputationPage(limit: effectiveLimit, cursor: $0) }
+        async let interactionsTask = SyncPageDrain.run(
+            initialCursor: interactionsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchInteractionsPage(limit: effectiveLimit, cursor: $0) }
+        async let equityTask = SyncPageDrain.run(
+            initialCursor: equityCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchEquityPage(limit: effectiveLimit, cursor: $0) }
+
+        let usersDrain = try await usersTask
+        let channelsDrain = try await channelsTask
+        let messagesDrain = try await messagesTask
+        let reputationDrain = try await reputationTask
+        let interactionsDrain = try await interactionsTask
+        let equityDrain = try await equityTask
+
+        let users = usersDrain.rows
+        let channels = channelsDrain.rows
+        let messages = messagesDrain.rows
+        let reputation = reputationDrain.rows
+        let interactions = interactionsDrain.rows
+        let equity = equityDrain.rows
 
         let context = ModelContext(container)
         let usersUpserted = try upsertUsers(users, into: context)
@@ -56,13 +107,40 @@ enum SyncPull {
         let equityUpserted = try upsertEquity(equity, into: context)
         try context.save()
 
+        var nextCursors = cursors
+        nextCursors.users = usersDrain.nextCursor
+        nextCursors.channels = channelsDrain.nextCursor
+        nextCursors.messages = messagesDrain.nextCursor
+        nextCursors.reputation = reputationDrain.nextCursor
+        nextCursors.interactions = interactionsDrain.nextCursor
+        nextCursors.equity = equityDrain.nextCursor
+
         return Counts(
             usersUpserted: usersUpserted,
             channelsUpserted: channelsUpserted,
             messagesInserted: messagesInserted,
             reputationInserted: reputationInserted,
             interactionsInserted: interactionsInserted,
-            equityUpserted: equityUpserted
+            equityUpserted: equityUpserted,
+            nextCursors: nextCursors
+        )
+    }
+
+    /// Source-compatible entry point for callers still holding the legacy shared timestamp.
+    @MainActor
+    static func run(
+        into container: ModelContainer,
+        client: AbbeyServerClient = .shared,
+        limit: Int = defaultLimit,
+        since: Date?,
+        attemptStartedAt: Date = .now
+    ) async throws -> Counts {
+        try await run(
+            into: container,
+            client: client,
+            limit: limit,
+            cursors: since.map { SyncPullCursorSet(legacyTimestamp: $0) } ?? SyncPullCursorSet(),
+            attemptStartedAt: attemptStartedAt
         )
     }
 
@@ -83,7 +161,22 @@ enum SyncPull {
         var count = 0
         for row in rows {
             let key = row.compositeKey
-            if let existing = try firstMatching(UserMemory.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
+            let existing = try firstMatching(UserMemory.self, predicate: #Predicate { $0.compositeKey == key }, in: context)
+
+            if let deletedAt = row.deletedAt {
+                // Tombstone: remove local row when the remote delete is at least as new as local.
+                if let existing {
+                    let remoteStamp = row.updatedAt ?? deletedAt
+                    if remoteStamp >= existing.updatedAt {
+                        context.delete(existing)
+                    }
+                }
+                // Never insert a tombstone as a live local row.
+                count += 1
+                continue
+            }
+
+            if let existing {
                 // Last-write-wins: only apply the remote row if it's at least as new as the
                 // local one, so an unsynced local edit made since the last pull survives.
                 if let remoteUpdatedAt = row.updatedAt, remoteUpdatedAt < existing.updatedAt {
@@ -116,7 +209,20 @@ enum SyncPull {
         var count = 0
         for row in rows {
             let key = row.compositeKey
-            if let existing = try firstMatching(ChannelContext.self, predicate: #Predicate { $0.compositeKey == key }, in: context) {
+            let existing = try firstMatching(ChannelContext.self, predicate: #Predicate { $0.compositeKey == key }, in: context)
+
+            if let deletedAt = row.deletedAt {
+                if let existing {
+                    let remoteStamp = row.updatedAt ?? deletedAt
+                    if remoteStamp >= existing.updatedAt {
+                        context.delete(existing)
+                    }
+                }
+                count += 1
+                continue
+            }
+
+            if let existing {
                 // Last-write-wins: only apply the remote row if it's at least as new as the
                 // local one, so an unsynced local edit made since the last pull survives.
                 if let remoteUpdatedAt = row.updatedAt, remoteUpdatedAt < existing.updatedAt {
@@ -143,13 +249,16 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func insertMissingMessages(_ rows: [SyncDTO.Message], into context: ModelContext) throws -> Int {
+    static func insertMissingMessages(_ rows: [SyncDTO.Message], into context: ModelContext) throws -> Int {
         var inserted = 0
         for row in rows {
             let messageId = row.discordMessageId
-            if try firstMatching(GuildMessage.self, predicate: #Predicate { $0.discordMessageId == messageId }, in: context) != nil {
+            let existing = try firstMatching(GuildMessage.self, predicate: #Predicate { $0.discordMessageId == messageId }, in: context)
+            if row.deletedAt != nil {
+                if let existing { context.delete(existing) }
                 continue
             }
+            if existing != nil { continue }
             context.insert(
                 GuildMessage(
                     discordMessageId: row.discordMessageId,
@@ -173,9 +282,12 @@ enum SyncPull {
         var inserted = 0
         for row in rows {
             guard let serverId = row.id else { continue }
-            if try firstMatching(ReputationEvent.self, predicate: #Predicate { $0.serverId == serverId }, in: context) != nil {
+            let existing = try firstMatching(ReputationEvent.self, predicate: #Predicate { $0.serverId == serverId }, in: context)
+            if row.deletedAt != nil {
+                if let existing { context.delete(existing) }
                 continue
             }
+            if existing != nil { continue }
             context.insert(
                 ReputationEvent(
                     serverId: serverId,
@@ -199,9 +311,12 @@ enum SyncPull {
         var inserted = 0
         for row in rows {
             guard let serverId = row.id else { continue }
-            if try firstMatching(InteractionLog.self, predicate: #Predicate { $0.serverId == serverId }, in: context) != nil {
+            let existing = try firstMatching(InteractionLog.self, predicate: #Predicate { $0.serverId == serverId }, in: context)
+            if row.deletedAt != nil {
+                if let existing { context.delete(existing) }
                 continue
             }
+            if existing != nil { continue }
             context.insert(
                 InteractionLog(
                     serverId: serverId,
@@ -219,14 +334,32 @@ enum SyncPull {
     }
 
     @discardableResult
-    private static func upsertEquity(
+    static func upsertEquity(
         _ rows: [SyncDTO.Equity],
         into context: ModelContext
     ) throws -> Int {
         var count = 0
         for row in rows {
             let symbol = row.symbol
-            if let existing = try firstMatching(EquityIdea.self, predicate: #Predicate { $0.symbol == symbol }, in: context) {
+            let existing = try firstMatching(EquityIdea.self, predicate: #Predicate { $0.symbol == symbol }, in: context)
+
+            if let deletedAt = row.deletedAt {
+                // Tombstone stamp is `deletedAt` (soft-delete does not bump `generatedAt`).
+                if let existing, deletedAt >= existing.generatedAt {
+                    context.delete(existing)
+                }
+                count += 1
+                continue
+            }
+
+            if let existing {
+                // Last-write-wins by generation time: equity ideas are regenerated rather than
+                // edited, so the more recently generated idea for a symbol wins. Keeps a locally
+                // generated idea from being clobbered by a staler one the server still holds.
+                if let remoteGeneratedAt = row.generatedAt, remoteGeneratedAt < existing.generatedAt {
+                    count += 1
+                    continue
+                }
                 existing.thesisSummary = row.thesisSummary
                 existing.syntheticScore = row.syntheticScore
                 existing.factorBreakdown = row.factorBreakdown

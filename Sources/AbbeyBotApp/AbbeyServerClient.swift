@@ -72,6 +72,40 @@ struct AbbeyServerClient: Sendable {
         await post(path: "/api/state/forget", body: body)
     }
 
+    /// Soft-delete a user-memory row on the server so the next incremental pull can tombstone it locally.
+    func tombstoneUser(guildId: String, userId: String) async {
+        let body: [String: String] = [
+            "guildId": guildId,
+            "userId": userId
+        ]
+        await post(path: "/api/state/tombstone/user", body: body)
+    }
+
+    /// Soft-delete a channel-context row on the server so the next incremental pull can tombstone it locally.
+    func tombstoneChannel(guildId: String, channelId: String) async {
+        let body: [String: String] = [
+            "guildId": guildId,
+            "channelId": channelId
+        ]
+        await post(path: "/api/state/tombstone/channel", body: body)
+    }
+
+    func tombstoneMessage(discordMessageId: String) async {
+        await post(path: "/api/state/tombstone/message", body: ["discordMessageId": discordMessageId])
+    }
+
+    func tombstoneReputation(id: UUID) async {
+        await post(path: "/api/state/tombstone/reputation", body: ["id": id.uuidString])
+    }
+
+    func tombstoneInteraction(id: UUID) async {
+        await post(path: "/api/state/tombstone/interaction", body: ["id": id.uuidString])
+    }
+
+    func tombstoneEquity(symbol: String) async {
+        await post(path: "/api/state/tombstone/equity", body: ["symbol": symbol])
+    }
+
     /// Reports the desktop's current sync outcome so the operator dashboard's Sync tab
     /// can show it. Best-effort like every other push — benefits from the same durable
     /// outbox retry as ingest/remember/forget.
@@ -101,28 +135,52 @@ struct AbbeyServerClient: Sendable {
 
     // MARK: - Public API (pull)
 
-    func fetchUsers(limit: Int = 500) async throws -> [SyncDTO.User] {
-        try await get(path: "/api/users", limit: limit)
+    func fetchUsers(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.User] {
+        try await fetchUsersPage(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) }).rows
     }
 
-    func fetchChannels(limit: Int = 500) async throws -> [SyncDTO.Channel] {
-        try await get(path: "/api/channels", limit: limit)
+    func fetchChannels(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Channel] {
+        try await fetchChannelsPage(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) }).rows
     }
 
-    func fetchMessages(limit: Int = 500) async throws -> [SyncDTO.Message] {
-        try await get(path: "/api/messages", limit: limit)
+    func fetchMessages(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Message] {
+        try await fetchMessagesPage(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) }).rows
     }
 
-    func fetchReputation(limit: Int = 500) async throws -> [SyncDTO.Reputation] {
-        try await get(path: "/api/reputation", limit: limit)
+    func fetchReputation(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Reputation] {
+        try await fetchReputationPage(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) }).rows
     }
 
-    func fetchInteractions(limit: Int = 500) async throws -> [SyncDTO.Interaction] {
-        try await get(path: "/api/interactions", limit: limit)
+    func fetchInteractions(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Interaction] {
+        try await fetchInteractionsPage(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) }).rows
     }
 
-    func fetchEquity(limit: Int = 500) async throws -> [SyncDTO.Equity] {
-        try await get(path: "/api/equity", limit: limit)
+    func fetchEquity(limit: Int = 500, since: Date? = nil) async throws -> [SyncDTO.Equity] {
+        try await fetchEquityPage(limit: limit, cursor: since.map { SyncPullCursor(changedAt: $0) }).rows
+    }
+
+    func fetchUsersPage(limit: Int = 500, cursor: SyncPullCursor?) async throws -> SyncPullPage<SyncDTO.User> {
+        try await getPage(path: "/api/users", limit: limit, cursor: cursor)
+    }
+
+    func fetchChannelsPage(limit: Int = 500, cursor: SyncPullCursor?) async throws -> SyncPullPage<SyncDTO.Channel> {
+        try await getPage(path: "/api/channels", limit: limit, cursor: cursor)
+    }
+
+    func fetchMessagesPage(limit: Int = 500, cursor: SyncPullCursor?) async throws -> SyncPullPage<SyncDTO.Message> {
+        try await getPage(path: "/api/messages", limit: limit, cursor: cursor)
+    }
+
+    func fetchReputationPage(limit: Int = 500, cursor: SyncPullCursor?) async throws -> SyncPullPage<SyncDTO.Reputation> {
+        try await getPage(path: "/api/reputation", limit: limit, cursor: cursor)
+    }
+
+    func fetchInteractionsPage(limit: Int = 500, cursor: SyncPullCursor?) async throws -> SyncPullPage<SyncDTO.Interaction> {
+        try await getPage(path: "/api/interactions", limit: limit, cursor: cursor)
+    }
+
+    func fetchEquityPage(limit: Int = 500, cursor: SyncPullCursor?) async throws -> SyncPullPage<SyncDTO.Equity> {
+        try await getPage(path: "/api/equity", limit: limit, cursor: cursor)
     }
 
     // MARK: - Internals
@@ -212,23 +270,52 @@ struct AbbeyServerClient: Sendable {
         }
     }
 
-    private func get<T: Decodable>(path: String, limit: Int) async throws -> T {
-        let clamped = min(max(limit, 1), 500)
+    private func getPage<T: Decodable & Sendable>(
+        path: String,
+        limit: Int,
+        cursor: SyncPullCursor?
+    ) async throws -> SyncPullPage<T> {
         var request = try makeRequest(
             path: path,
             method: "GET",
-            queryItems: [URLQueryItem(name: "limit", value: String(clamped))]
+            queryItems: SyncQuery.listItems(limit: limit, cursor: cursor)
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+        guard let http = response as? HTTPURLResponse else {
+            throw SyncClientError.httpStatus(0)
+        }
+        guard (200...299).contains(http.statusCode) else {
             throw SyncClientError.httpStatus(http.statusCode)
         }
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(T.self, from: data)
+        let rows = try decoder.decode([T].self, from: data)
+        let boundary = Self.cursorBoundary(from: http)
+        return SyncPullPage(
+            rows: rows,
+            serverBoundary: boundary,
+            serverHighWatermark: Self.highWatermark(from: http)
+        )
+    }
+
+    private static func cursorBoundary(from response: HTTPURLResponse) -> SyncPullCursor? {
+        guard let rawTime = response.value(forHTTPHeaderField: SyncPullCursorWire.timeHeader),
+              let epoch = Double(rawTime), epoch >= 0
+        else { return nil }
+        return SyncPullCursor(
+            changedAt: Date(timeIntervalSince1970: epoch),
+            stableID: response.value(forHTTPHeaderField: SyncPullCursorWire.idHeader)
+        )
+    }
+
+    private static func highWatermark(from response: HTTPURLResponse) -> Date? {
+        guard let raw = response.value(forHTTPHeaderField: SyncPullCursorWire.highWatermarkHeader),
+              let epoch = Double(raw), epoch >= 0
+        else { return nil }
+        return Date(timeIntervalSince1970: epoch)
     }
 
     /// Shared base URL + optional Bearer token for POST and GET.

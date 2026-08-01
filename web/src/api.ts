@@ -31,6 +31,8 @@ export interface StatusResponse {
   liveIngestCount: number;
   inferenceCalls: number;
   inferenceFailures: number;
+  /** Last EventSub stream.online/offline this process; null if never observed. */
+  twitchStreamLive: boolean | null;
 }
 
 export interface UserRow {

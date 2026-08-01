@@ -1,6 +1,24 @@
 import Foundation
 import DiscordBM
 
+/// Durable-ingest outcome carried with one inbound message.
+///
+/// A duplicate or failed write must not produce a reply: doing so would reuse ambient
+/// strategy state and would acknowledge work that was never persisted.  The strategy is
+/// therefore attached only to the message whose ingest selected it.
+public enum MessageIngestOutcome: Sendable, Equatable {
+    case inserted(strategy: StrategyAction)
+    case duplicate
+    case failed
+
+    public var strategy: StrategyAction? {
+        guard case .inserted(let strategy) = self else { return nil }
+        return strategy
+    }
+
+    public var wasInserted: Bool { strategy != nil }
+}
+
 /// Turns Discord MESSAGE_CREATE into local ingest + optional persona reply.
 public struct MessageIngress: Sendable {
     public typealias IngestHandler = @Sendable (
@@ -9,13 +27,14 @@ public struct MessageIngress: Sendable {
         _ guildId: String,
         _ authorId: String,
         _ messageId: String
-    ) async -> Void
+    ) async -> MessageIngestOutcome
 
     public typealias ReplyHandler = @Sendable (
         _ content: String,
         _ channelId: String,
         _ guildId: String,
-        _ authorId: String
+        _ authorId: String,
+        _ strategy: StrategyAction
     ) async -> String?
 
     public typealias CooldownCheck = @Sendable (_ userId: String, _ guildId: String) async -> Bool
@@ -52,10 +71,11 @@ public struct MessageIngress: Sendable {
         let authorId = message.author?.id.rawValue ?? ""
         let messageId = message.id.rawValue
 
-        await ingest(content, channelId, guildId, authorId, messageId)
+        let outcome = await ingest(content, channelId, guildId, authorId, messageId)
+        guard case .inserted(let strategy) = outcome else { return }
 
         if await isCoolingDown(authorId, guildId) { return }
-        guard let reply = await craftReply(content, channelId, guildId, authorId), !reply.isEmpty else { return }
+        guard let reply = await craftReply(content, channelId, guildId, authorId, strategy), !reply.isEmpty else { return }
 
         do {
             try await client.createMessage(

@@ -7,7 +7,7 @@ public struct DQNCheckpointBlob: Codable, Sendable, Equatable {
     public var epsilon: Float
     public var stepCount: Int
     public var seed: UInt64?
-    /// `weights[layer][neuron][lane]` — 8 lanes per neuron (SIMD8 packing).
+    /// `weights[layer][neuron][lane]` — lane count equals that layer's fan-in (`topology[layer]`).
     public var onlineWeights: [[[Float]]]
     public var onlineBiases: [[Float]]
     public var targetWeights: [[[Float]]]
@@ -88,49 +88,52 @@ public enum DQNCheckpointStore: Sendable {
 
 extension NeuralNetwork {
     func encodeWeights() -> [[[Float]]] {
-        weights.map { layer in
-            layer.map { simd in
-                (0..<8).map { simd[$0] }
-            }
-        }
+        weights
     }
 
-    static func decodeWeights(_ raw: [[[Float]]], topology: [Int]) throws -> [[SIMD8<Float>]] {
+    /// Validates layer/neuron counts *and* each neuron's lane count against `topology`'s
+    /// fan-in (previously fixed at 8 lanes regardless of layer width). A checkpoint
+    /// written before that fix will fail this check — treated the same as any other
+    /// unreadable checkpoint (`.corrupt`), not silently truncated/padded back to 8.
+    static func decodeWeights(_ raw: [[[Float]]], topology: [Int]) throws -> [[[Float]]] {
         guard raw.count == max(topology.count - 1, 0) else {
             throw DQNCheckpointError.corrupt("weight layer count \(raw.count)")
         }
-        var out: [[SIMD8<Float>]] = []
         for (layerIndex, layer) in raw.enumerated() {
-            let expected = topology[layerIndex + 1]
-            guard layer.count == expected else {
+            let expectedNeurons = topology[layerIndex + 1]
+            guard layer.count == expectedNeurons else {
                 throw DQNCheckpointError.corrupt("layer \(layerIndex) neuron count \(layer.count)")
             }
-            var neurons: [SIMD8<Float>] = []
+            let expectedFanIn = topology[layerIndex]
             for neuron in layer {
-                var lanes = Array(neuron.prefix(8))
-                if lanes.count < 8 {
-                    lanes.append(contentsOf: repeatElement(Float(0), count: 8 - lanes.count))
+                guard neuron.count == expectedFanIn else {
+                    throw DQNCheckpointError.corrupt("layer \(layerIndex) neuron fan-in \(neuron.count)")
                 }
-                neurons.append(SIMD8<Float>(lanes))
             }
-            out.append(neurons)
         }
-        return out
+        return raw
     }
 
     mutating func applyCheckpoint(weights rawWeights: [[[Float]]], biases: [[Float]], topology: [Int]) throws {
         guard self.topology == topology else {
             throw DQNCheckpointError.topologyMismatch(expected: self.topology, found: topology)
         }
-        self.weights = try Self.decodeWeights(rawWeights, topology: topology)
-        guard biases.count == self.weights.count else {
+        let decodedWeights = try Self.decodeWeights(rawWeights, topology: topology)
+        guard biases.count == decodedWeights.count else {
             throw DQNCheckpointError.corrupt("bias layer count")
         }
         for i in 0..<biases.count {
-            guard biases[i].count == self.weights[i].count else {
+            guard biases[i].count == decodedWeights[i].count else {
                 throw DQNCheckpointError.corrupt("bias neuron count at layer \(i)")
             }
         }
+        guard decodedWeights.allSatisfy({ $0.allSatisfy({ $0.allSatisfy(\.isFinite) }) }),
+              biases.allSatisfy({ $0.allSatisfy(\.isFinite) }) else {
+            throw DQNCheckpointError.corrupt("non-finite network value")
+        }
+
+        // Commit only after every layer and bias has passed validation.
+        self.weights = decodedWeights
         self.biases = biases
     }
 }

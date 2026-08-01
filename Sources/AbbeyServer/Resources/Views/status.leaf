@@ -41,6 +41,7 @@
     <dt>Live Discord ingest</dt><dd>#(liveIngestCount)</dd>
     <dt>Inference calls</dt><dd>#(inferenceCalls)</dd>
     <dt>Inference failures</dt><dd>#(inferenceFailures)</dd>
+    <dt>Twitch stream</dt><dd>#(twitchStreamLive)</dd>
   </dl>
   <nav>
     <h2>Operator UI</h2>

@@ -13,6 +13,8 @@ enum SyncDTO {
         var reputation: Double
         var interactionCount: Int
         var updatedAt: Date?
+        /// Soft-delete tombstone from the server. Non-nil means SyncPull should remove the local row.
+        var deletedAt: Date? = nil
     }
 
     struct Channel: Decodable, Sendable {
@@ -23,6 +25,8 @@ enum SyncDTO {
         var summary: String
         var messageCount: Int
         var updatedAt: Date?
+        /// Soft-delete tombstone from the server. Non-nil means SyncPull should remove the local row.
+        var deletedAt: Date? = nil
     }
 
     struct Message: Decodable, Sendable {
@@ -33,6 +37,7 @@ enum SyncDTO {
         var authorId: String
         var content: String
         var createdAt: Date?
+        var deletedAt: Date? = nil
     }
 
     /// Insert-if-missing keyed by Fluent `id` (`serverId` locally). Rows without `id` are skipped.
@@ -43,6 +48,7 @@ enum SyncDTO {
         var delta: Double
         var reason: String
         var createdAt: Date?
+        var deletedAt: Date? = nil
     }
 
     /// Insert-if-missing keyed by Fluent `id` (`serverId` locally). Rows without `id` are skipped.
@@ -54,6 +60,7 @@ enum SyncDTO {
         var succeeded: Bool
         var latencyMs: Double
         var createdAt: Date?
+        var deletedAt: Date? = nil
     }
 
     struct Equity: Decodable, Sendable {
@@ -63,5 +70,6 @@ enum SyncDTO {
         var syntheticScore: Double
         var factorBreakdown: [String: Double]
         var generatedAt: Date?
+        var deletedAt: Date? = nil
     }
 }

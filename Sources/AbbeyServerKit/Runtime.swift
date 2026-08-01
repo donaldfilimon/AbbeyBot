@@ -23,9 +23,14 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
     let dialect: String
     if databaseURL.hasPrefix("postgres://") || databaseURL.hasPrefix("postgresql://") {
         try app.databases.use(.postgres(url: databaseURL), as: .psql)
+        app.databases.default(to: .psql)
         dialect = "postgres"
     } else if databaseURL == "sqlite://memory" || databaseURL == "sqlite::memory:" {
-        app.databases.use(.sqlite(.memory), as: .sqlite)
+        // Unique id per Application so kit tests that each call configureRuntime do not
+        // silently share one process-wide in-memory database under the shared `.sqlite` id.
+        let id = DatabaseID(string: "sqlite-memory-\(UUID().uuidString)")
+        app.databases.use(.sqlite(.memory), as: id)
+        app.databases.default(to: id)
         dialect = "sqlite-memory"
     } else if databaseURL.hasPrefix("sqlite://") {
         let path = String(databaseURL.dropFirst("sqlite://".count))
@@ -33,7 +38,10 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
         if !parent.isEmpty, parent != "." {
             try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true)
         }
-        app.databases.use(.sqlite(.file(path)), as: .sqlite)
+        // Path-derived id isolates temp-file test DBs; the live server still has one Application.
+        let id = DatabaseID(string: "sqlite-file-\(path.hashValue)")
+        app.databases.use(.sqlite(.file(path)), as: id)
+        app.databases.default(to: id)
         dialect = "sqlite-file"
     } else {
         throw Abort(
@@ -45,6 +53,7 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
     app.logger.info("Database dialect: \(dialect)")
 
     app.migrations.add(CreateAll())
+    app.migrations.add(AddSyncSourceTimestamps())
     try await app.autoMigrate()
 
     let runtime = BotRuntime(app: app)
@@ -57,6 +66,8 @@ public struct BotLifecycleHandler: LifecycleHandler {
 
     public func didBootAsync(_ app: Application) async throws {
         await app.botRuntime.start()
+        // Env-gated, off by default; logs and skips on any missing config or Helix failure.
+        await TwitchEventSubAutoSubscriber.subscribeIfConfigured(app: app)
     }
 
     public func shutdownAsync(_ app: Application) async {

@@ -7,3 +7,6 @@ xcuserdata/
 *.sqlite
 *.sqlite-*
 Sources/AbbeyServer/Resources/Public/
+.cursor/hooks/
+# Local deps (web/node_modules also in web/.gitignore; functions/ via functions/.gitignore)
+node_modules/
