@@ -147,7 +147,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 - Natural-language persona switch on ingest (`IntentClassifier.personaSwitch` → `PersonaName.resolve`)
 - Desktop **Personas** tab (`PersonaSwitcherView`)
 
-**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. DQN (`DQNAgent`) selects **strategy** among allowed actions only — see Learning & Safety Policy; do not claim a 10k req/s WDBX inference engine here.
+**Intent routing (`ABIRouter.route(intent:)`):** `.modRequest` / `.command` → Abi; `.question` → Aviva; `.greeting` / `.smallTalk` → Abbey; otherwise the active persona. `DQNAgent` learns a 3-wide strategy head and surfaces the chosen index for dashboard display — it does **not** yet dispatch answer/clarify/retrieve/refuse (see Learning & Safety Policy open gap). Do not claim a 10k req/s WDBX inference engine here.
 
 **Live dispatch:** `AbbeyEngine` and `BotRuntime` call `ABIRouter.route(intent:)` (via `IntentClassifier`) on message ingress `craftReply` and slash `/ask` — not only `currentPersona()`.
 
@@ -168,6 +168,9 @@ Operate as a safe, useful, continuously improving community assistant. Learn fro
 `DQNAgent` topology **`[8, 64, 32, 4]`** selects `StrategyAction`: **answer / clarify / retrieve / refuse**. `IngestScorer.scoreAndLearn` writes an **action-conditioned** reward, non-identical `nextState`, trains a minibatch, and upserts into local WDBX. `craftReply` **routes on `lastStrategy`** (clarify/retrieve prompts, cosine retrieval for `.retrieve`, hard refuse for mod/command + `.refuse`). RL does **not** weaken kick/ban gates.
 
 **Neural acceleration:** `NeuralMath` / network dots use **Accelerate/vDSP** on Apple platforms (AMX/NEON) — not CUDA.
+### Reinforcement learning (strategy only — dispatch not shipped)
+
+`DQNAgent` in AbbeyCore is the intended strategy selector among allowed actions (answer, clarify, retrieve, refuse, etc.). When that dispatch ships, RL will improve routing among those actions only — it must **not** weaken safety rules, confirmation gates, or platform policy. Hard constraints stay hard regardless of reward signal.
 
 **Local WDBX:** `~/.abbey/wdbx/` segmented JSONL (`WDBXStore`) + experience journal. **Not** Zig abi WDBX; no throughput claims. Old checkpoints with `[8,32,16,3]` fail topology load and re-init.
 

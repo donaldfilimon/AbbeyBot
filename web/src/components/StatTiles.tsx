@@ -15,7 +15,19 @@ const TILES: Array<{ label: string; key: keyof StatusResponse }> = [
   { label: "Live Discord ingest", key: "liveIngestCount" },
   { label: "Inference calls", key: "inferenceCalls" },
   { label: "Inference failures", key: "inferenceFailures" },
+  { label: "Twitch stream", key: "twitchStreamLive" },
 ];
+
+function formatTileValue(
+  key: keyof StatusResponse,
+  value: StatusResponse[keyof StatusResponse],
+): string {
+  if (key === "twitchStreamLive") {
+    if (value === null || value === undefined) return "unknown";
+    return value ? "live" : "offline";
+  }
+  return String(value);
+}
 
 export interface StatTilesProps {
   status: StatusResponse | null;
@@ -32,7 +44,7 @@ export function StatTiles({ status, error }: StatTilesProps) {
       {TILES.map((tile) => (
         <div className="stat-tile" key={tile.key}>
           <dt>{tile.label}</dt>
-          <dd>{status ? String(status[tile.key]) : "…"}</dd>
+          <dd>{status ? formatTileValue(tile.key, status[tile.key]) : "…"}</dd>
         </div>
       ))}
     </dl>

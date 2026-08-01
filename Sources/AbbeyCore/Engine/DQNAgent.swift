@@ -26,6 +26,13 @@ public enum DQNExperiencePersistence: Sendable {
 
 /// Deep Q-Network agent driving Abbey's self-learning loop: MessageCreate → WDBX/local
 /// ingest → reward on reactions → `learn()`.
+/// Deep Q-Network agent for Abbey's learning loop: ingest → `selectAction` →
+/// `remember`/`learn`, with durable checkpoint + experience journal.
+///
+/// **Claim-honest:** `selectAction`'s 3-wide output is recorded for dashboard
+/// display (`AbbeyEngine.lastDQNAction`) and journaled, but does not yet dispatch
+/// answer/clarify/retrieve/refuse. Reward from `IngestScorer` is still intent-quality
+/// based (not action-conditioned). See AGENTS.md Learning & Safety Policy.
 ///
 /// Two corrections versus the reference draft in brain.md, both mechanical:
 ///   1. `online`/`target` are plain (non-async) `NeuralNetwork` values, so calling their

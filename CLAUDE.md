@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Full agent instructions (ops, personas, safety policy, deferred features) live in [`AGENTS.md`](./AGENTS.md) — **read that file before making non-trivial changes.** This file is a quick-reference layer on top of it.
 
+Cursor uses a parallel persona at [`.cursor/agents/abbey.md`](./.cursor/agents/abbey.md) that mirrors AGENTS.md's verify gates, shipped/won't-ship lists, and toolchain rules — when those change here, update it too so the two don't drift.
+
 All three products route through `AbbeyEntry` (the package's sole `@main`), which dispatches on the first argument (`serve` / `cli` / nothing → desktop).
 
 ## Commands
@@ -57,7 +59,7 @@ Optional Browserbase Functions (`functions/`, bun — not in verify-all): `cd fu
 
 **Persistence split:** desktop uses SwiftData directly; server and CLI share `AbbeyServerKit`'s Fluent engine (`BotRuntime`) but keep **separate databases** — CLI defaults to local SQLite at `~/.abbey/abbey.sqlite` and only shares the server's Postgres/`DATABASE_URL` when `ABBEY_CLI_USE_SERVER_DATABASE=1` is set. Desktop optionally push/pulls against the server's `/api/state/*` (best-effort; last-write-wins for users/channels/equity, insert-if-missing elsewhere; never blocks local writes).
 
-**Persona routing:** three personas (`AbbeyPersona`, `AvivaPersona`, `AbiPersona` in `Sources/AbbeyCore/Personas/`) are prompt/register variants of one model, not separate systems. `ABIRouter.route(intent:)` picks a persona per message (mod/command → Abi, question → Aviva, greeting/small talk → Abbey); `DQNAgent` only selects *strategy* among already-allowed actions and never overrides safety constraints. Switch paths: Discord `/persona`, natural-language intent, desktop Personas tab.
+**Persona routing:** three personas (`AbbeyPersona`, `AvivaPersona`, `AbiPersona` in `Sources/AbbeyCore/Personas/`) are prompt/register variants of one model, not separate systems. `ABIRouter.route(intent:)` picks a persona per message (mod/command → Abi, question → Aviva, greeting/small talk → Abbey); `DQNAgent` journals a 3-wide strategy index for display but does not yet dispatch answer/clarify/retrieve/refuse (see AGENTS.md open gap) and never overrides safety constraints. Switch paths: Discord `/persona`, natural-language intent, desktop Personas tab.
 
 **Config gating:** `AppConfig.validateForStartup(scope:)` differs by entry point — `.desktop` enforces a live-Discord token unless dry-run; `.headless` (server/CLI) skips that UserDefaults-based gate so HTTP can boot without a token. `ABBEY_DRY_RUN=1` makes Discord/Twitch bridges skip sockets entirely.
 
