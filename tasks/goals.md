@@ -152,7 +152,23 @@ status: done
   a warning against piping build output through `tail` (masks the exit code).
 
 ## Apply strict code-quality findings from PR #53's merged diff
-status: in_progress
+status: done
+- Both findings applied (2026-08-01). **#1** `SyncTransportPolicy.makeRequest(baseURL:path:method:queryItems:bearerToken:)`
+  is now the single request-building boundary in AbbeyCore (validate → strip slash → join
+  path/query → attach Bearer; nil/empty token omits the header); `ServerSyncClient.makeRequest`
+  and `AbbeyServerClient.makeRequest` both delegate, keeping only their own error mapping. Three
+  new AbbeyCore tests cover join/token attach, nil-vs-empty token omission, and
+  rejected-transport throw. **#2** The dead `transientValuesKey` decode branch is deleted from
+  `SyncPullCursorSet.init(from:)`; all three fixture tests that asserted the dev-only format
+  decoded (core, desktop store, CLI file store — the third surfaced by the full-bundle run after
+  the first grep missed it) were repurposed to assert the safe degradation: empty set → full
+  bootstrap pull, never a bogus cursor and never misread as a legacy epoch.
+- Verified in a tree carrying concurrent in-flight voice work: server-role
+  `AbbeyServerTests` 21 + `AbbeyCoreTests` 234 + `AbbeyCLITests` 30 green in one run, then
+  `AbbeyServerKitTests` 117 green after the third-fixture fix (in-log `EXIT:0`, not the wrapper
+  code); desktop `SyncCursorStoreTests` + `AbbeyServerClientTransportTests` 17 green with the
+  full desktop build (including the in-flight voice/media targets) completing. Not committed —
+  land via a scoped branch/PR per repo workflow, not on `cursor/complete-discord-voice`'s scope.
 - A strict code-quality review of `aa1fb60...b585947` (the diff that merged as PR #53, ~1500 lines
   / 41 files) surfaced two confirmed structural findings, not yet applied:
   1. **Duplicated transport-request builder.** `ServerSyncClient.makeRequest`

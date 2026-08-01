@@ -2,14 +2,29 @@
 
 Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
-## Apply strict code-quality findings from PR #53's merged diff — not started
+## Apply strict code-quality findings from PR #53's merged diff — done
 
-- [ ] Dedupe `ServerSyncClient.makeRequest` / `AbbeyServerClient.makeRequest` behind a shared
-      AbbeyCore helper (e.g. on `SyncTransportPolicy`) instead of two independent copies of
-      validate→strip-slash→join-path/query→attach-Bearer-token.
-- [ ] Delete the `transientValuesKey` decode branch in `SyncPullCursorSet.init(from:)` — dead
-      compat for a dev-only format `SyncCursorStore.pullCursors`'s `try?` already degrades safely
-      without it.
+- [x] Dedupe `ServerSyncClient.makeRequest` / `AbbeyServerClient.makeRequest` behind a shared
+      AbbeyCore helper — added `SyncTransportPolicy.makeRequest(baseURL:path:method:queryItems:bearerToken:)`
+      (validate→strip-slash→join-path/query→attach-Bearer-token, empty/nil token omits the
+      header); both clients now delegate and keep only their own error mapping
+      (`ClientError.invalidURL` / `SyncClientError.notConfigured`+`invalidURL`). Three new
+      AbbeyCore tests cover join/token-attach, nil-vs-empty token omission, and
+      rejected-transport throw-before-request.
+- [x] Delete the `transientValuesKey` decode branch in `SyncPullCursorSet.init(from:)` — dead
+      compat for a dev-only format removed along with its doc-comment claims. The two fixture
+      tests that asserted the transient format decoded were repurposed to assert the safe
+      degradation instead: the payload now decodes to an empty set (core) and the desktop store
+      degrades to a full bootstrap pull, never a bogus cursor.
+- [x] Third fixture caught by the full-bundle run: `transientDictionaryFixtureSurvivesCLICursorStoreUpgrade`
+      in `Tests/AbbeyServerKitTests/ServerSyncApplyTests.swift` (missed by the initial grep) —
+      repurposed like the other two to assert the CLI file store degrades to a full bootstrap
+      pull and does not misread the payload as a legacy epoch.
+- [x] Verified (this tree, concurrent voice work in flight): targeted server-role suites 20 green;
+      desktop `SyncCursorStoreTests|AbbeyServerClientTransportTests` 17 green (full desktop build
+      completed including in-flight voice/media targets); full non-desktop bundles green —
+      `AbbeyServerTests` 21 + `AbbeyCoreTests` 234 + `AbbeyCLITests` 30, then
+      `AbbeyServerKitTests` 117 after the third-fixture fix (in-log `EXIT:0`).
 
 ## Discord application + real voice audio — in progress
 
