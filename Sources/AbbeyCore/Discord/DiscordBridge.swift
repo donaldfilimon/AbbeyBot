@@ -100,11 +100,27 @@ public actor DiscordBridge {
     private var gateway: BotGatewayManager?
     private var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
     private var voiceGatewayHandshake = VoiceGatewayHandshake()
+    private var voiceHandshakeDeadlineTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var lifecycle = DiscordGatewayLifecycle()
+    private let voiceHandshakeTimeout: Duration
+    private let voiceHandshakeSleep: @Sendable (Duration) async throws -> Void
     private let logger = Logger(label: "AbbeyBot.DiscordBridge")
 
-    public init() {}
+    public init() {
+        self.voiceHandshakeTimeout = .seconds(30)
+        self.voiceHandshakeSleep = { duration in
+            try await Task.sleep(for: duration)
+        }
+    }
+
+    init(
+        voiceHandshakeTimeout: Duration,
+        voiceHandshakeSleep: @escaping @Sendable (Duration) async throws -> Void
+    ) {
+        self.voiceHandshakeTimeout = max(.milliseconds(1), voiceHandshakeTimeout)
+        self.voiceHandshakeSleep = voiceHandshakeSleep
+    }
 
     public var client: (any DiscordClient)? {
         gateway?.client
@@ -173,6 +189,8 @@ public actor DiscordBridge {
         }
         eventTask?.cancel()
         eventTask = nil
+        voiceHandshakeDeadlineTask?.cancel()
+        voiceHandshakeDeadlineTask = nil
         await gateway?.disconnect()
         // BotGatewayManager has no explicit disconnect API in all versions — drop reference.
         gateway = nil
@@ -201,8 +219,6 @@ public actor DiscordBridge {
                 selfDeaf: true
             )
         )
-        voiceGuildId = trimmedGuild
-        voiceChannelId = trimmedChannel
         return .requested
     }
 
@@ -213,7 +229,7 @@ public actor DiscordBridge {
         let trimmed = (guildId ?? voiceGuildId)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return .invalidIdentifiers }
-        _ = voiceGatewayHandshake.cancel(guildID: trimmed)
+        let cancellation = voiceGatewayHandshake.cancel(guildID: trimmed)
         if voiceGatewayCredentials?.guildID == trimmed {
             voiceGatewayCredentials = nil
         }
@@ -229,6 +245,9 @@ public actor DiscordBridge {
         if voiceGuildId == trimmed {
             voiceGuildId = nil
             voiceChannelId = nil
+        }
+        if case .cancelled(let generation) = cancellation {
+            scheduleVoiceHandshakeDeadline(guildId: trimmed, generation: generation, sendCleanupLeave: false)
         }
         return .requested
     }
@@ -293,11 +312,69 @@ extension DiscordBridge {
     /// Begins correlation before Gateway opcode 4 is sent.
     private func beginVoiceGatewayHandshake(guildId: String, channelId: String) -> VoiceUpdateResult {
         guard let botUserId else { return .gatewayUnavailable }
-        guard voiceGatewayHandshake.begin(guildID: guildId, channelID: channelId, userID: botUserId) != nil else {
+        guard let generation = voiceGatewayHandshake.begin(
+            guildID: guildId,
+            channelID: channelId,
+            userID: botUserId
+        ) else {
             return .requestInProgress
         }
         voiceGatewayCredentials = nil
+        scheduleVoiceHandshakeDeadline(guildId: guildId, generation: generation, sendCleanupLeave: true)
         return .requested
+    }
+
+    private func scheduleVoiceHandshakeDeadline(
+        guildId: String,
+        generation: VoiceGatewayHandshake.Generation,
+        sendCleanupLeave: Bool
+    ) {
+        voiceHandshakeDeadlineTask?.cancel()
+        let timeout = voiceHandshakeTimeout
+        let sleep = voiceHandshakeSleep
+        voiceHandshakeDeadlineTask = Task { [weak self] in
+            do {
+                try await sleep(timeout)
+                try Task.checkCancellation()
+                await self?.expireVoiceHandshake(
+                    guildId: guildId,
+                    generation: generation,
+                    sendCleanupLeave: sendCleanupLeave
+                )
+            } catch {
+                // Cancellation is the normal completion path after Discord
+                // confirms the current generation.
+            }
+        }
+    }
+
+    private func expireVoiceHandshake(
+        guildId: String,
+        generation: VoiceGatewayHandshake.Generation,
+        sendCleanupLeave: Bool
+    ) async {
+        guard voiceGatewayHandshake.expire(guildID: guildId, generation: generation) else { return }
+        voiceHandshakeDeadlineTask = nil
+        voiceGatewayCredentials = nil
+        if voiceGuildId == guildId {
+            voiceGuildId = nil
+            voiceChannelId = nil
+        }
+        logger.warning("Discord voice handshake timed out; generation invalidated")
+        guard sendCleanupLeave, let gateway else { return }
+        await gateway.updateVoiceState(
+            payload: VoiceStateUpdate(
+                guildId: GuildSnowflake(guildId),
+                channelId: nil,
+                selfMute: true,
+                selfDeaf: true
+            )
+        )
+    }
+
+    private func completeVoiceHandshakeDeadline() {
+        voiceHandshakeDeadlineTask?.cancel()
+        voiceHandshakeDeadlineTask = nil
     }
 
     /// Transfers ephemeral credentials to the internal media controller once.
@@ -324,11 +401,17 @@ extension DiscordBridge {
 
         switch outcome {
         case .waiting, .ready:
+            // The outbound opcode 4 request is not proof that Discord admitted
+            // the bot to the channel. Publish presence only from Discord's
+            // confirmed self Voice State Update.
+            voiceGuildId = payload.channel_id == nil ? nil : guildId
             voiceChannelId = payload.channel_id?.rawValue
             if case .ready(let credentials) = outcome {
                 voiceGatewayCredentials = credentials
+                completeVoiceHandshakeDeadline()
             }
         case .cancelled:
+            completeVoiceHandshakeDeadline()
             if voiceGatewayCredentials?.guildID == guildId {
                 voiceGatewayCredentials = nil
             }
@@ -359,6 +442,7 @@ extension DiscordBridge {
         )
         if case .ready(let credentials) = outcome {
             voiceGatewayCredentials = credentials
+            completeVoiceHandshakeDeadline()
         } else if case .rejected(_, .emptyEndpoint) = outcome,
                   voiceGatewayCredentials?.guildID == payload.guild_id.rawValue
         {

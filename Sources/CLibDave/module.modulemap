@@ -1,0 +1,5 @@
+module CLibDave [system] {
+    header "shim.h"
+    link "dave"
+    export *
+}

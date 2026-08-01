@@ -41,6 +41,46 @@ struct SyncTransportPolicyTests {
         }
     }
 
+    @Test func makeRequestJoinsPathQueryAndAttachesBearerToken() throws {
+        let request = try SyncTransportPolicy.makeRequest(
+            baseURL: "https://example.com/base/",
+            path: "api/users",
+            method: "GET",
+            queryItems: [URLQueryItem(name: "limit", value: "500")],
+            bearerToken: "secret"
+        )
+
+        #expect(request.url?.absoluteString == "https://example.com/base/api/users?limit=500")
+        #expect(request.httpMethod == "GET")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+    }
+
+    @Test func makeRequestOmitsAuthorizationForNilOrEmptyToken() throws {
+        for token in [nil, ""] as [String?] {
+            let request = try SyncTransportPolicy.makeRequest(
+                baseURL: "http://localhost:8080",
+                path: "/api/ingest",
+                method: "POST",
+                bearerToken: token
+            )
+            #expect(request.url?.absoluteString == "http://localhost:8080/api/ingest")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        }
+    }
+
+    @Test func makeRequestNeverBuildsARequestForRejectedTransports() {
+        for rawURL in ["http://example.com", "ftp://localhost", "not a url"] {
+            #expect(throws: SyncTransportPolicy.PolicyError.self) {
+                try SyncTransportPolicy.makeRequest(
+                    baseURL: rawURL,
+                    path: "/api/users",
+                    method: "GET",
+                    bearerToken: "secret"
+                )
+            }
+        }
+    }
+
     @Test func appConfigUsesTheSharedPolicy() throws {
         let suite = "AbbeyCoreTests.syncTransport.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

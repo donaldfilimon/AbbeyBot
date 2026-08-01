@@ -30,9 +30,8 @@ public enum SyncPullEntity: String, CaseIterable, Codable, Sendable {
 /// other endpoints to refetch the same rows.
 ///
 /// Backed by one dictionary rather than six optional fields so a seventh entity is one
-/// `SyncPullEntity` case, not five separate edits. Custom `Codable` preserves the released flat
-/// entity-keyed representation while also accepting the brief synthesized `values` dictionary
-/// representation written by development builds during the refactor.
+/// `SyncPullEntity` case, not five separate edits. Custom `Codable` preserves the released
+/// flat entity-keyed representation.
 public struct SyncPullCursorSet: Codable, Equatable, Sendable {
     private var values: [SyncPullEntity: SyncPullCursor]
 
@@ -78,18 +77,9 @@ public struct SyncPullCursorSet: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: EntityCodingKey.self)
         var decodedValues: [SyncPullEntity: SyncPullCursor] = [:]
 
-        // A short-lived development build relied on synthesized Codable for `values`.
-        // Enum-keyed dictionaries encode as alternating key/value entries under this key.
-        let transientValuesKey = EntityCodingKey(stringValue: "values")!
-        if container.contains(transientValuesKey) {
-            decodedValues = try container.decode(
-                [SyncPullEntity: SyncPullCursor].self,
-                forKey: transientValuesKey
-            )
-        }
-
         // The released v2 format uses optional entity names as flat top-level keys.
-        // Flat values win if a hand-edited payload happens to contain both representations.
+        // Unknown keys are ignored; a payload with none decodes to an empty set, which
+        // callers treat as "no cursor" (a full bootstrap pull).
         for entity in SyncPullEntity.allCases {
             let key = EntityCodingKey(stringValue: entity.rawValue)!
             if let cursor = try container.decodeIfPresent(SyncPullCursor.self, forKey: key) {

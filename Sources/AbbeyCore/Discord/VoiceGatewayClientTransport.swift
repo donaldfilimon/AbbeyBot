@@ -19,6 +19,44 @@ public enum VoiceGatewayClientTransportError: Error, Equatable, Sendable, Custom
     }
 }
 
+/// One complete Voice Gateway WebSocket message. Binary payloads are deliberately
+/// redacted from textual and reflective diagnostics.
+public enum VoiceGatewayClientFrame: Equatable, Sendable, CustomStringConvertible,
+    CustomDebugStringConvertible, CustomReflectable
+{
+    case text(String)
+    case binary(Data)
+
+    public var byteCount: Int {
+        switch self {
+        case .text(let value): value.utf8.count
+        case .binary(let value): value.count
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .text(let value): "VoiceGatewayClientFrame.text(count: \(value.utf8.count))"
+        case .binary(let value): "VoiceGatewayClientFrame.binary(<redacted>, count: \(value.count))"
+        }
+    }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: ["representation": representation, "payload": "<redacted>", "count": byteCount],
+            displayStyle: .enum
+        )
+    }
+
+    private var representation: String {
+        switch self {
+        case .text: "text"
+        case .binary: "binary"
+        }
+    }
+}
+
 public struct VoiceGatewayClientClose: Equatable, Sendable, CustomStringConvertible,
     CustomDebugStringConvertible
 {
@@ -37,26 +75,63 @@ public struct VoiceGatewayClientClose: Equatable, Sendable, CustomStringConverti
 
 /// Type-erased connection scoped to one Voice Gateway WebSocket.
 public struct VoiceGatewayClientSession: Sendable {
+    public typealias ReceiveFrame = @Sendable () async throws -> VoiceGatewayClientFrame?
+    public typealias SendFrame = @Sendable (VoiceGatewayClientFrame) async throws -> Void
     public typealias Receive = @Sendable () async throws -> String?
     public typealias Send = @Sendable (String) async throws -> Void
     public typealias Close = @Sendable (Int, String?) async -> Void
 
-    private let receiveImpl: Receive
-    private let sendImpl: Send
+    private let receiveFrameImpl: ReceiveFrame
+    private let sendFrameImpl: SendFrame
     private let closeImpl: Close
 
+    public init(
+        receiveFrame: @escaping ReceiveFrame,
+        sendFrame: @escaping SendFrame,
+        close: @escaping Close
+    ) {
+        self.receiveFrameImpl = receiveFrame
+        self.sendFrameImpl = sendFrame
+        self.closeImpl = close
+    }
+
+    /// Compatibility initializer for text-only Voice Gateway consumers.
     public init(
         receive: @escaping Receive,
         send: @escaping Send,
         close: @escaping Close
     ) {
-        self.receiveImpl = receive
-        self.sendImpl = send
+        self.receiveFrameImpl = {
+            try await receive().map(VoiceGatewayClientFrame.text)
+        }
+        self.sendFrameImpl = { frame in
+            guard case .text(let text) = frame else {
+                throw VoiceGatewayClientTransportError.binaryMessageRejected
+            }
+            try await send(text)
+        }
         self.closeImpl = close
     }
 
-    public func receive() async throws -> String? { try await receiveImpl() }
-    public func send(_ text: String) async throws { try await sendImpl(text) }
+    public func receiveFrame() async throws -> VoiceGatewayClientFrame? {
+        try await receiveFrameImpl()
+    }
+
+    public func sendFrame(_ frame: VoiceGatewayClientFrame) async throws {
+        try await sendFrameImpl(frame)
+    }
+
+    public func receive() async throws -> String? {
+        guard let frame = try await receiveFrameImpl() else { return nil }
+        guard case .text(let text) = frame else {
+            throw VoiceGatewayClientTransportError.binaryMessageRejected
+        }
+        return text
+    }
+
+    public func send(_ text: String) async throws {
+        try await sendFrameImpl(.text(text))
+    }
     public func close(code: Int = 1000, reason: String? = nil) async {
         await closeImpl(code, reason.map { String($0.prefix(123)) })
     }
@@ -106,14 +181,19 @@ public struct VoiceGatewayClientTransport: Sendable {
                     maximumBytes: maximumBufferedBytes
                 )
                 let session = VoiceGatewayClientSession(
-                    receive: {
-                        try await inbox.next()
+                    receiveFrame: {
+                        try await inbox.nextFrame()
                     },
-                    send: { text in
-                        guard text.utf8.count <= maximumMessageBytes else {
+                    sendFrame: { frame in
+                        guard frame.byteCount <= maximumMessageBytes else {
                             throw VoiceGatewayClientTransportError.messageTooLarge
                         }
-                        try await outbound.write(.text(text))
+                        switch frame {
+                        case .text(let text):
+                            try await outbound.write(.text(text))
+                        case .binary(let data):
+                            try await outbound.write(.binary(ByteBuffer(bytes: data)))
+                        }
                     },
                     close: { code, reason in
                         guard (1_000...4_999).contains(code) else { return }
@@ -137,16 +217,29 @@ public struct VoiceGatewayClientTransport: Sendable {
                                             throw VoiceGatewayClientTransportError.messageTooLarge
                                         }
                                         do {
-                                            try await inbox.yield(text)
+                                            try await inbox.yield(.text(text))
                                         } catch {
                                             try? await outbound.close(
-                                                .init(codeNumber: 1009),
+                                                .init(codeNumber: VoiceGatewayClientInboundBuffer.overflowCloseCode),
                                                 reason: "inbound queue overflow"
                                             )
                                             throw error
                                         }
-                                    case .binary:
-                                        throw VoiceGatewayClientTransportError.binaryMessageRejected
+                                    case .binary(let buffer):
+                                        guard buffer.readableBytes <= maximumMessageBytes else {
+                                            throw VoiceGatewayClientTransportError.messageTooLarge
+                                        }
+                                        do {
+                                            try await inbox.yield(
+                                                .binary(Data(buffer.readableBytesView))
+                                            )
+                                        } catch {
+                                            try? await outbound.close(
+                                                .init(codeNumber: VoiceGatewayClientInboundBuffer.overflowCloseCode),
+                                                reason: "inbound queue overflow"
+                                            )
+                                            throw error
+                                        }
                                     }
                                 }
                                 await inbox.finish()
@@ -174,6 +267,7 @@ public struct VoiceGatewayClientTransport: Sendable {
                         await inbox.finish(throwing: CancellationError())
                         try? await outbound.close(.goingAway, reason: "cancelled")
                     }
+                )
             }
 
             let close = try await client.run()
@@ -226,16 +320,23 @@ enum VoiceGatewayClientTaskCoordinator {
             operationTask.cancel()
             inboundTask.cancel()
             Task {
-                await cancelled()
                 await completion.complete(.failure(CancellationError()))
             }
         }
 
         operationTask.cancel()
         inboundTask.cancel()
-        if case .success(.operation) = first {
+        if Task.isCancelled {
+            // Cleanup must unblock transport waits before joining both child
+            // tasks. Joining prevents a cancelled session from racing the next
+            // connection attempt with stale reads or writes.
+            await cancelled()
+        } else if case .success(.operation) = first {
             await operationCompleted()
         }
+        _ = await operationTask.result
+        _ = await inboundTask.result
+        if Task.isCancelled { throw CancellationError() }
         _ = try first.get()
     }
 }
@@ -259,12 +360,16 @@ private actor VoiceGatewayClientFirstCompletion {
 }
 
 actor VoiceGatewayClientInboundBuffer {
-    private typealias Waiter = CheckedContinuation<Result<String?, any Error>, Never>
+    nonisolated static let overflowCloseCode = 1009
+    private typealias Waiter = CheckedContinuation<
+        Result<VoiceGatewayClientFrame?, any Error>,
+        Never
+    >
 
-    private var buffered: [String] = []
+    private var buffered: [VoiceGatewayClientFrame] = []
     private var bufferedBytes = 0
     private var waiters: [Waiter] = []
-    private var finished: Result<String?, any Error>?
+    private var finished: Result<VoiceGatewayClientFrame?, any Error>?
     private let maximumMessages: Int
     private let maximumBytes: Int
 
@@ -274,25 +379,30 @@ actor VoiceGatewayClientInboundBuffer {
     }
 
     func yield(_ message: String) throws {
+        try yield(.text(message))
+    }
+
+    func yield(_ frame: VoiceGatewayClientFrame) throws {
         guard finished == nil else { return }
         if waiters.isEmpty {
-            let byteCount = message.utf8.count
+            let byteCount = frame.byteCount
             guard buffered.count < maximumMessages,
                   byteCount <= maximumBytes - min(bufferedBytes, maximumBytes)
             else {
                 finish(throwing: VoiceGatewayClientTransportError.messageTooLarge, discardingBuffered: true)
                 throw VoiceGatewayClientTransportError.messageTooLarge
             }
-            buffered.append(message)
+            buffered.append(frame)
             bufferedBytes += byteCount
         } else {
-            waiters.removeFirst().resume(returning: .success(message))
+            waiters.removeFirst().resume(returning: .success(frame))
         }
     }
 
     func finish(throwing error: (any Error)? = nil, discardingBuffered: Bool = false) {
         guard finished == nil else { return }
-        let result: Result<String?, any Error> = error.map(Result.failure) ?? .success(nil)
+        let result: Result<VoiceGatewayClientFrame?, any Error> =
+            error.map(Result.failure) ?? .success(nil)
         finished = result
         if discardingBuffered {
             buffered.removeAll(keepingCapacity: false)
@@ -306,10 +416,18 @@ actor VoiceGatewayClientInboundBuffer {
     }
 
     func next() async throws -> String? {
+        guard let frame = try await nextFrame() else { return nil }
+        guard case .text(let text) = frame else {
+            throw VoiceGatewayClientTransportError.binaryMessageRejected
+        }
+        return text
+    }
+
+    func nextFrame() async throws -> VoiceGatewayClientFrame? {
         if !buffered.isEmpty {
-            let message = buffered.removeFirst()
-            bufferedBytes -= message.utf8.count
-            return message
+            let frame = buffered.removeFirst()
+            bufferedBytes -= frame.byteCount
+            return frame
         }
         if let finished {
             return try finished.get()

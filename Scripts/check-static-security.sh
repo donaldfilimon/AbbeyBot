@@ -16,6 +16,22 @@ if git grep -IlE '^(<<<<<<< |=======|>>>>>>> )' -- . \
   exit 1
 fi
 
+# SwiftPM compiles untracked Swift files inside target directories too. Finder/iCloud conflict
+# copies such as `ModelContainerBootstrap 2.swift` therefore cause invalid redeclarations before
+# they are staged. Inspect tracked plus untracked, non-ignored target files so the static gate
+# catches the problem at its source.
+duplicate_swift_sources=()
+while IFS= read -r -d '' path; do
+  if [[ "$path" =~ \ [0-9]+\.swift$ ]]; then
+    duplicate_swift_sources+=("$path")
+  fi
+done < <(git ls-files -co --exclude-standard -z -- Sources Tests)
+if [[ "${#duplicate_swift_sources[@]}" -gt 0 ]]; then
+  echo "STATIC_FAIL: Finder/iCloud-style duplicate Swift source(s) detected:" >&2
+  printf '  %s\n' "${duplicate_swift_sources[@]}" >&2
+  exit 1
+fi
+
 echo "======== security: tracked filenames ========"
 bad_names=()
 while IFS= read -r -d '' path; do

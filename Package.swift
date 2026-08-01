@@ -5,6 +5,11 @@ import PackageDescription
 /// When `ABBEY_PACKAGE_ROLE=server`, omit the SwiftUI/SwiftData desktop target so Linux
 /// CI / Docker / swiftly can build the unified `AbbeyBot` executable without AppKit.
 let serverOnlyPackage = ProcessInfo.processInfo.environment["ABBEY_PACKAGE_ROLE"] == "server"
+/// Native Discord media dependencies are intentionally opt-in. The normal desktop/server
+/// package graph must not require a locally bootstrapped C/C++ dependency prefix.
+let nativeMediaEnabled = ProcessInfo.processInfo.environment["ABBEY_NATIVE_MEDIA"] == "1"
+let nativeMediaPrefix = ProcessInfo.processInfo.environment["ABBEY_NATIVE_PREFIX"]
+    ?? "\(ProcessInfo.processInfo.environment["TMPDIR"] ?? "/tmp")/AbbeyBot.native/v1"
 
 var packageTargets: [Target] = [
     .target(
@@ -112,11 +117,70 @@ var entryDependencies: [Target.Dependency] = [
     "AbbeyCLI"
 ]
 
+if nativeMediaEnabled {
+    packageTargets.append(contentsOf: [
+        .systemLibrary(
+            name: "CLibDave",
+            path: "Sources/CLibDave",
+            pkgConfig: "libdave"
+        ),
+        .systemLibrary(
+            name: "COpus",
+            path: "Sources/COpus",
+            pkgConfig: "opus"
+        ),
+        .systemLibrary(
+            name: "CSodium",
+            path: "Sources/CSodium",
+            pkgConfig: "libsodium"
+        ),
+        .target(
+            name: "AbbeyMediaNative",
+            dependencies: ["AbbeyCore", "CLibDave", "COpus", "CSodium"],
+            path: "Sources/AbbeyMediaNative",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                // The audited libdave archive is dynamic on Apple platforms. XCTest launchers
+                // sanitize DYLD_LIBRARY_PATH, so embed the explicit opt-in prefix as an rpath.
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "\(nativeMediaPrefix)/lib"])
+            ]
+        ),
+        .testTarget(
+            name: "AbbeyMediaNativeTests",
+            dependencies: ["AbbeyMediaNative", "AbbeyCore"],
+            path: "Tests/AbbeyMediaNativeTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        )
+    ])
+}
+
 if !serverOnlyPackage {
+    packageTargets.append(
+        .target(
+            name: "AbbeyMediaMacOS",
+            path: "Sources/AbbeyMediaMacOS",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("AppKit")
+            ]
+        )
+    )
     packageTargets.insert(
         .target(
             name: "AbbeyBotApp",
-            dependencies: ["AbbeyCore"],
+            dependencies: ["AbbeyCore", "AbbeyMediaMacOS"],
             path: "Sources/AbbeyBotApp",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
@@ -127,8 +191,18 @@ if !serverOnlyPackage {
     packageTargets.append(
         .testTarget(
             name: "AbbeyBotAppTests",
-            dependencies: ["AbbeyBotApp"],
+            dependencies: ["AbbeyBotApp", "AbbeyMediaMacOS"],
             path: "Tests/AbbeyBotAppTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        )
+    )
+    packageTargets.append(
+        .testTarget(
+            name: "AbbeyMediaMacOSTests",
+            dependencies: ["AbbeyMediaMacOS"],
+            path: "Tests/AbbeyMediaMacOSTests",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
             ]
@@ -155,19 +229,27 @@ packageTargets.append(
     )
 )
 
+var packageProducts: [Product] = [
+    .library(name: "AbbeyCore", targets: ["AbbeyCore"]),
+    .library(name: "AbbeyServerKit", targets: ["AbbeyServerKit"]),
+    // Sole executable product -> bare `swift run` works (defaults to desktop on macOS).
+    // Roles: `swift run` | `swift run AbbeyBot serve ...` | `swift run AbbeyBot cli`
+    .executable(name: "AbbeyBot", targets: ["AbbeyEntry"])
+]
+if nativeMediaEnabled {
+    packageProducts.append(.library(name: "AbbeyMediaNative", targets: ["AbbeyMediaNative"]))
+}
+if !serverOnlyPackage {
+    packageProducts.append(.library(name: "AbbeyMediaMacOS", targets: ["AbbeyMediaMacOS"]))
+}
+
 let package = Package(
     name: "AbbeyBot",
     platforms: [
         .macOS(.v27),
         .driverKit(.v27)
     ],
-    products: [
-        .library(name: "AbbeyCore", targets: ["AbbeyCore"]),
-        .library(name: "AbbeyServerKit", targets: ["AbbeyServerKit"]),
-        // Sole executable product → bare `swift run` works (defaults to desktop on macOS).
-        // Roles: `swift run` | `swift run AbbeyBot serve …` | `swift run AbbeyBot cli`
-        .executable(name: "AbbeyBot", targets: ["AbbeyEntry"])
-    ],
+    products: packageProducts,
     dependencies: [
         .package(url: "https://github.com/DiscordBM/DiscordBM", from: "1.16.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.3"),

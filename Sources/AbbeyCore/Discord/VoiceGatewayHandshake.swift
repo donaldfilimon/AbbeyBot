@@ -204,6 +204,23 @@ public struct VoiceGatewayHandshake: Sendable {
         pendingByGuild[guildID]?.generation
     }
 
+    /// Releases a stalled join or leave barrier only when it still belongs to
+    /// the generation that scheduled the deadline. Discord does not attach a
+    /// client nonce to these Gateway events, so callers must never expire a
+    /// newer generation with an older timer.
+    @discardableResult
+    public mutating func expire(guildID: String, generation: Generation) -> Bool {
+        if pendingByGuild[guildID]?.generation == generation {
+            pendingByGuild[guildID] = nil
+            return true
+        }
+        if leavingByGuild[guildID]?.generation == generation {
+            leavingByGuild[guildID] = nil
+            return true
+        }
+        return false
+    }
+
     /// Drops all capability-bearing state while preserving the monotonic
     /// generation counter so callbacks from before a disconnect remain stale.
     public mutating func reset() {

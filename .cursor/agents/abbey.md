@@ -22,7 +22,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 4. **Multi-Persona (claim-honest):** `AbbeyPersona` / `AvivaPersona` / `AbiPersona` in AbbeyCore; switch via `/persona`, ingest `personaSwitch`, or desktop Personas tab. Engines call `ABIRouter.route(intent:)` on ingest `craftReply` and `/ask` (mod/command → Abi, question → Aviva, greeting/smallTalk → Abbey). `research_mlai.md` = roles reference only. DQN = strategy selection only. Do not claim Python ML, blockchain, industry certification, or WDBX throughput.
 5. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` so desktop and server do not drift.
 6. **Shipped sync / Twitch (post-#33–#39):** EventSub `channel.chat.message` → `BotRuntime.handleTwitchChat`; `stream.online`/`stream.offline` → `handleTwitchStreamLifecycle` (`twitchStreamLive` on `/api/status`); follow/subscribe/cheer log + soft-ingest social context; env-gated six-type auto-subscribe is off by default (`ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` + full `TWITCH_*` contract including `TWITCH_BOT_USER_ID`; unverified live). Desktop push+pull uses `AbbeyServerClient` / `SyncCursorStore`; CLI provides `/sync pull` + `/sync push` (messages + facts). Soft-delete tombstones cover all six sync entities. Plain HTTP sync is loopback-only; remote sync requires HTTPS.
-7. **Won't-ship (do not scaffold):** Discord Voice **audio**, CRDT merge, Twitch PubSub, codegen sandbox. Presence-only voice, LWW+tombstones+CLI pull/push, EventSub, and static `CodeProposalValidator` are the claims.
+7. **Won't-ship (do not scaffold):** CRDT merge, Twitch PubSub, codegen sandbox. LWW+tombstones+CLI pull/push, EventSub, and static `CodeProposalValidator` are the claims. Discord Voice **audio** and **video/Go Live** are **in progress, not shipped** — voice presence (`/voice join|leave`) is the only verified runtime claim; track completion in `tasks/goals.md` / `tasks/todo.md` and do not claim audio/video without the live-call evidence listed there.
 
 **Toolchain (hard rules):**
 1. Always `unset TOOLCHAINS` before Swift builds/tests.
@@ -33,7 +33,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 **Workflow:**
 1. Read `AGENTS.md` (and nearby sources only as needed).
 2. Locate the owning layer: AbbeyCore vs AbbeyEngine / BotRuntime vs AbbeyServer routes / AbbeyCLI / SwiftUI.
-3. Implement the minimal change; do not expand into won't-ship Voice audio, CRDT, PubSub, or a codegen sandbox.
+3. Implement the minimal change; do not expand into won't-ship CRDT, PubSub, or a codegen sandbox, and do not convert in-progress Voice audio/video work into shipped claims.
 4. When an attached plan already has to-dos, execute them in order, update statuses, and do not edit the plan or recreate tasks.
 5. Verify with the narrowest honest gate:
    - Full: `unset TOOLCHAINS && bash Scripts/verify-all.sh`
@@ -48,7 +48,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 
 **Learning & Safety Policy (binding summary):**
 
-Prioritize **care, clarity, and competence**. Never treat RL rewards as permission to ignore safety — DQN is strategy selection only. Phase 1 shipped: `AppConfig.validateForStartup()`, dry-run connect, durable DQN checkpoints. Phase 2 shipped: experience journal, static `CodeProposalValidator`, `RollbackStore`, Twitch IRC + EventSub chat ingest + stream.online/offline status + follow/subscribe/cheer side-effects (interaction log + soft ingest) + env-gated auto-subscribe (unverified live) + persisted (Fluent-backed) EventSub replay guard. Gate: `AGENTS.md` → **Verify**. Still deferred: live Helix `webhook_callback_verification` handshake (needs a public HTTPS callback). Won't ship: PubSub, codegen sandbox, Voice audio, CRDT. Full policy in `AGENTS.md`.
+Prioritize **care, clarity, and competence**. Never treat RL rewards as permission to ignore safety — DQN is strategy selection only. Phase 1 shipped: `AppConfig.validateForStartup()`, dry-run connect, durable DQN checkpoints. Phase 2 shipped: experience journal, static `CodeProposalValidator`, `RollbackStore`, Twitch IRC + EventSub chat ingest + stream.online/offline status + follow/subscribe/cheer side-effects (interaction log + soft ingest) + env-gated auto-subscribe (unverified live) + persisted (Fluent-backed) EventSub replay guard. Gate: `AGENTS.md` → **Verify**. Still deferred: live Helix `webhook_callback_verification` handshake (needs a public HTTPS callback). In progress, not shipped: Discord Voice audio and video/Go Live. Won't ship: PubSub, codegen sandbox, CRDT. Full policy in `AGENTS.md`.
 
 **Quality Standards:**
 - Claim-honest: cite real targets, scripts, env vars, and routes — no speculative APIs.
@@ -58,7 +58,7 @@ Prioritize **care, clarity, and competence**. Never treat RL rewards as permissi
 **Output Format:**
 - Short verdict of what you did and which gate ran.
 - Path-anchored notes for key files touched.
-- Explicit won't-ship callouts when relevant (Voice audio, CRDT, PubSub, codegen sandbox).
+- Explicit scope callouts when relevant: won't-ship (CRDT, PubSub, codegen sandbox) and in-progress-not-shipped (Voice audio, video/Go Live).
 - Next step only if blocked or user action is required.
 
 **Edge Cases:**

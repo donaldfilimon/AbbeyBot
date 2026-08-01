@@ -152,7 +152,7 @@ status: done
   a warning against piping build output through `tail` (masks the exit code).
 
 ## Apply strict code-quality findings from PR #53's merged diff
-status: todo
+status: in_progress
 - A strict code-quality review of `aa1fb60...b585947` (the diff that merged as PR #53, ~1500 lines
   / 41 files) surfaced two confirmed structural findings, not yet applied:
   1. **Duplicated transport-request builder.** `ServerSyncClient.makeRequest`

@@ -245,6 +245,48 @@ struct VoiceGatewayHandshakeTests {
         #expect(second != first)
     }
 
+    @Test("deadline expires only its own pending generation")
+    func generationScopedPendingExpiry() {
+        var handshake = VoiceGatewayHandshake()
+        guard let first = handshake.begin(guildID: "guild", channelID: "first", userID: "bot") else {
+            Issue.record("Expected initial generation")
+            return
+        }
+
+        let expiredOtherGuild = handshake.expire(guildID: "other", generation: first)
+        #expect(!expiredOtherGuild)
+        #expect(handshake.generation(for: "guild") == first)
+        let expiredFirst = handshake.expire(guildID: "guild", generation: first)
+        #expect(expiredFirst)
+        #expect(handshake.generation(for: "guild") == nil)
+
+        guard let second = handshake.begin(guildID: "guild", channelID: "second", userID: "bot") else {
+            Issue.record("Expected replacement generation")
+            return
+        }
+        #expect(second != first)
+        let expiredStaleGeneration = handshake.expire(guildID: "guild", generation: first)
+        #expect(!expiredStaleGeneration)
+        #expect(handshake.generation(for: "guild") == second)
+    }
+
+    @Test("deadline can release a stalled leave barrier")
+    func leaveBarrierExpiry() {
+        var handshake = VoiceGatewayHandshake()
+        guard let generation = handshake.begin(guildID: "guild", channelID: "first", userID: "bot") else {
+            Issue.record("Expected initial generation")
+            return
+        }
+        guard case .cancelled = handshake.cancel(guildID: "guild", generation: generation) else {
+            Issue.record("Expected cancellation")
+            return
+        }
+        #expect(handshake.begin(guildID: "guild", channelID: "second", userID: "bot") == nil)
+        let expiredLeave = handshake.expire(guildID: "guild", generation: generation)
+        #expect(expiredLeave)
+        #expect(handshake.begin(guildID: "guild", channelID: "second", userID: "bot") != nil)
+    }
+
     private func assertRejection(
         _ outcome: VoiceGatewayHandshake.Outcome,
         generation: VoiceGatewayHandshake.Generation,
