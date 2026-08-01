@@ -159,6 +159,10 @@ if nativeMediaEnabled {
 }
 
 if !serverOnlyPackage {
+    var desktopAppDependencies: [Target.Dependency] = ["AbbeyCore", "AbbeyMediaMacOS"]
+    if nativeMediaEnabled {
+        desktopAppDependencies.append("AbbeyMediaNative")
+    }
     packageTargets.append(
         .target(
             name: "AbbeyMediaMacOS",
@@ -180,7 +184,7 @@ if !serverOnlyPackage {
     packageTargets.insert(
         .target(
             name: "AbbeyBotApp",
-            dependencies: ["AbbeyCore", "AbbeyMediaMacOS"],
+            dependencies: desktopAppDependencies,
             path: "Sources/AbbeyBotApp",
             swiftSettings: [
                 .swiftLanguageMode(.v6)

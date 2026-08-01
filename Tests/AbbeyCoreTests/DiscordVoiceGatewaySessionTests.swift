@@ -266,7 +266,7 @@ struct DiscordVoiceGatewaySessionTests {
         ]))
 
         try await eventually { await harness.closeCodes() == [1002] }
-        #expect(await handler.receivedOpcodes() == [.externalSenderPackage])
+        #expect(await handler.lifetimeReceivedOpcodes() == [.externalSenderPackage])
         try await eventually { await gateway.snapshot().phase == .failed }
     }
 
@@ -1283,6 +1283,7 @@ private actor DiscordVoiceGatewaySessionManualClock {
 
 private actor DiscordVoiceGatewayDAVEHandlerRecorder {
     private var opcodes: [VoiceGatewayDAVEOpcode] = []
+    private var lifetimeOpcodes: [VoiceGatewayDAVEOpcode] = []
     private var recognizedUserIDSnapshots: [[UInt64]] = []
     private var resets = 0
 
@@ -1302,6 +1303,7 @@ private actor DiscordVoiceGatewayDAVEHandlerRecorder {
     }
 
     func receivedOpcodes() -> [VoiceGatewayDAVEOpcode] { opcodes }
+    func lifetimeReceivedOpcodes() -> [VoiceGatewayDAVEOpcode] { lifetimeOpcodes }
     func membershipSnapshots() -> [[UInt64]] { recognizedUserIDSnapshots }
     func resetCount() -> Int { resets }
 
@@ -1313,6 +1315,7 @@ private actor DiscordVoiceGatewayDAVEHandlerRecorder {
         _ frame: VoiceGatewayDAVEInboundFrame
     ) throws -> [VoiceGatewayDAVEClientMessage] {
         opcodes.append(frame.message.opcode)
+        lifetimeOpcodes.append(frame.message.opcode)
         switch frame.message {
         case .prepareTransition(let payload):
             return [

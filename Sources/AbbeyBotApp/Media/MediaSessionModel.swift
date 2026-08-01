@@ -2,6 +2,9 @@ import AbbeyCore
 import AbbeyMediaMacOS
 import Foundation
 import Observation
+#if canImport(AbbeyMediaNative)
+import AbbeyMediaNative
+#endif
 
 struct MediaSessionDevice: Equatable, Identifiable, Sendable {
     let id: String
@@ -250,9 +253,15 @@ final class MediaSessionModel {
         }
         let controller: DiscordVoiceController
         do {
+            let factory: any DiscordVoiceSessionFactory
+#if canImport(AbbeyMediaNative)
+            factory = DiscordVoiceNativeControlSessionFactory()
+#else
+            factory = DiscordVoicePortableSessionFactory()
+#endif
             controller = try DiscordVoiceController(
                 bridge: DiscordVoiceBridgeAdapter(bridge: discordBridge),
-                factory: DiscordVoicePortableSessionFactory(),
+                factory: factory,
                 configuration: configuration
             )
         } catch {

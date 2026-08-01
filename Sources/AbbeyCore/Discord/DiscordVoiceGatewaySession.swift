@@ -133,6 +133,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private var activeSession: VoiceGatewayClientSession?
     private var transportTask: Task<Void, Never>?
     private var daveHandlingTask: Task<[VoiceGatewayDAVEClientMessage], any Error>?
+    private var daveMembershipTask: Task<Void, Never>?
     private var readySignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceGatewayTransportReady>?
     private var descriptionSignal: DiscordVoiceGatewaySessionSignal<VoiceGatewayV8SessionDescription>?
     private var selectedMode: DiscordVoiceTransportMode?
@@ -213,7 +214,10 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         await daveControlHandler.reset()
         daveConnectionContext = pendingDAVEContext
         recognizedDAVEUserIDs = pendingDAVEContext.map { [$0.selfUserID] } ?? []
-        await daveControlHandler.replaceRecognizedUserIDs(recognizedDAVEUserIDs.sorted())
+        try await replaceRecognizedDAVEUserIDs(
+            recognizedDAVEUserIDs.sorted(),
+            generation: connectionGeneration
+        )
         guard generation == connectionGeneration,
               phase == .connecting,
               !disconnectRequested
@@ -581,10 +585,13 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             case .clientsConnect(let payload):
                 if daveControlHandler.isAvailable {
                     let userIDs = try payload.userIDs.map(requireDAVESnowflake)
-                    recognizedDAVEUserIDs.formUnion(userIDs)
-                    await daveControlHandler.replaceRecognizedUserIDs(
-                        recognizedDAVEUserIDs.sorted()
+                    var nextUserIDs = recognizedDAVEUserIDs
+                    nextUserIDs.formUnion(userIDs)
+                    try await replaceRecognizedDAVEUserIDs(
+                        nextUserIDs.sorted(),
+                        generation: connectionGeneration
                     )
+                    recognizedDAVEUserIDs = nextUserIDs
                 }
                 guard generation == connectionGeneration, !disconnectRequested else {
                     throw DiscordVoiceGatewaySessionError.staleConnection
@@ -593,12 +600,15 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             case .clientDisconnect(let payload):
                 if daveControlHandler.isAvailable {
                     let userID = try requireDAVESnowflake(payload.userID)
+                    var nextUserIDs = recognizedDAVEUserIDs
                     if userID != daveConnectionContext?.selfUserID {
-                        recognizedDAVEUserIDs.remove(userID)
+                        nextUserIDs.remove(userID)
                     }
-                    await daveControlHandler.replaceRecognizedUserIDs(
-                        recognizedDAVEUserIDs.sorted()
+                    try await replaceRecognizedDAVEUserIDs(
+                        nextUserIDs.sorted(),
+                        generation: connectionGeneration
                     )
+                    recognizedDAVEUserIDs = nextUserIDs
                 }
                 guard generation == connectionGeneration, !disconnectRequested else {
                     throw DiscordVoiceGatewaySessionError.staleConnection
@@ -657,7 +667,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         // A DAVE frame and its native-handler response are one state-machine
         // transaction. Nothing becomes effective until both have validated.
         daveTransitionState = transitionState
-        negotiatedDAVEProtocolVersion = Int(transitionState.effectiveProtocolVersion)
+        // Discord may send External Sender before Session Description. Retain
+        // that package without changing the nil sentinel which keeps every
+        // other DAVE opcode fail-closed until Session Description is accepted.
+        if !isPreDescriptionExternalSender {
+            negotiatedDAVEProtocolVersion = Int(transitionState.effectiveProtocolVersion)
+        }
         if previousEffectiveProtocolVersion > 0,
            transitionState.effectiveProtocolVersion == 0
         {
@@ -683,17 +698,49 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         try await sendDAVE(outbound, through: session, generation: connectionGeneration)
     }
 
+    private func replaceRecognizedDAVEUserIDs(
+        _ userIDs: [UInt64],
+        generation connectionGeneration: UInt64
+    ) async throws {
+        guard generation == connectionGeneration, !disconnectRequested else {
+            throw DiscordVoiceGatewaySessionError.staleConnection
+        }
+        let handler = daveControlHandler
+        let membershipTask = Task {
+            await handler.replaceRecognizedUserIDs(userIDs)
+        }
+        daveMembershipTask = membershipTask
+        defer { daveMembershipTask = nil }
+        await withTaskCancellationHandler {
+            await membershipTask.value
+        } onCancel: {
+            membershipTask.cancel()
+        }
+        guard generation == connectionGeneration, !disconnectRequested else {
+            throw DiscordVoiceGatewaySessionError.staleConnection
+        }
+        try Task.checkCancellation()
+    }
+
     /// Cancels and joins native DAVE processing before transport teardown.
-    /// Reset runs before the join so a handler waiting in a non-cancellation-aware
-    /// native callback can release its pending operation deterministically.
+    /// The first reset releases handlers waiting in non-cancellation-aware
+    /// native callbacks. Membership replacement is joined and followed by a
+    /// final reset so a stale native write cannot survive disconnect.
     private func cancelDAVEHandling() async {
         let handlerTask = daveHandlingTask
+        let membershipTask = daveMembershipTask
         handlerTask?.cancel()
+        membershipTask?.cancel()
         await daveControlHandler.reset()
         if let handlerTask {
             _ = await handlerTask.result
         }
+        if let membershipTask {
+            await membershipTask.value
+            await daveControlHandler.reset()
+        }
         daveHandlingTask = nil
+        daveMembershipTask = nil
     }
 
     private func validateDAVEOutboundSet(
@@ -973,6 +1020,8 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         daveTransitionState.reset()
         daveConnectionContext = nil
         recognizedDAVEUserIDs.removeAll(keepingCapacity: false)
+        daveHandlingTask = nil
+        daveMembershipTask = nil
         lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
         disconnectRequested = false
         phase = finalPhase

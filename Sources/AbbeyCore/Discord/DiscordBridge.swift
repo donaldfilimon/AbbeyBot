@@ -192,7 +192,6 @@ public actor DiscordBridge {
         voiceHandshakeDeadlineTask?.cancel()
         voiceHandshakeDeadlineTask = nil
         await gateway?.disconnect()
-        // BotGatewayManager has no explicit disconnect API in all versions — drop reference.
         gateway = nil
         botUserId = nil
         voiceChannelId = nil
