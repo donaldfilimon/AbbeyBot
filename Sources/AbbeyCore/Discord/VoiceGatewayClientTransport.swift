@@ -100,7 +100,11 @@ public struct VoiceGatewayClientTransport: Sendable {
                 configuration: configuration,
                 logger: logger
             ) { inbound, outbound, _ in
-                let inbox = VoiceGatewayClientMessageInbox()
+                let maximumBufferedBytes = min(maximumMessageBytes * 8, 4 * 1_024 * 1_024)
+                let inbox = VoiceGatewayClientInboundBuffer(
+                    maximumMessages: 128,
+                    maximumBytes: maximumBufferedBytes
+                )
                 let session = VoiceGatewayClientSession(
                     receive: {
                         try await inbox.next()
@@ -120,13 +124,11 @@ public struct VoiceGatewayClientTransport: Sendable {
                     }
                 )
 
-                try await withTaskCancellationHandler {
-                    try await withThrowingTaskGroup(of: VoiceGatewayClientTransportTask.self) { group in
-                        group.addTask {
+                try await VoiceGatewayClientTaskCoordinator.run(
+                    operation: {
                             try await operation(session)
-                            return .operation
-                        }
-                        group.addTask {
+                    },
+                    inbound: {
                             do {
                                 for try await message in inbound.messages(maxSize: maximumMessageBytes) {
                                     switch message {
@@ -134,13 +136,20 @@ public struct VoiceGatewayClientTransport: Sendable {
                                         guard text.utf8.count <= maximumMessageBytes else {
                                             throw VoiceGatewayClientTransportError.messageTooLarge
                                         }
-                                        await inbox.yield(text)
+                                        do {
+                                            try await inbox.yield(text)
+                                        } catch {
+                                            try? await outbound.close(
+                                                .init(codeNumber: 1009),
+                                                reason: "inbound queue overflow"
+                                            )
+                                            throw error
+                                        }
                                     case .binary:
                                         throw VoiceGatewayClientTransportError.binaryMessageRejected
                                     }
                                 }
                                 await inbox.finish()
-                                return .inbound
                             } catch {
                                 let mapped: any Error
                                 if let clientError = error as? WebSocketClientError {
@@ -157,21 +166,14 @@ public struct VoiceGatewayClientTransport: Sendable {
                                 await inbox.finish(throwing: mapped)
                                 throw mapped
                             }
-                        }
-
-                        guard let first = try await group.next() else { return }
-                        if first == .operation {
-                            group.cancelAll()
-                            await inbox.finish()
-                        }
-                        while await group.nextResult() != nil {}
-                    }
-                } onCancel: {
-                    Task {
+                    },
+                    operationCompleted: {
+                        await inbox.finish()
+                    },
+                    cancelled: {
                         await inbox.finish(throwing: CancellationError())
                         try? await outbound.close(.goingAway, reason: "cancelled")
                     }
-                }
             }
 
             let close = try await client.run()
@@ -185,31 +187,117 @@ public struct VoiceGatewayClientTransport: Sendable {
     }
 }
 
-private enum VoiceGatewayClientTransportTask: Equatable, Sendable {
+enum VoiceGatewayClientTransportTask: Equatable, Sendable {
     case operation
     case inbound
 }
 
-private actor VoiceGatewayClientMessageInbox {
+enum VoiceGatewayClientTaskCoordinator {
+    typealias Work = @Sendable () async throws -> Void
+    typealias Cleanup = @Sendable () async -> Void
+
+    static func run(
+        operation: @escaping Work,
+        inbound: @escaping Work,
+        operationCompleted: @escaping Cleanup,
+        cancelled: @escaping Cleanup
+    ) async throws {
+        let completion = VoiceGatewayClientFirstCompletion()
+        let operationTask = Task {
+            do {
+                try await operation()
+                await completion.complete(.success(.operation))
+            } catch {
+                await completion.complete(.failure(error))
+            }
+        }
+        let inboundTask = Task {
+            do {
+                try await inbound()
+                await completion.complete(.success(.inbound))
+            } catch {
+                await completion.complete(.failure(error))
+            }
+        }
+
+        let first = await withTaskCancellationHandler {
+            await completion.next()
+        } onCancel: {
+            operationTask.cancel()
+            inboundTask.cancel()
+            Task {
+                await cancelled()
+                await completion.complete(.failure(CancellationError()))
+            }
+        }
+
+        operationTask.cancel()
+        inboundTask.cancel()
+        if case .success(.operation) = first {
+            await operationCompleted()
+        }
+        _ = try first.get()
+    }
+}
+
+private actor VoiceGatewayClientFirstCompletion {
+    private typealias Waiter = CheckedContinuation<Result<VoiceGatewayClientTransportTask, any Error>, Never>
+    private var result: Result<VoiceGatewayClientTransportTask, any Error>?
+    private var waiter: Waiter?
+
+    func complete(_ result: Result<VoiceGatewayClientTransportTask, any Error>) {
+        guard self.result == nil else { return }
+        self.result = result
+        waiter?.resume(returning: result)
+        waiter = nil
+    }
+
+    func next() async -> Result<VoiceGatewayClientTransportTask, any Error> {
+        if let result { return result }
+        return await withCheckedContinuation { waiter = $0 }
+    }
+}
+
+actor VoiceGatewayClientInboundBuffer {
     private typealias Waiter = CheckedContinuation<Result<String?, any Error>, Never>
 
     private var buffered: [String] = []
+    private var bufferedBytes = 0
     private var waiters: [Waiter] = []
     private var finished: Result<String?, any Error>?
+    private let maximumMessages: Int
+    private let maximumBytes: Int
 
-    func yield(_ message: String) {
+    init(maximumMessages: Int, maximumBytes: Int) {
+        self.maximumMessages = max(1, maximumMessages)
+        self.maximumBytes = max(1, maximumBytes)
+    }
+
+    func yield(_ message: String) throws {
         guard finished == nil else { return }
         if waiters.isEmpty {
+            let byteCount = message.utf8.count
+            guard buffered.count < maximumMessages,
+                  byteCount <= maximumBytes - min(bufferedBytes, maximumBytes)
+            else {
+                finish(throwing: VoiceGatewayClientTransportError.messageTooLarge, discardingBuffered: true)
+                throw VoiceGatewayClientTransportError.messageTooLarge
+            }
             buffered.append(message)
+            bufferedBytes += byteCount
         } else {
             waiters.removeFirst().resume(returning: .success(message))
         }
     }
 
-    func finish(throwing error: (any Error)? = nil) {
+    func finish(throwing error: (any Error)? = nil, discardingBuffered: Bool = false) {
         guard finished == nil else { return }
         let result: Result<String?, any Error> = error.map(Result.failure) ?? .success(nil)
         finished = result
+        if discardingBuffered {
+            buffered.removeAll(keepingCapacity: false)
+            bufferedBytes = 0
+        }
         let pending = waiters
         waiters.removeAll(keepingCapacity: false)
         for waiter in pending {
@@ -219,7 +307,9 @@ private actor VoiceGatewayClientMessageInbox {
 
     func next() async throws -> String? {
         if !buffered.isEmpty {
-            return buffered.removeFirst()
+            let message = buffered.removeFirst()
+            bufferedBytes -= message.utf8.count
+            return message
         }
         if let finished {
             return try finished.get()

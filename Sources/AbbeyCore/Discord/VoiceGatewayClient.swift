@@ -73,6 +73,50 @@ public struct VoiceGatewayClientClock: Sendable {
     )
 }
 
+public struct VoiceGatewayReconnectBackoff: Sendable {
+    public typealias Jitter = @Sendable (_ maximumJitterMilliseconds: UInt64) -> UInt64
+    public typealias Sleep = @Sendable (_ milliseconds: UInt64) async throws -> Void
+
+    private let baseMilliseconds: UInt64
+    private let maximumMilliseconds: UInt64
+    private let jitterImpl: Jitter
+    private let sleepImpl: Sleep
+
+    public init(
+        baseMilliseconds: UInt64 = 500,
+        maximumMilliseconds: UInt64 = 30_000,
+        jitter: @escaping Jitter,
+        sleep: @escaping Sleep
+    ) {
+        let maximum = max(1, maximumMilliseconds)
+        self.baseMilliseconds = min(max(1, baseMilliseconds), maximum)
+        self.maximumMilliseconds = maximum
+        self.jitterImpl = jitter
+        self.sleepImpl = sleep
+    }
+
+    public func delayMilliseconds(attempt: Int) -> UInt64 {
+        let shift = min(max(0, attempt - 1), 63)
+        let multiplication = baseMilliseconds.multipliedReportingOverflow(by: UInt64(1) << shift)
+        let exponential = multiplication.overflow ? maximumMilliseconds : min(multiplication.partialValue, maximumMilliseconds)
+        let allowance = min(exponential / 4, maximumMilliseconds - exponential)
+        return exponential + min(jitterImpl(allowance), allowance)
+    }
+
+    public func wait(attempt: Int) async throws {
+        try await sleepImpl(delayMilliseconds(attempt: attempt))
+    }
+
+    public static let continuous = Self(
+        jitter: { maximum in
+            maximum == 0 ? 0 : UInt64.random(in: 0...maximum)
+        },
+        sleep: { milliseconds in
+            try await Task.sleep(for: .milliseconds(Int64(min(milliseconds, UInt64(Int64.max)))))
+        }
+    )
+}
+
 public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConvertible {
     public struct Configuration: Equatable, Sendable {
         public var maximumMessageBytes: Int
@@ -108,9 +152,11 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
     private let transport: VoiceGatewayClientTransport
     private let udpHandoff: VoiceGatewayUDPHandoff
     private let clock: VoiceGatewayClientClock
+    private let reconnectBackoff: VoiceGatewayReconnectBackoff
     private let configuration: Configuration
     private var machine: VoiceGatewayV8StateMachine
     private var activeSession: VoiceGatewayClientSession?
+    private var reconnectSleepTask: Task<Void, any Error>?
     private var explicitlyDisconnected = false
     private var running = false
 
@@ -120,6 +166,7 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
         transport: VoiceGatewayClientTransport = .live(),
         udpHandoff: VoiceGatewayUDPHandoff = .unavailable,
         clock: VoiceGatewayClientClock = .continuous,
+        reconnectBackoff: VoiceGatewayReconnectBackoff = .continuous,
         configuration: Configuration = .init()
     ) {
         self.endpoint = endpoint
@@ -127,6 +174,7 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
         self.transport = transport
         self.udpHandoff = udpHandoff
         self.clock = clock
+        self.reconnectBackoff = reconnectBackoff
         self.configuration = configuration
         self.machine = VoiceGatewayV8StateMachine(identity: identity)
     }
@@ -150,6 +198,8 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
         defer {
             running = false
             activeSession = nil
+            reconnectSleepTask?.cancel()
+            reconnectSleepTask = nil
         }
 
         var reconnectAttempts = 0
@@ -195,6 +245,12 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
                 }
                 reconnectAttempts += 1
                 shouldResume = disposition == .resume
+                do {
+                    try await waitBeforeReconnect(attempt: reconnectAttempts)
+                } catch is CancellationError {
+                    if explicitlyDisconnected { return .disconnected }
+                    throw CancellationError()
+                }
             }
         }
     }
@@ -202,6 +258,7 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
     /// Explicit operator disconnect always wins over a simultaneous resumable close.
     public func disconnect() async {
         explicitlyDisconnected = true
+        reconnectSleepTask?.cancel()
         if let activeSession {
             await activeSession.close(code: 1000, reason: "operator disconnect")
         }
@@ -217,7 +274,7 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
         }
         activeSession = session
         do {
-            try await send(try machine.opened(resuming: resuming), through: session)
+            try machine.opened(resuming: resuming)
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
                     try await self.receiveLoop(session)
@@ -244,7 +301,9 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
             }
             let event = try VoiceGatewayV8Decoder.decode(Data(text.utf8))
             let now = await clock.nowMilliseconds()
-            try machine.receive(event, nowMilliseconds: now)
+            if let authentication = try machine.receive(event, nowMilliseconds: now) {
+                try await send(authentication, through: session)
+            }
 
             if case .ready(let ready) = event.payload {
                 let selection = try await udpHandoff.prepare(for: ready)
@@ -256,6 +315,16 @@ public actor VoiceGatewayClient: CustomStringConvertible, CustomDebugStringConve
                 try await send(outbound, through: session)
             }
         }
+    }
+
+    private func waitBeforeReconnect(attempt: Int) async throws {
+        let backoff = reconnectBackoff
+        let task = Task {
+            try await backoff.wait(attempt: attempt)
+        }
+        reconnectSleepTask = task
+        defer { reconnectSleepTask = nil }
+        try await task.value
     }
 
     private func heartbeatLoop(_ session: VoiceGatewayClientSession) async throws {

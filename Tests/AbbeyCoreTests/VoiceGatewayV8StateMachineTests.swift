@@ -16,19 +16,20 @@ struct VoiceGatewayV8StateMachineTests {
     @Test("valid identify-to-media transcript tracks sequence and heartbeat ACK")
     func validTranscript() throws {
         var machine = VoiceGatewayV8StateMachine(identity: try identity())
-        guard case .identify(let identify) = try machine.opened() else {
-            Issue.record("Expected Identify")
-            return
-        }
-        #expect(identify.maxDAVEProtocolVersion == 0)
+        try machine.opened()
+        #expect(machine.phase == .awaitingHello)
 
-        try machine.receive(
+        guard case .identify(let identify) = try machine.receive(
             VoiceGatewayV8Inbound(
                 sequence: 10,
                 payload: .hello(try VoiceGatewayV8Hello(heartbeatInterval: 1_000))
             ),
             nowMilliseconds: 5_000
-        )
+        ) else {
+            Issue.record("Expected Identify")
+            return
+        }
+        #expect(identify.maxDAVEProtocolVersion == 0)
         #expect(machine.phase == .awaitingReady)
         #expect(try machine.heartbeatIfDue(nowMilliseconds: 5_999) == nil)
 
@@ -60,7 +61,7 @@ struct VoiceGatewayV8StateMachineTests {
             ),
             nowMilliseconds: 6_100
         )
-        #expect(machine.phase == .ready)
+        #expect(machine.phase == .awaitingProtocolSelection)
         #expect(machine.lastReceivedSequence == 12)
 
         guard case .selectProtocol(let selection) = try machine.selectProtocol(
@@ -99,7 +100,7 @@ struct VoiceGatewayV8StateMachineTests {
     @Test("a pending heartbeat that misses one interval requires reconnect")
     func missedHeartbeatACK() throws {
         var machine = VoiceGatewayV8StateMachine(identity: try identity())
-        _ = try machine.opened()
+        try machine.opened()
         try machine.receive(
             VoiceGatewayV8Inbound(
                 sequence: 1,
@@ -118,7 +119,7 @@ struct VoiceGatewayV8StateMachineTests {
     @Test("sequence tracking is monotonic and feeds the resume payload")
     func sequenceAndResume() throws {
         var machine = VoiceGatewayV8StateMachine(identity: try identity())
-        _ = try machine.opened()
+        try machine.opened()
         try machine.receive(
             VoiceGatewayV8Inbound(
                 sequence: 20,
@@ -147,15 +148,16 @@ struct VoiceGatewayV8StateMachineTests {
         #expect(!String(describing: resume).contains("ephemeral-token"))
 
         #expect(machine.handleClose(code: 4015) == .resume)
-        guard case .resume(let outboundResume) = try machine.opened(resuming: true) else {
+        try machine.opened(resuming: true)
+        #expect(machine.phase == .awaitingHello)
+        guard case .resume(let outboundResume) = try machine.receive(
+            VoiceGatewayV8Inbound(sequence: 21, payload: .hello(try VoiceGatewayV8Hello(heartbeatInterval: 5_000))),
+            nowMilliseconds: 10
+        ) else {
             Issue.record("Expected Resume")
             return
         }
         #expect(outboundResume.sequenceAcknowledgement == 20)
-        try machine.receive(
-            VoiceGatewayV8Inbound(sequence: 21, payload: .hello(try VoiceGatewayV8Hello(heartbeatInterval: 5_000))),
-            nowMilliseconds: 10
-        )
         try machine.receive(
             VoiceGatewayV8Inbound(sequence: 22, payload: .resumed(VoiceGatewayV8Resumed())),
             nowMilliseconds: 20
@@ -180,7 +182,7 @@ struct VoiceGatewayV8StateMachineTests {
         #expect(throws: VoiceGatewayV8Error.unexpectedEvent) {
             _ = try machine.selectProtocol(address: "127.0.0.1", port: 50_000, mode: "mode")
         }
-        _ = try machine.opened()
+        try machine.opened()
         try machine.receive(
             VoiceGatewayV8Inbound(
                 sequence: 1,
@@ -198,5 +200,39 @@ struct VoiceGatewayV8StateMachineTests {
                 nowMilliseconds: 1_001
             )
         }
+    }
+
+    @Test("an invalid high-sequence event cannot poison resume")
+    func invalidSequenceDoesNotAdvanceResumeBoundary() throws {
+        var machine = VoiceGatewayV8StateMachine(identity: try identity())
+        try machine.opened()
+        try machine.receive(
+            VoiceGatewayV8Inbound(
+                sequence: 10,
+                payload: .hello(try VoiceGatewayV8Hello(heartbeatInterval: 1_000))
+            ),
+            nowMilliseconds: 0
+        )
+        try machine.receive(
+            VoiceGatewayV8Inbound(
+                sequence: 12,
+                payload: .ready(try VoiceGatewayV8Ready(
+                    ssrc: 5,
+                    ip: "203.0.113.2",
+                    port: 50_000,
+                    modes: ["mode"]
+                ))
+            ),
+            nowMilliseconds: 1
+        )
+
+        #expect(throws: VoiceGatewayV8Error.unexpectedEvent) {
+            try machine.receive(
+                VoiceGatewayV8Inbound(sequence: 999, payload: .resumed(VoiceGatewayV8Resumed())),
+                nowMilliseconds: 2
+            )
+        }
+        #expect(machine.lastReceivedSequence == 12)
+        #expect(try machine.resumePayload().sequenceAcknowledgement == 12)
     }
 }

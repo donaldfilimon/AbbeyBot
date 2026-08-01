@@ -6,7 +6,8 @@ public struct VoiceGatewayV8StateMachine: Sendable {
         case disconnected
         case awaitingHello
         case awaitingReady
-        case ready
+        /// Ready payload received, but UDP discovery/protocol selection is still incomplete.
+        case awaitingProtocolSelection
         case awaitingSessionDescription
         case established
         case resuming
@@ -53,14 +54,12 @@ public struct VoiceGatewayV8StateMachine: Sendable {
     }
 
     /// Call after the separate Voice Gateway WebSocket opens.
-    public mutating func opened(resuming: Bool = false) throws -> VoiceGatewayV8Outbound {
+    public mutating func opened(resuming: Bool = false) throws {
         guard phase == .disconnected || phase == .reconnectRequired else {
             throw VoiceGatewayV8Error.unexpectedEvent
         }
-        let openingMessage: VoiceGatewayV8Outbound = if resuming {
-            .resume(try resumePayload())
-        } else {
-            .identify(identity)
+        if resuming {
+            _ = try resumePayload()
         }
         openingAsResume = resuming
         phase = .awaitingHello
@@ -68,23 +67,23 @@ public struct VoiceGatewayV8StateMachine: Sendable {
         pendingHeartbeatTimestamp = nil
         nextHeartbeatAt = nil
         heartbeatACKDeadline = nil
-        return openingMessage
     }
 
+    /// Applies one validated event and returns authentication only after Hello.
+    @discardableResult
     public mutating func receive(
         _ event: VoiceGatewayV8Inbound,
         nowMilliseconds: UInt64
-    ) throws {
-        if let sequence = event.sequence {
-            guard sequence >= 0 else { throw VoiceGatewayV8Error.invalidSequence }
-            if lastReceivedSequence == nil || sequence > lastReceivedSequence! {
-                lastReceivedSequence = sequence
-            }
+    ) throws -> VoiceGatewayV8Outbound? {
+        if let sequence = event.sequence, sequence < 0 {
+            throw VoiceGatewayV8Error.invalidSequence
         }
+        var outbound: VoiceGatewayV8Outbound?
 
         switch event.payload {
         case .hello(let hello):
             guard phase == .awaitingHello else { throw VoiceGatewayV8Error.unexpectedEvent }
+            outbound = openingAsResume ? .resume(try resumePayload()) : .identify(identity)
             heartbeatInterval = hello.heartbeatInterval
             nextHeartbeatAt = nowMilliseconds.addingReportingOverflow(hello.heartbeatInterval).overflow
                 ? UInt64.max
@@ -105,7 +104,7 @@ public struct VoiceGatewayV8StateMachine: Sendable {
             guard phase == .awaitingReady else { throw VoiceGatewayV8Error.unexpectedEvent }
             readyPayload = ready
             resumeEligible = true
-            phase = .ready
+            phase = .awaitingProtocolSelection
 
         case .sessionDescription(let description):
             guard phase == .awaitingSessionDescription,
@@ -124,6 +123,14 @@ public struct VoiceGatewayV8StateMachine: Sendable {
             phase = .established
             resumeEligible = true
         }
+
+        // An invalid event must never advance the resume boundary.
+        if let sequence = event.sequence {
+            if lastReceivedSequence == nil || sequence > lastReceivedSequence! {
+                lastReceivedSequence = sequence
+            }
+        }
+        return outbound
     }
 
     /// Produces a heartbeat when due and fails the connection when the prior ACK timed out.
@@ -155,7 +162,7 @@ public struct VoiceGatewayV8StateMachine: Sendable {
         port: UInt16,
         mode: String
     ) throws -> VoiceGatewayV8Outbound {
-        guard phase == .ready, let readyPayload else {
+        guard phase == .awaitingProtocolSelection, let readyPayload else {
             throw VoiceGatewayV8Error.unexpectedEvent
         }
         guard readyPayload.modes.contains(mode) else {
