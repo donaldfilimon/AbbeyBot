@@ -65,26 +65,38 @@ enum SyncPull {
         let interactionsCursor = cursors.interactions ?? .initial
         let equityCursor = cursors.equity ?? .initial
 
-        async let usersTask = client.fetchUsersPage(limit: effectiveLimit, cursor: usersCursor)
-        async let channelsTask = client.fetchChannelsPage(limit: effectiveLimit, cursor: channelsCursor)
-        async let messagesTask = client.fetchMessagesPage(limit: effectiveLimit, cursor: messagesCursor)
-        async let reputationTask = client.fetchReputationPage(limit: effectiveLimit, cursor: reputationCursor)
-        async let interactionsTask = client.fetchInteractionsPage(limit: effectiveLimit, cursor: interactionsCursor)
-        async let equityTask = client.fetchEquityPage(limit: effectiveLimit, cursor: equityCursor)
+        async let usersTask = SyncPageDrain.run(
+            initialCursor: usersCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchUsersPage(limit: effectiveLimit, cursor: $0) }
+        async let channelsTask = SyncPageDrain.run(
+            initialCursor: channelsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchChannelsPage(limit: effectiveLimit, cursor: $0) }
+        async let messagesTask = SyncPageDrain.run(
+            initialCursor: messagesCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchMessagesPage(limit: effectiveLimit, cursor: $0) }
+        async let reputationTask = SyncPageDrain.run(
+            initialCursor: reputationCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchReputationPage(limit: effectiveLimit, cursor: $0) }
+        async let interactionsTask = SyncPageDrain.run(
+            initialCursor: interactionsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchInteractionsPage(limit: effectiveLimit, cursor: $0) }
+        async let equityTask = SyncPageDrain.run(
+            initialCursor: equityCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
+        ) { try await client.fetchEquityPage(limit: effectiveLimit, cursor: $0) }
 
-        let usersPage = try await usersTask
-        let channelsPage = try await channelsTask
-        let messagesPage = try await messagesTask
-        let reputationPage = try await reputationTask
-        let interactionsPage = try await interactionsTask
-        let equityPage = try await equityTask
+        let usersDrain = try await usersTask
+        let channelsDrain = try await channelsTask
+        let messagesDrain = try await messagesTask
+        let reputationDrain = try await reputationTask
+        let interactionsDrain = try await interactionsTask
+        let equityDrain = try await equityTask
 
-        let users = usersPage.rows
-        let channels = channelsPage.rows
-        let messages = messagesPage.rows
-        let reputation = reputationPage.rows
-        let interactions = interactionsPage.rows
-        let equity = equityPage.rows
+        let users = usersDrain.rows
+        let channels = channelsDrain.rows
+        let messages = messagesDrain.rows
+        let reputation = reputationDrain.rows
+        let interactions = interactionsDrain.rows
+        let equity = equityDrain.rows
 
         let context = ModelContext(container)
         let usersUpserted = try upsertUsers(users, into: context)
@@ -96,36 +108,12 @@ enum SyncPull {
         try context.save()
 
         var nextCursors = cursors
-        nextCursors.users = IncrementalSyncCursor.next(
-            previous: usersCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
-            rowCount: users.count, serverBoundary: usersPage.serverBoundary,
-            serverHighWatermark: usersPage.serverHighWatermark
-        )
-        nextCursors.channels = IncrementalSyncCursor.next(
-            previous: channelsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
-            rowCount: channels.count, serverBoundary: channelsPage.serverBoundary,
-            serverHighWatermark: channelsPage.serverHighWatermark
-        )
-        nextCursors.messages = IncrementalSyncCursor.next(
-            previous: messagesCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
-            rowCount: messages.count, serverBoundary: messagesPage.serverBoundary,
-            serverHighWatermark: messagesPage.serverHighWatermark
-        )
-        nextCursors.reputation = IncrementalSyncCursor.next(
-            previous: reputationCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
-            rowCount: reputation.count, serverBoundary: reputationPage.serverBoundary,
-            serverHighWatermark: reputationPage.serverHighWatermark
-        )
-        nextCursors.interactions = IncrementalSyncCursor.next(
-            previous: interactionsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
-            rowCount: interactions.count, serverBoundary: interactionsPage.serverBoundary,
-            serverHighWatermark: interactionsPage.serverHighWatermark
-        )
-        nextCursors.equity = IncrementalSyncCursor.next(
-            previous: equityCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
-            rowCount: equity.count, serverBoundary: equityPage.serverBoundary,
-            serverHighWatermark: equityPage.serverHighWatermark
-        )
+        nextCursors.users = usersDrain.nextCursor
+        nextCursors.channels = channelsDrain.nextCursor
+        nextCursors.messages = messagesDrain.nextCursor
+        nextCursors.reputation = reputationDrain.nextCursor
+        nextCursors.interactions = interactionsDrain.nextCursor
+        nextCursors.equity = equityDrain.nextCursor
 
         return Counts(
             usersUpserted: usersUpserted,

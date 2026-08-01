@@ -42,7 +42,7 @@ struct AbbeySchedulerTests {
             cooldownSeconds: { 1 },
             consolidationIntervalMinutes: { 60 }
         )
-        await scheduler.consolidateAllChannels()
+        try await scheduler.consolidateAllChannels()
 
         let verify = ModelContext(container)
         let stored = try #require(try verify.fetch(FetchDescriptor<ChannelContext>()).first)

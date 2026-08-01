@@ -119,4 +119,44 @@ struct IncrementalSyncCursorTests {
             #expect(set[entity] == SyncPullCursor(changedAt: previous))
         }
     }
+
+    @Test func drainConsumesSaturatedPageAndFinalShortPage() async throws {
+        let firstBoundary = SyncPullCursor(
+            changedAt: Date(timeIntervalSince1970: 600),
+            stableID: "m-0499"
+        )
+        let highWatermark = Date(timeIntervalSince1970: 800)
+        let pages = SyncPageStub<Int>(pages: [
+            SyncPullPage(rows: Array(0..<500), serverBoundary: firstBoundary, serverHighWatermark: highWatermark),
+            SyncPullPage(rows: [500], serverBoundary: nil, serverHighWatermark: highWatermark),
+        ])
+
+        let result = try await SyncPageDrain.run(
+            initialCursor: .initial,
+            attemptStartedAt: started,
+            fetch: { cursor in try await pages.fetch(cursor: cursor) }
+        )
+
+        #expect(result.rows == Array(0...500))
+        #expect(result.pageCount == 2)
+        #expect(result.nextCursor == SyncPullCursor(changedAt: highWatermark))
+        #expect(await pages.requestedCursors() == [.initial, firstBoundary])
+    }
+}
+
+private actor SyncPageStub<Row: Sendable> {
+    private var pages: [SyncPullPage<Row>]
+    private var cursors: [SyncPullCursor] = []
+
+    init(pages: [SyncPullPage<Row>]) {
+        self.pages = pages
+    }
+
+    func fetch(cursor: SyncPullCursor) throws -> SyncPullPage<Row> {
+        cursors.append(cursor)
+        guard !pages.isEmpty else { throw SyncPageDrainError.stalled }
+        return pages.removeFirst()
+    }
+
+    func requestedCursors() -> [SyncPullCursor] { cursors }
 }

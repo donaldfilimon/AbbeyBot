@@ -31,26 +31,38 @@ enum CLISyncPull {
         let startedAt = Date()
 
         do {
-            async let usersTask = client.fetchUsersPage(cursor: cursors.users ?? .initial)
-            async let channelsTask = client.fetchChannelsPage(cursor: cursors.channels ?? .initial)
-            async let messagesTask = client.fetchMessagesPage(cursor: cursors.messages ?? .initial)
-            async let reputationTask = client.fetchReputationPage(cursor: cursors.reputation ?? .initial)
-            async let interactionsTask = client.fetchInteractionsPage(cursor: cursors.interactions ?? .initial)
-            async let equityTask = client.fetchEquityPage(cursor: cursors.equity ?? .initial)
+            async let usersTask = SyncPageDrain.run(
+                initialCursor: cursors.users ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchUsersPage(cursor: $0) }
+            async let channelsTask = SyncPageDrain.run(
+                initialCursor: cursors.channels ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchChannelsPage(cursor: $0) }
+            async let messagesTask = SyncPageDrain.run(
+                initialCursor: cursors.messages ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchMessagesPage(cursor: $0) }
+            async let reputationTask = SyncPageDrain.run(
+                initialCursor: cursors.reputation ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchReputationPage(cursor: $0) }
+            async let interactionsTask = SyncPageDrain.run(
+                initialCursor: cursors.interactions ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchInteractionsPage(cursor: $0) }
+            async let equityTask = SyncPageDrain.run(
+                initialCursor: cursors.equity ?? .initial, attemptStartedAt: startedAt
+            ) { try await client.fetchEquityPage(cursor: $0) }
 
-            let usersPage = try await usersTask
-            let channelsPage = try await channelsTask
-            let messagesPage = try await messagesTask
-            let reputationPage = try await reputationTask
-            let interactionsPage = try await interactionsTask
-            let equityPage = try await equityTask
+            let usersDrain = try await usersTask
+            let channelsDrain = try await channelsTask
+            let messagesDrain = try await messagesTask
+            let reputationDrain = try await reputationTask
+            let interactionsDrain = try await interactionsTask
+            let equityDrain = try await equityTask
 
-            let users = usersPage.rows
-            let channels = channelsPage.rows
-            let messages = messagesPage.rows
-            let reputation = reputationPage.rows
-            let interactions = interactionsPage.rows
-            let equity = equityPage.rows
+            let users = usersDrain.rows
+            let channels = channelsDrain.rows
+            let messages = messagesDrain.rows
+            let reputation = reputationDrain.rows
+            let interactions = interactionsDrain.rows
+            let equity = equityDrain.rows
 
             let counts = try await ServerSyncApply.apply(
                 users: users,
@@ -62,32 +74,13 @@ enum CLISyncPull {
                 on: runtime.database
             )
 
-            let effectiveLimit = 500
             var nextCursors = cursors
-            nextCursors.users = nextCursor(
-                previous: cursors.users ?? .initial, page: usersPage,
-                startedAt: startedAt, limit: effectiveLimit
-            )
-            nextCursors.channels = nextCursor(
-                previous: cursors.channels ?? .initial, page: channelsPage,
-                startedAt: startedAt, limit: effectiveLimit
-            )
-            nextCursors.messages = nextCursor(
-                previous: cursors.messages ?? .initial, page: messagesPage,
-                startedAt: startedAt, limit: effectiveLimit
-            )
-            nextCursors.reputation = nextCursor(
-                previous: cursors.reputation ?? .initial, page: reputationPage,
-                startedAt: startedAt, limit: effectiveLimit
-            )
-            nextCursors.interactions = nextCursor(
-                previous: cursors.interactions ?? .initial, page: interactionsPage,
-                startedAt: startedAt, limit: effectiveLimit
-            )
-            nextCursors.equity = nextCursor(
-                previous: cursors.equity ?? .initial, page: equityPage,
-                startedAt: startedAt, limit: effectiveLimit
-            )
+            nextCursors.users = usersDrain.nextCursor
+            nextCursors.channels = channelsDrain.nextCursor
+            nextCursors.messages = messagesDrain.nextCursor
+            nextCursors.reputation = reputationDrain.nextCursor
+            nextCursors.interactions = interactionsDrain.nextCursor
+            nextCursors.equity = equityDrain.nextCursor
 
             do {
                 try cursorStore.applyPullOutcome(nextCursors: nextCursors, succeeded: true)
@@ -114,19 +107,4 @@ enum CLISyncPull {
         return formatter.string(from: date)
     }
 
-    private static func nextCursor<Row: Sendable>(
-        previous: SyncPullCursor,
-        page: SyncPullPage<Row>,
-        startedAt: Date,
-        limit: Int
-    ) -> SyncPullCursor? {
-        IncrementalSyncCursor.next(
-            previous: previous,
-            attemptStartedAt: startedAt,
-            limit: limit,
-            rowCount: page.rows.count,
-            serverBoundary: page.serverBoundary,
-            serverHighWatermark: page.serverHighWatermark
-        )
-    }
 }

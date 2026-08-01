@@ -8,6 +8,7 @@ struct ChannelContextsView: View {
     @Query(sort: \ChannelContext.updatedAt, order: .reverse) private var channels: [ChannelContext]
     @State private var newChannelId = ""
     @State private var newGuildId = ""
+    @State private var operationError: String?
 
     var body: some View {
         VStack {
@@ -44,18 +45,38 @@ struct ChannelContextsView: View {
                 Button("Track channel") {
                     let context = ChannelContext(channelId: newChannelId, guildId: newGuildId)
                     modelContext.insert(context)
-                    try? modelContext.save()
-                    newChannelId = ""
-                    newGuildId = ""
+                    do {
+                        try modelContext.save()
+                        operationError = nil
+                        newChannelId = ""
+                        newGuildId = ""
+                    } catch {
+                        modelContext.rollback()
+                        operationError = OperatorFacingError.message(error)
+                    }
                 }
                 .disabled(newChannelId.isEmpty || newGuildId.isEmpty)
 
                 Button("Consolidate now") {
-                    Task { await engine.scheduler.consolidateAllChannels() }
+                    Task {
+                        do {
+                            try await engine.scheduler.consolidateAllChannels()
+                            operationError = nil
+                        } catch {
+                            operationError = OperatorFacingError.message(error)
+                        }
+                    }
                 }
             }
             .textFieldStyle(.roundedBorder)
             .padding()
+
+            if let operationError {
+                Label(operationError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal)
+            }
         }
         .navigationTitle("Channels")
     }

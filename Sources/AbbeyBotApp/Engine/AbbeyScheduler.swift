@@ -44,7 +44,11 @@ actor AbbeyScheduler {
                 let nanoseconds = UInt64(max(intervalMinutes, 0.5) * 60 * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
                 guard !Task.isCancelled else { return }
-                await self.consolidateAllChannels()
+                do {
+                    try await self.consolidateAllChannels()
+                } catch {
+                    NSLog("AbbeyBot: channel consolidation failed: %@", error.localizedDescription)
+                }
             }
         }
     }
@@ -54,9 +58,10 @@ actor AbbeyScheduler {
         consolidationTask = nil
     }
 
-    func consolidateAllChannels() async {
+    func consolidateAllChannels() async throws {
         let context = ModelContext(modelContainer)
-        guard let channels = try? context.fetch(FetchDescriptor<ChannelContext>()) else { return }
+        let channels = try context.fetch(FetchDescriptor<ChannelContext>())
+        var committedEvents: [(channelId: String, messageCount: Int)] = []
 
         for channel in channels {
             let channelId = channel.channelId
@@ -66,13 +71,13 @@ actor AbbeyScheduler {
             )
             descriptor.sortBy = [SortDescriptor(\.createdAt, order: .reverse)]
             descriptor.fetchLimit = 50
-            guard let recent = try? context.fetch(descriptor), !recent.isEmpty else { continue }
+            let recent = try context.fetch(descriptor)
+            guard !recent.isEmpty else { continue }
 
             let countDescriptor = FetchDescriptor<GuildMessage>(
                 predicate: #Predicate { $0.channelId == channelId && $0.guildId == guildId }
             )
-            let totalMessageCount = (try? context.fetchCount(countDescriptor))
-                ?? max(channel.messageCount, recent.count)
+            let totalMessageCount = try context.fetchCount(countDescriptor)
 
             let lines = recent.reversed().map {
                 ChannelSummaryBuilder.Line(authorId: $0.authorId, content: $0.content)
@@ -81,15 +86,18 @@ actor AbbeyScheduler {
             channel.messageCount = totalMessageCount
             channel.updatedAt = .now
 
+            committedEvents.append((channel.channelId, totalMessageCount))
+        }
+
+        try context.save()
+        for event in committedEvents {
             await eventBus.publish(
                 .channelContextConsolidated(
-                    channelId: channel.channelId,
-                    messageCount: totalMessageCount
+                    channelId: event.channelId,
+                    messageCount: event.messageCount
                 )
             )
         }
-
-        try? context.save()
         metrics.recordConsolidation()
     }
 }
