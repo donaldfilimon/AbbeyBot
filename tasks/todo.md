@@ -2,6 +2,15 @@
 
 Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
+## Apply strict code-quality findings from PR #53's merged diff — not started
+
+- [ ] Dedupe `ServerSyncClient.makeRequest` / `AbbeyServerClient.makeRequest` behind a shared
+      AbbeyCore helper (e.g. on `SyncTransportPolicy`) instead of two independent copies of
+      validate→strip-slash→join-path/query→attach-Bearer-token.
+- [ ] Delete the `transientValuesKey` decode branch in `SyncPullCursorSet.init(from:)` — dead
+      compat for a dev-only format `SyncCursorStore.pullCursors`'s `try?` already degrades safely
+      without it.
+
 ## Discord application + real voice audio — in progress
 
 - [ ] Harden the DiscordBM main-gateway lifecycle: READY remains the connected authority, explicit

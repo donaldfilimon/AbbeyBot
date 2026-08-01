@@ -151,6 +151,29 @@ status: done
   requirement, the `?since=` truncation gap (since closed by the compound-cursor work above), and
   a warning against piping build output through `tail` (masks the exit code).
 
+## Apply strict code-quality findings from PR #53's merged diff
+status: todo
+- A strict code-quality review of `aa1fb60...b585947` (the diff that merged as PR #53, ~1500 lines
+  / 41 files) surfaced two confirmed structural findings, not yet applied:
+  1. **Duplicated transport-request builder.** `ServerSyncClient.makeRequest`
+     (`Sources/AbbeyServerKit/Sync/ServerSyncClient.swift`) and `AbbeyServerClient.makeRequest`
+     (`Sources/AbbeyBotApp/AbbeyServerClient.swift`) are near-identical: validate `baseURL` via
+     `SyncTransportPolicy`, strip trailing slash, join path+query, attach Bearer token. The PR
+     added `SyncTransportPolicy` in AbbeyCore as the one shared transport-security boundary but
+     stopped one call site short of eliminating the duplication risk it exists to prevent.
+     Remedy: hoist the shared request-building logic into AbbeyCore (e.g. on
+     `SyncTransportPolicy`), parameterized by base URL/method/query/token, and have both clients
+     call it.
+  2. **Dead compat branch in `SyncPullCursorSet.init(from:)`**
+     (`Sources/AbbeyCore/Sync/SyncPullCursor.swift`). Decodes a `"values"`-keyed nested-dictionary
+     format that only a short-lived development build inside this same session ever wrote —
+     never released. The sole call site (`SyncCursorStore.pullCursors`) already wraps the decode
+     in `try?` and degrades to a fresh cursor on any failure, so the branch guards a scenario that
+     already self-heals. Remedy: delete the `transientValuesKey` branch and its comment; keep only
+     the flat per-entity-key decode loop matching the real released v2 format.
+- Both are low-risk, mechanical fixes. Not yet executed — awaiting confirmation this capture
+  reflects actual intent (args arrived as a verbatim paste of the review's own summary message).
+
 ## Branch state — reconciled onto a review branch
 - This working tree was, over roughly 90 minutes, edited concurrently by this session, two
   subagents this session dispatched, and at least one other AI coding tool (evidenced by
