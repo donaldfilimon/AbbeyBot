@@ -10,7 +10,10 @@ var packageTargets: [Target] = [
     .target(
         name: "AbbeyCore",
         dependencies: [
-            .product(name: "DiscordBM", package: "DiscordBM")
+            .product(name: "DiscordBM", package: "DiscordBM"),
+            .product(name: "WSClient", package: "swift-websocket"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio")
         ],
         path: "Sources/AbbeyCore",
         swiftSettings: [
@@ -167,6 +170,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/DiscordBM/DiscordBM", from: "1.16.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.3"),
+        .package(url: "https://github.com/hummingbird-project/swift-websocket.git", from: "1.6.1"),
         .package(url: "https://github.com/vapor/vapor", from: "4.115.0"),
         .package(url: "https://github.com/vapor/fluent", from: "4.9.0"),
         .package(url: "https://github.com/vapor/fluent-postgres-driver", from: "2.9.0"),

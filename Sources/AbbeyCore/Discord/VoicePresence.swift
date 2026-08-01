@@ -3,6 +3,7 @@ import Foundation
 /// Outcome of a gateway voice-state update (presence only — no Opus/UDP).
 public enum VoiceUpdateResult: Sendable, Equatable {
     case requested
+    case requestInProgress
     case gatewayUnavailable
     case invalidIdentifiers
 }
@@ -12,6 +13,9 @@ public enum VoiceUpdateResult: Sendable, Equatable {
 /// Engines supply connection state plus thin bridge closures so this lives in
 /// AbbeyCore without depending on SwiftData or Vapor.
 public enum VoicePresence: Sendable {
+    public static let requestInProgressMessage =
+        "A voice join or move is already awaiting Discord confirmation; wait or leave before retrying."
+
     public static func perform(
         _ action: VoiceAction,
         guildId: String,
@@ -36,6 +40,8 @@ public enum VoicePresence: Sendable {
             switch await join(trimmedGuild, trimmedChannel) {
             case .requested:
                 return DiscordCopy.voiceJoined(channelId: trimmedChannel)
+            case .requestInProgress:
+                return requestInProgressMessage
             case .gatewayUnavailable:
                 return DiscordCopy.voiceNotConnected
             case .invalidIdentifiers:
@@ -45,6 +51,8 @@ public enum VoicePresence: Sendable {
             switch await leave(trimmedGuild) {
             case .requested:
                 return DiscordCopy.voiceLeft(guildId: trimmedGuild)
+            case .requestInProgress:
+                return requestInProgressMessage
             case .gatewayUnavailable:
                 return DiscordCopy.voiceLeaveFailed
             case .invalidIdentifiers:

@@ -6,7 +6,10 @@ struct VoiceGatewayHandshakeTests {
     @Test("pairs state then server and emits credentials once")
     func stateThenServer() {
         var handshake = VoiceGatewayHandshake()
-        let generation = handshake.begin(guildID: "guild", channelID: "channel", userID: "bot")
+        guard let generation = handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") else {
+            Issue.record("Expected handshake generation")
+            return
+        }
 
         let first = handshake.receive(
             .init(guildID: "guild", channelID: "channel", userID: "bot", sessionID: "session")
@@ -44,7 +47,7 @@ struct VoiceGatewayHandshakeTests {
     @Test("pairs server then state")
     func serverThenState() {
         var handshake = VoiceGatewayHandshake()
-        handshake.begin(guildID: "guild", channelID: "channel", userID: "bot")
+        #expect(handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") != nil)
 
         guard case .waiting = handshake.receive(
             .init(guildID: "guild", endpoint: "voice.example.test", token: "token")
@@ -65,7 +68,7 @@ struct VoiceGatewayHandshakeTests {
     @Test("ignores unrelated voice state")
     func ignoresUnrelatedEvents() {
         var handshake = VoiceGatewayHandshake()
-        handshake.begin(guildID: "guild", channelID: "channel", userID: "bot")
+        #expect(handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") != nil)
 
         let events: [VoiceGatewayHandshake.VoiceStateEvent] = [
             .init(guildID: "other-guild", channelID: "channel", userID: "bot", sessionID: "session"),
@@ -86,7 +89,10 @@ struct VoiceGatewayHandshakeTests {
     @Test("rejects empty capability fields without completing")
     func rejectsEmptyFields() {
         var handshake = VoiceGatewayHandshake()
-        let generation = handshake.begin(guildID: "guild", channelID: "channel", userID: "bot")
+        guard let generation = handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") else {
+            Issue.record("Expected handshake generation")
+            return
+        }
 
         assertRejection(
             handshake.receive(.init(guildID: "guild", channelID: "channel", userID: "bot", sessionID: "  ")),
@@ -111,30 +117,47 @@ struct VoiceGatewayHandshakeTests {
         #expect(handshake.generation(for: "guild") == generation)
     }
 
-    @Test("matching self leave cancels only the active guild generation")
-    func selfLeaveCancels() {
+    @Test("overlapping join is rejected until leave acknowledgement")
+    func overlappingJoinIsSerialized() {
         var handshake = VoiceGatewayHandshake()
-        let oldGeneration = handshake.begin(guildID: "guild", channelID: "first", userID: "bot")
-        let activeGeneration = handshake.begin(guildID: "guild", channelID: "second", userID: "bot")
-
-        guard case .ignored = handshake.cancel(guildID: "guild", generation: oldGeneration) else {
-            Issue.record("A stale generation must not cancel its replacement")
+        guard let activeGeneration = handshake.begin(guildID: "guild", channelID: "first", userID: "bot") else {
+            Issue.record("Expected initial generation")
             return
         }
-        guard case .cancelled(let cancelledGeneration) = handshake.receive(
-            .init(guildID: "guild", channelID: nil, userID: "bot", sessionID: "session")
+        #expect(handshake.begin(guildID: "guild", channelID: "second", userID: "bot") == nil)
+
+        guard case .cancelled(let cancelledGeneration) = handshake.cancel(
+            guildID: "guild",
+            generation: activeGeneration
         ) else {
-            Issue.record("Expected a matching self leave to cancel")
+            Issue.record("Expected active generation cancellation")
             return
         }
         #expect(cancelledGeneration == activeGeneration)
-        #expect(handshake.generation(for: "guild") == nil)
+        #expect(handshake.begin(guildID: "guild", channelID: "second", userID: "bot") == nil)
+
+        guard case .cancelled(let acknowledgedGeneration) = handshake.receive(
+            .init(guildID: "guild", channelID: nil, userID: "bot", sessionID: "session")
+        ) else {
+            Issue.record("Expected leave acknowledgement")
+            return
+        }
+        #expect(acknowledgedGeneration == activeGeneration)
+        guard let replacementGeneration = handshake.begin(
+            guildID: "guild",
+            channelID: "second",
+            userID: "bot"
+        ) else {
+            Issue.record("Expected replacement after leave acknowledgement")
+            return
+        }
+        #expect(replacementGeneration != activeGeneration)
     }
 
-    @Test("credential descriptions redact the token")
-    func redactsToken() {
+    @Test("credential diagnostics redact every capability field")
+    func redactsCredentials() {
         var handshake = VoiceGatewayHandshake()
-        handshake.begin(guildID: "guild", channelID: "channel", userID: "bot")
+        #expect(handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") != nil)
         _ = handshake.receive(
             .init(guildID: "guild", channelID: "channel", userID: "bot", sessionID: "session")
         )
@@ -145,9 +168,81 @@ struct VoiceGatewayHandshakeTests {
             return
         }
 
-        #expect(!String(describing: credentials).contains("never-print-this"))
-        #expect(!String(reflecting: credentials).contains("never-print-this"))
+        let secrets = ["session", "voice.example.test", "never-print-this"]
+        var dumped = ""
+        dump(credentials, to: &dumped)
+        let reflectedChildren = Mirror(reflecting: credentials).children
+            .map { String(reflecting: $0.value) }
+            .joined(separator: " ")
+        for secret in secrets {
+            #expect(!String(describing: credentials).contains(secret))
+            #expect(!String(reflecting: credentials).contains(secret))
+            #expect(!dumped.contains(secret))
+            #expect(!reflectedChildren.contains(secret))
+        }
         #expect(String(describing: credentials).contains("<redacted>"))
+    }
+
+    @Test("null endpoint invalidates server capability before and after readiness")
+    func nullEndpointInvalidatesCapability() {
+        var handshake = VoiceGatewayHandshake()
+        #expect(handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") != nil)
+
+        guard case .waiting = handshake.receive(
+            .init(guildID: "guild", endpoint: "old.example.test", token: "old-token")
+        ) else {
+            Issue.record("Expected server half to wait for state")
+            return
+        }
+        assertRejection(
+            handshake.receive(.init(guildID: "guild", endpoint: nil, token: "replacement-token")),
+            generation: handshake.generation(for: "guild")!,
+            rejection: .emptyEndpoint
+        )
+        guard case .waiting = handshake.receive(
+            .init(guildID: "guild", channelID: "channel", userID: "bot", sessionID: "session")
+        ) else {
+            Issue.record("A null endpoint must prevent use of the old server half")
+            return
+        }
+
+        guard case .ready = handshake.receive(
+            .init(guildID: "guild", endpoint: "new.example.test", token: "new-token")
+        ) else {
+            Issue.record("Expected fresh allocation to restore readiness")
+            return
+        }
+        assertRejection(
+            handshake.receive(.init(guildID: "guild", endpoint: nil, token: "newer-token")),
+            generation: handshake.generation(for: "guild")!,
+            rejection: .emptyEndpoint
+        )
+        guard case .waiting = handshake.receive(
+            .init(guildID: "guild", channelID: "channel", userID: "bot", sessionID: "session")
+        ) else {
+            Issue.record("Post-ready null endpoint must invalidate current capability")
+            return
+        }
+    }
+
+    @Test("reset drops pending and leave barriers without reusing generations")
+    func resetDropsCapabilityState() {
+        var handshake = VoiceGatewayHandshake()
+        guard let first = handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") else {
+            Issue.record("Expected initial generation")
+            return
+        }
+        _ = handshake.receive(
+            .init(guildID: "guild", endpoint: "voice.example.test", token: "token")
+        )
+        handshake.reset()
+        #expect(handshake.generation(for: "guild") == nil)
+
+        guard let second = handshake.begin(guildID: "guild", channelID: "channel", userID: "bot") else {
+            Issue.record("Expected generation after reset")
+            return
+        }
+        #expect(second != first)
     }
 
     private func assertRejection(

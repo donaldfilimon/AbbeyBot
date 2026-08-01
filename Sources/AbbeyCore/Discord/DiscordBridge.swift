@@ -19,19 +19,89 @@ public enum DiscordConnectionState: String, Sendable {
     }
 }
 
+/// Pure generation-scoped lifecycle used by `DiscordBridge` and deterministic
+/// tests. DiscordBM's `connect()` returns after spawning its WebSocket task, so
+/// only a current-generation READY is authoritative.
+struct DiscordGatewayLifecycle: Sendable {
+    struct Generation: Equatable, Sendable {
+        fileprivate let value: UInt64
+    }
+
+    static let streamEndedError = "Discord Gateway event stream ended unexpectedly."
+    static let streamFailedError = "Discord Gateway event stream failed."
+
+    private(set) var state: DiscordConnectionState = .disconnected
+    private(set) var lastError: String?
+    private(set) var generation = Generation(value: 0)
+
+    @discardableResult
+    mutating func beginConnecting() -> Generation {
+        advanceGeneration()
+        state = .connecting
+        lastError = nil
+        return generation
+    }
+
+    @discardableResult
+    mutating func receiveReady(generation candidate: Generation) -> Bool {
+        guard candidate == generation, state == .connecting else { return false }
+        state = .connected
+        lastError = nil
+        return true
+    }
+
+    @discardableResult
+    mutating func eventStreamEnded(generation candidate: Generation) -> Bool {
+        fail(generation: candidate, message: Self.streamEndedError)
+    }
+
+    @discardableResult
+    mutating func eventStreamFailed(generation candidate: Generation) -> Bool {
+        fail(generation: candidate, message: Self.streamFailedError)
+    }
+
+    mutating func disconnect() {
+        // Invalidate callbacks before any asynchronous teardown begins.
+        advanceGeneration()
+        state = .disconnected
+        lastError = nil
+    }
+
+    mutating func failCurrentConfiguration() {
+        state = .failed
+        lastError = "DISCORD_BOT_TOKEN is empty"
+    }
+
+    func isCurrent(_ candidate: Generation) -> Bool {
+        candidate == generation
+    }
+
+    private mutating func fail(generation candidate: Generation, message: String) -> Bool {
+        guard candidate == generation, state != .disconnected else { return false }
+        state = .failed
+        lastError = message
+        return true
+    }
+
+    private mutating func advanceGeneration() {
+        generation = Generation(value: generation.value &+ 1)
+    }
+}
+
 /// Owns the DiscordBM gateway manager and exposes connect/disconnect for desktop + server.
 public actor DiscordBridge {
-    public private(set) var state: DiscordConnectionState = .disconnected
-    public private(set) var lastError: String?
+    public var state: DiscordConnectionState { lifecycle.state }
+    public var lastError: String? { lifecycle.lastError }
     public private(set) var botUserId: String?
     /// Current voice-channel presence (gateway update only; no Opus/UDP audio).
     public private(set) var voiceChannelId: String?
     public private(set) var voiceGuildId: String?
 
     private var gateway: BotGatewayManager?
-    public private(set) var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
+    private var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
     private var voiceGatewayHandshake = VoiceGatewayHandshake()
     private var eventTask: Task<Void, Never>?
+    private var lifecycle = DiscordGatewayLifecycle()
     private let logger = Logger(label: "AbbeyBot.DiscordBridge")
 
     public init() {}
@@ -51,23 +121,20 @@ public actor DiscordBridge {
         presenceActivityName: String = "AbbeyBot",
         dryRun: Bool = AppConfig.shared.dryRun
     ) async {
+        await disconnect()
         if dryRun {
-            await disconnect()
-            state = .connected
-            lastError = nil
+            let generation = lifecycle.beginConnecting()
+            _ = lifecycle.receiveReady(generation: generation)
             botUserId = "dry-run"
             logger.info("dry-run: would connect (presenceActivity=\(presenceActivityName)); gateway skipped")
             await hooks.onReady("dry-run")
             return
         }
         guard !token.isEmpty else {
-            state = .failed
-            lastError = "DISCORD_BOT_TOKEN is empty"
+            lifecycle.failCurrentConfiguration()
             return
         }
-        await disconnect()
-        state = .connecting
-        lastError = nil
+        let generation = lifecycle.beginConnecting()
 
         let bot = await BotGatewayManager(
             token: token,
@@ -89,16 +156,18 @@ public actor DiscordBridge {
 
         eventTask = Task { [weak self] in
             for await event in await bot.events {
-                guard let self else { return }
-                await AbbeyGatewayHandler(event: event, hooks: hooks, bridge: self).handleAsync()
+                guard !Task.isCancelled, let self else { return }
+                await self.handleGatewayEvent(event, hooks: hooks, generation: generation)
             }
+            guard !Task.isCancelled else { return }
+            await self?.noteEventStreamEnded(generation: generation)
         }
 
         await bot.connect()
-        state = .connected
     }
 
     public func disconnect() async {
+        lifecycle.disconnect()
         if let guildId = voiceGuildId {
             _ = await leaveVoice(guildId: guildId)
         }
@@ -107,10 +176,11 @@ public actor DiscordBridge {
         await gateway?.disconnect()
         // BotGatewayManager has no explicit disconnect API in all versions — drop reference.
         gateway = nil
-        state = .disconnected
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
+        voiceGatewayCredentials = nil
+        voiceGatewayHandshake.reset()
     }
 
     /// Appear in a voice channel via gateway `Voice State Update` (self-mute + self-deaf).
@@ -121,9 +191,8 @@ public actor DiscordBridge {
         let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGuild.isEmpty, !trimmedChannel.isEmpty else { return .invalidIdentifiers }
-        guard beginVoiceGatewayHandshake(guildId: guildId, channelId: channelId) else {
-            return .gatewayUnavailable
-        }
+        let handshakeResult = beginVoiceGatewayHandshake(guildId: trimmedGuild, channelId: trimmedChannel)
+        guard handshakeResult == .requested else { return handshakeResult }
         await gateway.updateVoiceState(
             payload: VoiceStateUpdate(
                 guildId: GuildSnowflake(trimmedGuild),
@@ -164,27 +233,79 @@ public actor DiscordBridge {
         return .requested
     }
 
-    func noteReady(userId: String) {
-        botUserId = userId
-        state = .connected
-        lastError = nil
+    /// READY events must enter through `handleGatewayEvent`, which carries the
+    /// connection generation. An unscoped callback cannot safely mutate state.
+    func noteReady(userId _: String) {
+        logger.warning("Ignoring unscoped Discord READY event")
     }
 
-    func noteFailure(_ message: String) {
-        state = .failed
-        lastError = message
-        logger.error("Discord bridge failure: \(message)")
+    /// Like READY, a failure without its originating generation is unsafe: a
+    /// stale callback must not fail a replacement connection.
+    func noteFailure(_: String) {
+        logger.warning("Ignoring unscoped Discord Gateway failure")
     }
 }
 
 /// Callbacks from gateway handlers into the app engine (Sendable closures).
 extension DiscordBridge {
-    /// Begins correlation before Gateway opcode 4 is sent.
-    private func beginVoiceGatewayHandshake(guildId: String, channelId: String) -> Bool {
-        guard let botUserId else { return false }
+    private func handleGatewayEvent(
+        _ event: Gateway.Event,
+        hooks: DiscordEventHooks,
+        generation: DiscordGatewayLifecycle.Generation
+    ) async {
+        guard lifecycle.isCurrent(generation), state == .connecting || state == .connected else { return }
+
+        if case .ready(let payload)? = event.data {
+            guard lifecycle.receiveReady(generation: generation) else { return }
+            let userId = payload.user.id.rawValue
+            botUserId = userId
+            await hooks.onReady(userId)
+            return
+        }
+
+        await AbbeyGatewayHandler(event: event, hooks: hooks, bridge: self).handleAsync()
+    }
+
+    private func noteEventStreamEnded(generation: DiscordGatewayLifecycle.Generation) {
+        guard lifecycle.eventStreamEnded(generation: generation) else { return }
+        botUserId = nil
+        voiceChannelId = nil
+        voiceGuildId = nil
         voiceGatewayCredentials = nil
-        voiceGatewayHandshake.begin(guildID: guildId, channelID: channelId, userID: botUserId)
-        return true
+        voiceGatewayHandshake.reset()
+        gateway = nil
+        eventTask = nil
+        logger.error("Discord bridge failure: \(DiscordGatewayLifecycle.streamEndedError)")
+    }
+
+    private func noteEventStreamFailed(generation: DiscordGatewayLifecycle.Generation) {
+        guard lifecycle.eventStreamFailed(generation: generation) else { return }
+        botUserId = nil
+        voiceChannelId = nil
+        voiceGuildId = nil
+        voiceGatewayCredentials = nil
+        voiceGatewayHandshake.reset()
+        gateway = nil
+        eventTask = nil
+        logger.error("Discord bridge failure: \(DiscordGatewayLifecycle.streamFailedError)")
+    }
+
+    /// Begins correlation before Gateway opcode 4 is sent.
+    private func beginVoiceGatewayHandshake(guildId: String, channelId: String) -> VoiceUpdateResult {
+        guard let botUserId else { return .gatewayUnavailable }
+        guard voiceGatewayHandshake.begin(guildID: guildId, channelID: channelId, userID: botUserId) != nil else {
+            return .requestInProgress
+        }
+        voiceGatewayCredentials = nil
+        return .requested
+    }
+
+    /// Transfers ephemeral credentials to the internal media controller once.
+    /// Keeping this package-internal prevents UI/server callers from retaining
+    /// or displaying the Discord voice capability.
+    func consumeVoiceGatewayCredentials() -> VoiceGatewayHandshake.Credentials? {
+        defer { voiceGatewayCredentials = nil }
+        return voiceGatewayCredentials
     }
 
     /// Receives the bot's main-Gateway voice-state dispatch. Public voice
@@ -238,6 +359,10 @@ extension DiscordBridge {
         )
         if case .ready(let credentials) = outcome {
             voiceGatewayCredentials = credentials
+        } else if case .rejected(_, .emptyEndpoint) = outcome,
+                  voiceGatewayCredentials?.guildID == payload.guild_id.rawValue
+        {
+            voiceGatewayCredentials = nil
         }
     }
 }

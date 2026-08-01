@@ -124,6 +124,18 @@ struct AbbeyCoreTests {
         )
         #expect(badIdsOnJoin == DiscordCopy.voiceMissingChannel)
 
+        let requestInProgress = await VoicePresence.perform(
+            .join(channelId: "c1"),
+            guildId: "g1",
+            isConnected: true,
+            gatewayReady: true,
+            join: { _, _ in .requestInProgress },
+            leave: { _ in .requested }
+        )
+        #expect(requestInProgress == VoicePresence.requestInProgressMessage)
+        #expect(requestInProgress ==
+            "A voice join or move is already awaiting Discord confirmation; wait or leave before retrying.")
+
         let leaveFailed = await VoicePresence.perform(
             .leave,
             guildId: "g1",
@@ -135,6 +147,7 @@ struct AbbeyCoreTests {
         #expect(leaveFailed == DiscordCopy.voiceLeaveFailed)
 
         #expect(VoiceUpdateResult.requested == .requested)
+        #expect(VoiceUpdateResult.requestInProgress != .gatewayUnavailable)
         #expect(VoiceUpdateResult.gatewayUnavailable != .invalidIdentifiers)
     }
 
@@ -503,5 +516,53 @@ struct AbbeyCoreTests {
         #expect(await bridge.state == .connected)
         #expect(await bridge.botUserId == "dry-run")
         #expect(await bridge.client == nil)
+    }
+
+    @Test func discordGatewayLifecycleRequiresCurrentReady() {
+        var lifecycle = DiscordGatewayLifecycle()
+        let first = lifecycle.beginConnecting()
+        #expect(lifecycle.state == .connecting)
+        #expect(lifecycle.lastError == nil)
+
+        lifecycle.disconnect()
+        #expect(lifecycle.state == .disconnected)
+        let acceptedAfterDisconnect = lifecycle.receiveReady(generation: first)
+        #expect(!acceptedAfterDisconnect)
+        #expect(lifecycle.state == .disconnected)
+
+        let second = lifecycle.beginConnecting()
+        #expect(second != first)
+        let acceptedStaleReady = lifecycle.receiveReady(generation: first)
+        #expect(!acceptedStaleReady)
+        #expect(lifecycle.state == .connecting)
+        let acceptedCurrentReady = lifecycle.receiveReady(generation: second)
+        #expect(acceptedCurrentReady)
+        #expect(lifecycle.state == .connected)
+    }
+
+    @Test func discordGatewayLifecycleScopesAndRedactsStreamFailure() {
+        var lifecycle = DiscordGatewayLifecycle()
+        let stale = lifecycle.beginConnecting()
+        lifecycle.disconnect()
+        let current = lifecycle.beginConnecting()
+        let acceptedCurrentReady = lifecycle.receiveReady(generation: current)
+        #expect(acceptedCurrentReady)
+
+        let acceptedStaleEnd = lifecycle.eventStreamEnded(generation: stale)
+        #expect(!acceptedStaleEnd)
+        #expect(lifecycle.state == .connected)
+        let acceptedCurrentEnd = lifecycle.eventStreamEnded(generation: current)
+        #expect(acceptedCurrentEnd)
+        #expect(lifecycle.state == .failed)
+        #expect(lifecycle.lastError == DiscordGatewayLifecycle.streamEndedError)
+
+        let retry = lifecycle.beginConnecting()
+        let acceptedCurrentFailure = lifecycle.eventStreamFailed(generation: retry)
+        #expect(acceptedCurrentFailure)
+        #expect(lifecycle.state == .failed)
+        #expect(lifecycle.lastError == DiscordGatewayLifecycle.streamFailedError)
+        let redactedError = lifecycle.lastError ?? ""
+        #expect(!redactedError.contains("token"))
+        #expect(!redactedError.contains("payload"))
     }
 }
