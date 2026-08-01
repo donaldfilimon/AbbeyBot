@@ -2,6 +2,28 @@
 
 Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
+## Release and SwiftData hardening — closed
+
+- [x] Preserve released flat v2 sync cursor JSON and decode the transient enum-dictionary format;
+      literal core, desktop `UserDefaults`, and CLI file-store fixtures are green.
+- [x] Make Twitch replay-table migration compatible with fresh, older table-absent, and
+      table-present databases; four-case SQLite upgrade/rollback matrix is green.
+- [x] Require HTTPS for non-loopback sync endpoints and validate before attaching credentials or
+      content; seven focused tests across core, desktop, and server/CLI clients are green.
+- [x] Make Docker-published server/Postgres ports loopback-only by default.
+- [x] Make the CLI smoke execute every asserted command, clear inherited sync configuration, and
+      isolate per-run logs/databases; direct command protocol is green 50/50 and the wrapper passes
+      with deliberately hostile inherited sync variables.
+- [x] Make desktop memory, reputation, and equity side effects post-commit only. Four memory and
+      three reputation failure/success tests are green; equity failures roll back and surface an
+      operator-visible error without advancing generator state or publishing events.
+- [x] Expand local/CI verification to static/security hygiene, dashboard lint/test/build, all four
+      Linux server-side Swift bundles, all five local Swift bundles, and executable smokes.
+- [x] Final combined `Scripts/verify-all.sh` green: static/security; dashboard lint + 17 tests +
+      production build; all Swift tests including 47 desktop tests in 9 suites; desktop launch;
+      server HTTP/database smoke (SQLite-file fallback because Docker/Postgres was unavailable);
+      and hermetic CLI smoke.
+
 ## Harden Twitch EventSub retry semantics and webhook ack model — all closed
 
 - [x] #1 Self-echo mislabeled as a delivery replay — `handleTwitchChat` returns

@@ -1,5 +1,21 @@
 # Goals
 
+## Release and SwiftData hardening
+status: done
+- Preserve sync persistence and migration compatibility across previously released database and
+  cursor representations, with literal upgrade fixtures rather than same-version round trips.
+- Keep secrets and user-authored sync content off plaintext non-loopback transport; local HTTP and
+  Docker exposure remain explicit loopback-only development paths.
+- Treat SwiftData save as the commit boundary for remote memory pushes, success acknowledgments,
+  reputation cache/events, and equity generator/events. Failure paths roll back local context and
+  do not emit committed-looking side effects.
+- Make `Scripts/verify-all.sh` the actual release authority across static/security, dashboard,
+  every local Swift test bundle, desktop launch, server HTTP/database smoke, and CLI isolation.
+- Focused evidence is green: cursor stores, migration matrix, sync transport, memory commit,
+  reputation commit, dashboard, static/security, CLI wrapper under hostile env, and 50/50 direct
+  CLI protocol iterations. Final combined `Scripts/verify-all.sh` is green across all local gates;
+  server smoke used the documented SQLite-file fallback because Docker/Postgres was unavailable.
+
 ## Harden Twitch EventSub retry semantics and webhook ack model
 status: done
 - **Six original code-review findings (self-echo mislabeled as duplicate, retry-duplicated audit
