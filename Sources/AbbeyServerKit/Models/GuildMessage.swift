@@ -26,6 +26,10 @@ public final class GuildMessage: Model, Content, @unchecked Sendable {
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 
+    /// Original server creation clock for a CLI-mirrored row.
+    @OptionalField(key: "source_created_at")
+    public var sourceCreatedAt: Date?
+
     @OptionalField(key: "deleted_at")
     public var deletedAt: Date?
 

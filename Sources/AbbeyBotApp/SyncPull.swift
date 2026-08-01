@@ -30,17 +30,22 @@ enum SyncPull {
         var reputationInserted: Int
         var interactionsInserted: Int
         var equityUpserted: Int
-        /// Minimum safe `?since=` boundary for the next pull.
-        var nextCursor: Date?
+        /// Independently safe compound boundaries for the next pull.
+        var nextCursors: SyncPullCursorSet
+
+        /// Compatibility view for session status and older tests.
+        var nextCursor: Date? { nextCursors.earliestChangedAt }
     }
 
     /// Fetch list endpoints (`limit` clamped to 500) and upsert into `container`.
     /// Throws on network/decode/store failures; local store is only mutated after a successful fetch set.
     ///
     /// Pass `since` to fetch only rows the server has touched after that instant (`?since=`
-    /// cursor). Callers supply the last *successful* pull time from `SyncCursorStore`, so a failed
-    /// pull never advances the cursor past rows that were never applied. Two caveats worth knowing:
-    /// - The cursor is stamped at pull *start* (not completion) and persists across launches;
+    /// cursor). Callers supply the last *successful* cursor from `SyncCursorStore`, so a failed
+    /// pull never advances past rows that were never applied. Incremental server pages are oldest
+    /// change first: a short page advances through pull start, while a full page advances only
+    /// through its newest returned change. Two caveats worth knowing:
+    /// - The pull start remains the upper bound (never completion time) and persists across launches;
     ///   a missing/non-numeric store value degrades to a full pull.
     /// - The server compares against its own `updatedAt` clock, so a desktop clock running ahead
     ///   of the server can skip rows (same clock-skew family as the last-write-wins caveat above).
@@ -49,23 +54,37 @@ enum SyncPull {
         into container: ModelContainer,
         client: AbbeyServerClient = .shared,
         limit: Int = defaultLimit,
-        since: Date? = nil,
+        cursors: SyncPullCursorSet = SyncPullCursorSet(),
         attemptStartedAt: Date = .now
     ) async throws -> Counts {
         let effectiveLimit = min(max(limit, 1), defaultLimit)
-        async let usersTask = client.fetchUsers(limit: effectiveLimit, since: since)
-        async let channelsTask = client.fetchChannels(limit: effectiveLimit, since: since)
-        async let messagesTask = client.fetchMessages(limit: effectiveLimit, since: since)
-        async let reputationTask = client.fetchReputation(limit: effectiveLimit, since: since)
-        async let interactionsTask = client.fetchInteractions(limit: effectiveLimit, since: since)
-        async let equityTask = client.fetchEquity(limit: effectiveLimit, since: since)
+        let usersCursor = cursors.users ?? .initial
+        let channelsCursor = cursors.channels ?? .initial
+        let messagesCursor = cursors.messages ?? .initial
+        let reputationCursor = cursors.reputation ?? .initial
+        let interactionsCursor = cursors.interactions ?? .initial
+        let equityCursor = cursors.equity ?? .initial
 
-        let users = try await usersTask
-        let channels = try await channelsTask
-        let messages = try await messagesTask
-        let reputation = try await reputationTask
-        let interactions = try await interactionsTask
-        let equity = try await equityTask
+        async let usersTask = client.fetchUsersPage(limit: effectiveLimit, cursor: usersCursor)
+        async let channelsTask = client.fetchChannelsPage(limit: effectiveLimit, cursor: channelsCursor)
+        async let messagesTask = client.fetchMessagesPage(limit: effectiveLimit, cursor: messagesCursor)
+        async let reputationTask = client.fetchReputationPage(limit: effectiveLimit, cursor: reputationCursor)
+        async let interactionsTask = client.fetchInteractionsPage(limit: effectiveLimit, cursor: interactionsCursor)
+        async let equityTask = client.fetchEquityPage(limit: effectiveLimit, cursor: equityCursor)
+
+        let usersPage = try await usersTask
+        let channelsPage = try await channelsTask
+        let messagesPage = try await messagesTask
+        let reputationPage = try await reputationTask
+        let interactionsPage = try await interactionsTask
+        let equityPage = try await equityTask
+
+        let users = usersPage.rows
+        let channels = channelsPage.rows
+        let messages = messagesPage.rows
+        let reputation = reputationPage.rows
+        let interactions = interactionsPage.rows
+        let equity = equityPage.rows
 
         let context = ModelContext(container)
         let usersUpserted = try upsertUsers(users, into: context)
@@ -76,18 +95,36 @@ enum SyncPull {
         let equityUpserted = try upsertEquity(equity, into: context)
         try context.save()
 
-        let nextCursor = IncrementalSyncCursor.next(
-            previous: since,
-            attemptStartedAt: attemptStartedAt,
-            limit: effectiveLimit,
-            pages: [
-                .init(count: users.count, newestChangeAt: users.compactMap(\.updatedAt).max()),
-                .init(count: channels.count, newestChangeAt: channels.compactMap(\.updatedAt).max()),
-                .init(count: messages.count, newestChangeAt: messages.compactMap { Self.changeDate($0.createdAt, $0.deletedAt) }.max()),
-                .init(count: reputation.count, newestChangeAt: reputation.compactMap { Self.changeDate($0.createdAt, $0.deletedAt) }.max()),
-                .init(count: interactions.count, newestChangeAt: interactions.compactMap { Self.changeDate($0.createdAt, $0.deletedAt) }.max()),
-                .init(count: equity.count, newestChangeAt: equity.compactMap { Self.changeDate($0.generatedAt, $0.deletedAt) }.max())
-            ]
+        var nextCursors = cursors
+        nextCursors.users = IncrementalSyncCursor.next(
+            previous: usersCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
+            rowCount: users.count, serverBoundary: usersPage.serverBoundary,
+            serverHighWatermark: usersPage.serverHighWatermark
+        )
+        nextCursors.channels = IncrementalSyncCursor.next(
+            previous: channelsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
+            rowCount: channels.count, serverBoundary: channelsPage.serverBoundary,
+            serverHighWatermark: channelsPage.serverHighWatermark
+        )
+        nextCursors.messages = IncrementalSyncCursor.next(
+            previous: messagesCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
+            rowCount: messages.count, serverBoundary: messagesPage.serverBoundary,
+            serverHighWatermark: messagesPage.serverHighWatermark
+        )
+        nextCursors.reputation = IncrementalSyncCursor.next(
+            previous: reputationCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
+            rowCount: reputation.count, serverBoundary: reputationPage.serverBoundary,
+            serverHighWatermark: reputationPage.serverHighWatermark
+        )
+        nextCursors.interactions = IncrementalSyncCursor.next(
+            previous: interactionsCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
+            rowCount: interactions.count, serverBoundary: interactionsPage.serverBoundary,
+            serverHighWatermark: interactionsPage.serverHighWatermark
+        )
+        nextCursors.equity = IncrementalSyncCursor.next(
+            previous: equityCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit,
+            rowCount: equity.count, serverBoundary: equityPage.serverBoundary,
+            serverHighWatermark: equityPage.serverHighWatermark
         )
 
         return Counts(
@@ -97,12 +134,26 @@ enum SyncPull {
             reputationInserted: reputationInserted,
             interactionsInserted: interactionsInserted,
             equityUpserted: equityUpserted,
-            nextCursor: nextCursor
+            nextCursors: nextCursors
         )
     }
 
-    private static func changeDate(_ original: Date?, _ deletedAt: Date?) -> Date? {
-        [original, deletedAt].compactMap { $0 }.max()
+    /// Source-compatible entry point for callers still holding the legacy shared timestamp.
+    @MainActor
+    static func run(
+        into container: ModelContainer,
+        client: AbbeyServerClient = .shared,
+        limit: Int = defaultLimit,
+        since: Date?,
+        attemptStartedAt: Date = .now
+    ) async throws -> Counts {
+        try await run(
+            into: container,
+            client: client,
+            limit: limit,
+            cursors: since.map { SyncPullCursorSet(legacyTimestamp: $0) } ?? SyncPullCursorSet(),
+            attemptStartedAt: attemptStartedAt
+        )
     }
 
     // MARK: - Upserts

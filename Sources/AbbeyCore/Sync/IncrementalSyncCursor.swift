@@ -6,45 +6,36 @@ import Foundation
 /// proves that endpoint was drained through the pull's start time, while a full page
 /// may have more rows waiting and can advance only through the newest row it returned.
 public enum IncrementalSyncCursor {
-    public struct Page: Sendable {
-        public var count: Int
-        public var newestChangeAt: Date?
-
-        public init(count: Int, newestChangeAt: Date?) {
-            self.count = count
-            self.newestChangeAt = newestChangeAt
-        }
-    }
-
-    /// Returns the minimum safe boundary across every entity page.
-    ///
-    /// A full page without a usable server timestamp conservatively retains the previous
-    /// cursor (or nil for a full rescan) instead of skipping an unknown interval.
+    /// One independently advancing entity stream.
+    /// A short page is drained through pull start; a full page advances only through the
+    /// exact server-issued `(timestamp, stable ID)` boundary.
     public static func next(
-        previous: Date?,
+        previous: SyncPullCursor?,
         attemptStartedAt: Date,
         limit: Int,
-        pages: [Page]
-    ) -> Date? {
-        guard !pages.isEmpty else { return previous }
+        rowCount: Int,
+        serverBoundary: SyncPullCursor?,
+        serverHighWatermark: Date? = nil
+    ) -> SyncPullCursor? {
         let effectiveLimit = min(max(limit, 1), 500)
-
-        var boundaries: [Date] = []
-        for page in pages {
-            if page.count < effectiveLimit {
-                boundaries.append(attemptStartedAt)
-                continue
-            }
-
-            guard let serverBoundary = page.newestChangeAt else {
+        let safeUpperBound = serverHighWatermark ?? attemptStartedAt
+        guard rowCount >= effectiveLimit else {
+            return SyncPullCursor(changedAt: safeUpperBound)
+        }
+        guard let serverBoundary else { return previous }
+        guard serverBoundary.changedAt <= safeUpperBound else {
+            return SyncPullCursor(changedAt: safeUpperBound)
+        }
+        if let previous {
+            if serverBoundary.changedAt < previous.changedAt { return previous }
+            if serverBoundary.changedAt == previous.changedAt,
+               let previousID = previous.stableID,
+               let boundaryID = serverBoundary.stableID,
+               boundaryID <= previousID
+            {
                 return previous
             }
-
-            // Never move backward, and never advance beyond the local pull-start guard.
-            let monotonicBoundary = previous.map { max($0, serverBoundary) } ?? serverBoundary
-            boundaries.append(min(monotonicBoundary, attemptStartedAt))
         }
-
-        return boundaries.min()
+        return serverBoundary
     }
 }

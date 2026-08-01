@@ -4,15 +4,24 @@ import AbbeyCore
 
 struct DashboardView: View {
     @Environment(AbbeyEngine.self) private var engine
-    @Query private var messages: [GuildMessage]
-    @Query private var users: [UserMemory]
-    @Query(sort: \InteractionLog.createdAt, order: .reverse) private var interactions: [InteractionLog]
+    @Environment(\.modelContext) private var modelContext
+    @Query private var interactions: [InteractionLog]
 
     @State private var draftChannelId = "general"
     @State private var draftGuildId = "dev-guild"
     @State private var draftAuthorId = "donald"
     @State private var draftContent = ""
     @State private var isIngesting = false
+    @State private var ingestError: String?
+    @State private var counts = DashboardCounts()
+
+    init() {
+        var descriptor = FetchDescriptor<InteractionLog>(
+            sortBy: [SortDescriptor(\InteractionLog.createdAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 5
+        _interactions = Query(descriptor)
+    }
 
     var body: some View {
         ScrollView {
@@ -20,9 +29,9 @@ struct DashboardView: View {
                 header
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 180))], spacing: 12) {
-                    MetricCard(title: "Messages (all-time)", value: "\(messages.count)")
-                    MetricCard(title: "Users tracked", value: "\(users.count)")
-                    MetricCard(title: "Interactions", value: "\(interactions.count)")
+                    MetricCard(title: "Messages (all-time)", value: "\(counts.messages)")
+                    MetricCard(title: "Users tracked", value: "\(counts.users)")
+                    MetricCard(title: "Interactions", value: "\(counts.interactions)")
                     MetricCard(title: "Messages this session", value: "\(engine.metrics.messagesIngestedThisSession)")
                     MetricCard(title: "Reputation events this session", value: "\(engine.metrics.reputationEventsThisSession)")
                     MetricCard(title: "Inference calls", value: "\(engine.metrics.totalInferenceCalls)")
@@ -39,6 +48,12 @@ struct DashboardView: View {
                         value: "\(engine.wdbxStore?.recordCount ?? 0)"
                     )
                     MetricCard(title: "NN accel", value: NeuralMath.accelerationBackend)
+                    if engine.config.inferenceMode == .onDevice {
+                        MetricCard(
+                            title: "Foundation Models",
+                            value: FoundationModelsProvider.availabilitySummary
+                        )
+                    }
                     if let consolidated = engine.metrics.lastConsolidationAt {
                         MetricCard(title: "Last consolidation", value: relative(consolidated))
                     }
@@ -70,6 +85,9 @@ struct DashboardView: View {
         .navigationSubtitle(
             "Mode: \(operatingModeLabel) · Inference: \(inferenceModeLabel)"
         )
+        .task(id: engine.metrics.messagesIngestedThisSession) {
+            refreshCounts()
+        }
     }
 
     private var operatingModeLabel: String {
@@ -147,17 +165,29 @@ struct DashboardView: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
 
+            if let ingestError {
+                Label(ingestError, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
             HStack {
                 Button {
                     Task {
                         isIngesting = true
-                        await engine.ingestMessage(
+                        ingestError = nil
+                        let outcome = await engine.ingestMessage(
                             content: draftContent,
                             channelId: draftChannelId,
                             guildId: draftGuildId,
                             authorId: draftAuthorId
                         )
-                        draftContent = ""
+                        if case .inserted = outcome {
+                            draftContent = ""
+                            refreshCounts()
+                        } else {
+                            ingestError = "The message was not persisted, so no learning or reply was performed."
+                        }
                         isIngesting = false
                     }
                 } label: {
@@ -186,6 +216,21 @@ struct DashboardView: View {
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: .now)
     }
+
+    @MainActor
+    private func refreshCounts() {
+        counts = DashboardCounts(
+            messages: (try? modelContext.fetchCount(FetchDescriptor<GuildMessage>())) ?? 0,
+            users: (try? modelContext.fetchCount(FetchDescriptor<UserMemory>())) ?? 0,
+            interactions: (try? modelContext.fetchCount(FetchDescriptor<InteractionLog>())) ?? 0
+        )
+    }
+}
+
+private struct DashboardCounts: Equatable {
+    var messages = 0
+    var users = 0
+    var interactions = 0
 }
 
 private struct MetricCard: View {

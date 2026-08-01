@@ -43,6 +43,7 @@ public struct InteractionRouter: Sendable {
         industry: @escaping DiscordSlashHandlers.IndustryHandler = {
             DiscordCopy.industryProfile(AppConfig.shared.industryProfile.rawValue, suffixEmpty: true)
         },
+        audit: @escaping DiscordSlashHandlers.AuditHandler = { _, _, _, _, _ in },
         accessPolicy: DiscordCommandAccessPolicy = .fromEnvironment()
     ) {
         self.handlers = DiscordSlashHandlers(
@@ -62,7 +63,8 @@ public struct InteractionRouter: Sendable {
             ping: ping,
             equity: equity,
             modAdvice: modAdvice,
-            industry: industry
+            industry: industry,
+            audit: audit
         )
         self.accessPolicy = accessPolicy
     }
@@ -109,6 +111,7 @@ public struct InteractionRouter: Sendable {
         data: Interaction.ApplicationCommand,
         client: any DiscordClient
     ) async {
+        let started = ContinuousClock.now
         let userId = interaction.member?.user?.id.rawValue
             ?? interaction.user?.id.rawValue
             ?? ""
@@ -205,6 +208,13 @@ public struct InteractionRouter: Sendable {
             token: interaction.token,
             payload: .init(content: clipped)
         ).guardSuccess()
+        await handlers.audit(
+            data.name,
+            userId,
+            guildId,
+            authorized,
+            IngestScorer.latencyMilliseconds(since: started)
+        )
     }
 
     private func handleVoice(

@@ -80,8 +80,19 @@ public enum TwitchEventSubAutoSubscriber {
         case missingEnvironment([String])
         /// Callback must be `https://…` — Twitch rejects anything else.
         case invalidCallbackURL(String)
+        /// The operator must finish Twitch user authorization for the requested event
+        /// scopes before an app-token subscription can be accepted.
+        case authorizationNotConfirmed
         case ready(Config)
     }
+
+    public static let requiredAuthorizationScopes: [String] = [
+        "user:read:chat",
+        "user:bot",
+        "moderator:read:followers",
+        "channel:read:subscriptions",
+        "bits:read",
+    ]
 
     static let requiredEnvironment: [String] = [
         "TWITCH_CLIENT_ID",
@@ -89,7 +100,8 @@ public enum TwitchEventSubAutoSubscriber {
         "TWITCH_EVENTSUB_SECRET",
         "TWITCH_EVENTSUB_CALLBACK_URL",
         "TWITCH_BROADCASTER_USER_ID",
-        "TWITCH_BOT_USER_ID"
+        "TWITCH_BOT_USER_ID",
+        "TWITCH_EVENTSUB_AUTHORIZATION_CONFIRMED"
     ]
 
     /// Pure decision from an environment snapshot — unit-testable without a server.
@@ -110,6 +122,12 @@ public enum TwitchEventSubAutoSubscriber {
             }
         }
         guard missing.isEmpty else { return .missingEnvironment(missing.sorted()) }
+
+        let authorizationConfirmed = values["TWITCH_EVENTSUB_AUTHORIZATION_CONFIRMED"]!
+            .lowercased()
+        guard authorizationConfirmed == "1" || authorizationConfirmed == "true" else {
+            return .authorizationNotConfirmed
+        }
 
         let callback = values["TWITCH_EVENTSUB_CALLBACK_URL"]!
         guard callback.lowercased().hasPrefix("https://") else {
@@ -148,6 +166,11 @@ public enum TwitchEventSubAutoSubscriber {
                 "Twitch EventSub auto-subscribe: TWITCH_EVENTSUB_CALLBACK_URL must be https:// (got \(url)) — skipping"
             )
             return false
+        case .authorizationNotConfirmed:
+            app.logger.warning(
+                "Twitch EventSub auto-subscribe: complete Twitch user authorization for scopes \(requiredAuthorizationScopes.joined(separator: ", ")); for chat, also grant channel:bot from the broadcaster or make the bot a moderator; then set TWITCH_EVENTSUB_AUTHORIZATION_CONFIRMED=1 — skipping"
+            )
+            return false
         case .ready(let config):
             let helix = TwitchHelixClient(
                 client: client ?? app.client,
@@ -167,7 +190,7 @@ public enum TwitchEventSubAutoSubscriber {
             var allSucceeded = true
             for spec in subscriptionSpecs {
                 do {
-                    try await helix.createSubscription(
+                    let outcome = try await helix.createSubscription(
                         type: spec.type,
                         version: spec.version,
                         condition: spec.condition(
@@ -178,9 +201,16 @@ public enum TwitchEventSubAutoSubscriber {
                         webhookSecret: config.webhookSecret,
                         appAccessToken: token
                     )
-                    app.logger.info(
-                        "Twitch EventSub auto-subscribe: \(spec.type) subscription requested for broadcaster \(config.broadcasterUserId) → \(config.callbackURL)"
-                    )
+                    switch outcome {
+                    case .created:
+                        app.logger.info(
+                            "Twitch EventSub auto-subscribe: \(spec.type) subscription requested for broadcaster \(config.broadcasterUserId) → \(config.callbackURL)"
+                        )
+                    case .alreadyExists:
+                        app.logger.info(
+                            "Twitch EventSub auto-subscribe: \(spec.type) already exists; reconciled without creating a duplicate"
+                        )
+                    }
                 } catch {
                     allSucceeded = false
                     app.logger.warning(

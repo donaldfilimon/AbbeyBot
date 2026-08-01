@@ -1,10 +1,12 @@
+import AbbeyCore
 import Foundation
 
 /// File-backed unix-epoch cursor for CLI pullers/pushers without UserDefaults. One line,
 /// seconds since 1970. Missing or unparseable content degrades to nil — a full sync —
-/// mirroring the desktop's `SyncCursorStore` semantics (stamp at *start*, persist only after
-/// the operation succeeds). Pull and push use separate default files so one cannot advance
-/// the other.
+/// mirroring the desktop's `SyncCursorStore` semantics (pull start is the upper bound, a full
+/// page may select an earlier server boundary, and only success persists). Pull and push use
+/// separate default files so one cannot advance the other; CLI push additionally stores
+/// message/memory progress in sidecars.
 public struct SyncCursorFileStore: Sendable {
     public enum Stream: String, Sendable {
         case messages
@@ -27,12 +29,41 @@ public struct SyncCursorFileStore: Sendable {
             .appendingPathComponent("cli-sync-push-cursor", isDirectory: false)
     }
 
+    public static func namespacedPullURL(endpoint: String) -> URL {
+        namespaced(defaultURL(), endpoint: endpoint)
+    }
+
+    public static func namespacedPushURL(endpoint: String) -> URL {
+        namespaced(defaultPushURL(), endpoint: endpoint)
+    }
+
+    private static func namespaced(_ url: URL, endpoint: String) -> URL {
+        url.deletingLastPathComponent().appendingPathComponent(
+            "\(url.lastPathComponent).\(SyncEndpointIdentity.storageKey(for: endpoint))",
+            isDirectory: false
+        )
+    }
+
     public init(fileURL: URL = SyncCursorFileStore.defaultURL()) {
         self.fileURL = fileURL
     }
 
     public func loadLastSuccess() -> Date? {
         loadCursor(at: fileURL)
+    }
+
+    /// Loads v2 per-entity pull progress. A legacy one-line epoch is expanded across all
+    /// streams and is rewritten as JSON after the next successful pull.
+    public func loadPullCursors() -> SyncPullCursorSet {
+        guard let data = try? Data(contentsOf: fileURL) else { return SyncPullCursorSet() }
+        if let decoded = try? JSONDecoder().decode(SyncPullCursorSet.self, from: data) {
+            return decoded
+        }
+        guard let raw = String(data: data, encoding: .utf8),
+              let epoch = Double(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              epoch > 0
+        else { return SyncPullCursorSet() }
+        return SyncPullCursorSet(legacyTimestamp: Date(timeIntervalSince1970: epoch))
     }
 
     /// Loads a stream-specific cursor. Existing installations begin from the legacy
@@ -54,10 +85,19 @@ public struct SyncCursorFileStore: Sendable {
     }
 
     /// Alias kept for call sites that named the pull-side API explicitly.
-    public func loadLastPullSuccess() -> Date? { loadLastSuccess() }
+    public func loadLastPullSuccess() -> Date? {
+        loadPullCursors().earliestChangedAt ?? loadLastSuccess()
+    }
 
     public func saveLastSuccess(_ date: Date) throws {
         try save(date, at: fileURL)
+    }
+
+    public func savePullCursors(_ cursors: SyncPullCursorSet) throws {
+        let parent = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(cursors)
+        try data.write(to: fileURL, options: .atomic)
     }
 
     /// Saves independent progress for one push stream without advancing any other stream.
@@ -95,5 +135,11 @@ public struct SyncCursorFileStore: Sendable {
         } else {
             try clear()
         }
+    }
+
+
+    public func applyPullOutcome(nextCursors: SyncPullCursorSet, succeeded: Bool) throws {
+        guard succeeded else { return }
+        try savePullCursors(nextCursors)
     }
 }

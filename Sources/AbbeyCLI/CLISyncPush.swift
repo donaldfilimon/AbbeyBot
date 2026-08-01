@@ -97,9 +97,9 @@ enum CLISyncPushPlan {
 }
 
 /// `/sync push` — push CLI-local messages and memory facts to the configured sync server.
-/// Uses `~/.abbey/cli-sync-push-cursor` (independent of the pull cursor). Cursor advances
-/// only after a fully successful push. Reputation/interactions/equity/tombstones are out
-/// of scope for this command (see `CLISyncPushPlan`).
+/// Uses message/memory sidecars beside `~/.abbey/cli-sync-push-cursor` (independent of the
+/// pull cursor). Each stream advances only after that stream fully succeeds.
+/// Reputation/interactions/equity/tombstones are out of scope (see `CLISyncPushPlan`).
 enum CLISyncPush {
     struct Source: Sendable {
         var messages: @Sendable (Date?) async throws -> [CLISyncPushPlan.MessageRow]
@@ -124,6 +124,10 @@ enum CLISyncPush {
                 "if the server sets ABBEY_API_TOKEN) — same env vars the desktop uses."
             ]
         }
+
+        let cursorStore = cursorStore.fileURL == SyncCursorFileStore.defaultPushURL()
+            ? SyncCursorFileStore(fileURL: SyncCursorFileStore.namespacedPushURL(endpoint: client.baseURL))
+            : cursorStore
 
         let source = Source(
             messages: { since in try await selectMessages(since: since, on: runtime.database) },
@@ -154,7 +158,7 @@ enum CLISyncPush {
     }
 
     /// Executes the two push streams independently. This dependency-injected seam keeps
-    /// pagination/resume behavior deterministic in tests without opening sockets.
+    /// large-batch/resume behavior deterministic in tests without opening sockets.
     static func execute(
         source: Source,
         sink: Sink,

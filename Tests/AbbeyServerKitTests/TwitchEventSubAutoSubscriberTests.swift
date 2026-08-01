@@ -12,7 +12,8 @@ struct TwitchEventSubAutoSubscriberTests {
         "TWITCH_EVENTSUB_SECRET": "whsecret",
         "TWITCH_EVENTSUB_CALLBACK_URL": "https://abbey.example/api/twitch/eventsub",
         "TWITCH_BROADCASTER_USER_ID": "100",
-        "TWITCH_BOT_USER_ID": "200"
+        "TWITCH_BOT_USER_ID": "200",
+        "TWITCH_EVENTSUB_AUTHORIZATION_CONFIRMED": "1"
     ]
 
     @Test func disabledWhenFlagUnset() {
@@ -40,6 +41,22 @@ struct TwitchEventSubAutoSubscriberTests {
         env["TWITCH_EVENTSUB_CALLBACK_URL"] = "http://abbey.example/api/twitch/eventsub"
         #expect(TwitchEventSubAutoSubscriber.decide(environment: env)
             == .invalidCallbackURL("http://abbey.example/api/twitch/eventsub"))
+    }
+
+    @Test func requiresExplicitUserAuthorizationConfirmation() {
+        var env = Self.fullEnvironment
+        env["TWITCH_EVENTSUB_AUTHORIZATION_CONFIRMED"] = "0"
+        #expect(TwitchEventSubAutoSubscriber.decide(environment: env) == .authorizationNotConfirmed)
+    }
+
+    @Test func documentsEveryUnconditionalAuthorizationScope() {
+        #expect(Set(TwitchEventSubAutoSubscriber.requiredAuthorizationScopes) == [
+            "user:read:chat",
+            "user:bot",
+            "moderator:read:followers",
+            "channel:read:subscriptions",
+            "bits:read",
+        ])
     }
 
     @Test func readyCarriesFullConfig() {
@@ -167,6 +184,32 @@ struct TwitchEventSubAutoSubscriberTests {
                 return try #require(decoded["type"] as? String)
             }
             #expect(attemptedTypes == TwitchEventSubAutoSubscriber.subscriptionSpecs.map(\.type))
+        }
+    }
+
+    @Test func existingSubscriptionsAreIdempotentSuccess() async throws {
+        try await withApp { app in
+            let fake = QueuedClient(
+                eventLoop: app.eventLoopGroup.next(),
+                responses: [
+                    jsonResponse(.ok, #"{"access_token":"tok","expires_in":3600,"token_type":"bearer"}"#, on: app),
+                    ClientResponse(status: .conflict),
+                    ClientResponse(status: .conflict),
+                    ClientResponse(status: .conflict),
+                    ClientResponse(status: .conflict),
+                    ClientResponse(status: .conflict),
+                    ClientResponse(status: .conflict),
+                ]
+            )
+
+            let subscribed = await TwitchEventSubAutoSubscriber.subscribeIfConfigured(
+                app: app,
+                client: fake,
+                environment: Self.fullEnvironment
+            )
+
+            #expect(subscribed)
+            #expect(fake.requests.count == 7)
         }
     }
 

@@ -12,11 +12,11 @@
   },
   "dependencies": {
     "@browserbasehq/sdk-functions": "^1.0.1",
-    "playwright-core": "^1.62.0",
+    "playwright-core": "^1.62.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.1.2",
     "typescript": "^7.0.2"
   }
 }

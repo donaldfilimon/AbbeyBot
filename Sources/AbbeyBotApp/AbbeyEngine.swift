@@ -51,14 +51,20 @@ final class AbbeyEngine {
         }
         self.socialBrain = SocialBrain(modelContainer: modelContainer, eventBus: bus, decay: { config.reputationDecay })
         let checkpointURL = try? DQNCheckpointStore.defaultURL()
-        let journalURL = try? ExperienceJournalStore.defaultURL()
-        let wdbxFacade = try? WDBXMemoryFacade.default()
-        self.wdbxStore = try? WDBXStore()
+        let store = try? WDBXStore()
+        self.wdbxStore = store
+        let experiencePersistence: DQNExperiencePersistence?
+        if let wdbxFacade = try? WDBXMemoryFacade.default(store: store) {
+            experiencePersistence = .memory(wdbxFacade)
+        } else if let journalURL = try? ExperienceJournalStore.defaultURL() {
+            experiencePersistence = .journal(ExperienceJournal(url: journalURL))
+        } else {
+            experiencePersistence = nil
+        }
         self.dqnAgent = DQNAgent(
             topology: DQNAgent.defaultTopology,
             checkpointURL: checkpointURL,
-            experienceJournalURL: journalURL,
-            wdbxFacade: wdbxFacade
+            experiencePersistence: experiencePersistence
         )
         self.scheduler = AbbeyScheduler(
             modelContainer: modelContainer,
@@ -161,19 +167,18 @@ final class AbbeyEngine {
 
         // Ask the server only for rows touched since our last successful pull. The cursor is
         // persisted, so this stays incremental across relaunches too, not just within a session.
-        let cursorStore = SyncCursorStore()
-        let cursor = cursorStore.lastPullSuccessAt
+        let cursorStore = SyncCursorStore(endpoint: url)
+        let cursors = cursorStore.pullCursors
 
-        // Stamp the *start* of the pull, not its completion: a row the server writes while this
-        // pull is in flight may or may not appear in the response, so advancing the cursor to the
-        // end time could skip it permanently. Starting-time means such a row is simply refetched
-        // next pull — duplicate work, never lost data.
+        // The pull start is the maximum safe cursor, never completion time: a row the server
+        // writes while this pull is in flight may or may not appear in the response. SyncPull
+        // may return an earlier full-page boundary when an endpoint still has rows to drain.
         let attemptStartedAt = Date()
 
         do {
             let counts = try await SyncPull.run(
                 into: modelContainer,
-                since: cursor,
+                cursors: cursors,
                 attemptStartedAt: attemptStartedAt
             )
             SyncStatus.shared.recordPullSuccess(
@@ -184,12 +189,12 @@ final class AbbeyEngine {
                 interactions: counts.interactionsInserted,
                 equity: counts.equityUpserted
             )
-            cursorStore.applyPullOutcome(nextCursor: counts.nextCursor, succeeded: true)
+            cursorStore.applyPullOutcome(nextCursors: counts.nextCursors, succeeded: true)
             await socialBrain.warmCache()
         } catch {
             print("[sync] pull failed: \(error)")
             SyncStatus.shared.recordPullFailure(message: OperatorFacingError.message(error))
-            cursorStore.applyPullOutcome(nextCursor: nil, succeeded: false)
+            cursorStore.applyPullOutcome(nextCursors: cursors, succeeded: false)
         }
 
         await reportSyncStatusToServer()
@@ -248,24 +253,29 @@ final class AbbeyEngine {
     ) async -> MessageIngestOutcome {
         let started = ContinuousClock.now
         let context = ModelContext(modelContainer)
+        let resolvedMessageId = discordMessageId ?? UUID().uuidString
+        if discordMessageId != nil {
+            let messageId = resolvedMessageId
+            var duplicateDescriptor = FetchDescriptor<GuildMessage>(
+                predicate: #Predicate { $0.discordMessageId == messageId }
+            )
+            duplicateDescriptor.fetchLimit = 1
+            if (try? context.fetch(duplicateDescriptor).first) != nil {
+                return .duplicate
+            }
+        }
         let message = GuildMessage(
-            discordMessageId: discordMessageId ?? UUID().uuidString,
+            discordMessageId: resolvedMessageId,
             channelId: channelId,
             guildId: guildId,
             authorId: authorId,
             content: content
         )
         context.insert(message)
-        if discordMessageId != nil {
-            liveIngestCount += 1
-        }
         upsertChannelContext(in: context, channelId: channelId, guildId: guildId)
         let intent = IntentClassifier.classify(content)
         if intent == .memoryStore {
             appendMemoryFact(in: context, authorId: authorId, guildId: guildId, content: content)
-        }
-        if intent == .personaSwitch {
-            await personaRouter.setPersona(named: PersonaName.resolve(content))
         }
         do {
             try context.save()
@@ -278,6 +288,9 @@ final class AbbeyEngine {
                 latencyMs: IngestScorer.latencyMilliseconds(since: started)
             )
             return .failed
+        }
+        if discordMessageId != nil {
+            liveIngestCount += 1
         }
 
         Task.detached(priority: .utility) {
@@ -352,37 +365,8 @@ final class AbbeyEngine {
             return "I won’t take automated moderation actions from chat. Use a human moderator or `/mod` for advice only."
         }
 
-        let persona = await personaRouter.route(intent: intent)
-        var context = await personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
-        if strategy == .retrieve, let store = wdbxStore {
-            let reputationBefore = await socialBrain.reputation(userId: authorId, guildId: guildId)
-            let query = SentimentAnalyzer.analyze(
-                text: content,
-                authorReputation: reputationBefore,
-                recentReactionCount: 0,
-                mentionsSomeone: content.contains("@"),
-                isReply: false,
-                timestamp: .now,
-                channelMessageCountInWindow: 0,
-                authorInteractionCount: 0,
-                isDirectMessage: guildId == "DM"
-            )
-            let hits = store.search(
-                query: query,
-                guildId: guildId,
-                channelId: channelId,
-                userId: authorId,
-                limit: 5
-            )
-            let retrieved = hits.compactMap { $0.record.payload["contentPreview"] }
-            if !retrieved.isEmpty {
-                context = PersonaContext(
-                    channelSummary: context.channelSummary,
-                    userFacts: context.userFacts + retrieved,
-                    reputation: context.reputation
-                )
-            }
-        }
+        let persona = await personaRouter.route(intent: intent, userText: content)
+        let context = await personaContext(authorId: authorId, guildId: guildId, channelId: channelId)
         let directed = strategy.replyDirective(userText: content, retrievedFacts: context.userFacts)
         return await persona.respond(to: directed, context: context, inference: inferenceRouter).text
     }
@@ -740,6 +724,16 @@ final class AbbeyEngine {
                 return DiscordCopy.industryProfile(
                     profile.rawValue,
                     suffixEmpty: profile.promptSuffix.isEmpty
+                )
+            },
+            audit: { [weak self] commandName, userId, guildId, succeeded, latencyMs in
+                guard let self else { return }
+                await self.logInteraction(
+                    commandName: commandName,
+                    userId: userId,
+                    guildId: guildId,
+                    succeeded: succeeded,
+                    latencyMs: latencyMs
                 )
             }
         )

@@ -65,6 +65,7 @@ struct PendingPushQueueTests {
         defer { try? FileManager.default.removeItem(at: url) }
 
         try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "snapshot"])
+        let concurrentWriter = PendingPushQueue(url: url)
         let gate = DrainGate()
 
         let draining = Task {
@@ -75,7 +76,10 @@ struct PendingPushQueueTests {
         }
 
         await gate.waitUntilSendStarted()
-        try queue.enqueue(path: "/api/state/remember", jsonObjectBody: ["fact": "arrived during drain"])
+        try concurrentWriter.enqueue(
+            path: "/api/state/remember",
+            jsonObjectBody: ["fact": "arrived during drain"]
+        )
         await gate.releaseSend()
 
         #expect(try await draining.value == 1)

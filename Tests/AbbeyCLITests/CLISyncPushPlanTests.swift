@@ -99,7 +99,7 @@ struct CLISyncPushPlanTests {
         #expect(store.loadLastSuccess(for: .memories) == memoryProgress)
     }
 
-    @Test func pushesMoreThanOnePageAndResumesFailedStreamWithoutReplayingSuccessfulFacts() async throws {
+    @Test func pushesMoreThanLegacyLimitAndResumesFailedStreamWithoutReplayingSuccessfulFacts() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("CLISyncPushResumeTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }

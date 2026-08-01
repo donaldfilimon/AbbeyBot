@@ -3,8 +3,16 @@ import SwiftData
 import AbbeyCore
 
 struct MessagesView: View {
-    @Query(sort: \GuildMessage.createdAt, order: .reverse) private var messages: [GuildMessage]
+    @Query private var messages: [GuildMessage]
     @State private var channelFilter = ""
+
+    init() {
+        var descriptor = FetchDescriptor<GuildMessage>(
+            sortBy: [SortDescriptor(\GuildMessage.createdAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 500
+        _messages = Query(descriptor)
+    }
 
     private var filtered: [GuildMessage] {
         guard !channelFilter.isEmpty else { return messages }
@@ -62,5 +70,6 @@ struct MessagesView: View {
             }
         }
         .navigationTitle("Messages")
+        .navigationSubtitle("Showing the 500 most recent locally stored messages")
     }
 }

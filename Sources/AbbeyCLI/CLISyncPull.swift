@@ -21,17 +21,36 @@ enum CLISyncPull {
             ]
         }
 
-        let since = cursorStore.loadLastPullSuccess()
-        // Stamp at pull *start* so rows written mid-pull are refetched next time.
+        let cursorStore = cursorStore.fileURL == SyncCursorFileStore.defaultURL()
+            ? SyncCursorFileStore(fileURL: SyncCursorFileStore.namespacedPullURL(endpoint: client.baseURL))
+            : cursorStore
+
+        let cursors = cursorStore.loadPullCursors()
+        // Pull start is the upper cursor bound; a full entity page may hold it back to the
+        // newest server change actually returned so later pulls drain the remaining rows.
         let startedAt = Date()
 
         do {
-            let users = try await client.fetchUsers(since: since)
-            let channels = try await client.fetchChannels(since: since)
-            let messages = try await client.fetchMessages(since: since)
-            let reputation = try await client.fetchReputation(since: since)
-            let interactions = try await client.fetchInteractions(since: since)
-            let equity = try await client.fetchEquity(since: since)
+            async let usersTask = client.fetchUsersPage(cursor: cursors.users ?? .initial)
+            async let channelsTask = client.fetchChannelsPage(cursor: cursors.channels ?? .initial)
+            async let messagesTask = client.fetchMessagesPage(cursor: cursors.messages ?? .initial)
+            async let reputationTask = client.fetchReputationPage(cursor: cursors.reputation ?? .initial)
+            async let interactionsTask = client.fetchInteractionsPage(cursor: cursors.interactions ?? .initial)
+            async let equityTask = client.fetchEquityPage(cursor: cursors.equity ?? .initial)
+
+            let usersPage = try await usersTask
+            let channelsPage = try await channelsTask
+            let messagesPage = try await messagesTask
+            let reputationPage = try await reputationTask
+            let interactionsPage = try await interactionsTask
+            let equityPage = try await equityTask
+
+            let users = usersPage.rows
+            let channels = channelsPage.rows
+            let messages = messagesPage.rows
+            let reputation = reputationPage.rows
+            let interactions = interactionsPage.rows
+            let equity = equityPage.rows
 
             let counts = try await ServerSyncApply.apply(
                 users: users,
@@ -44,22 +63,34 @@ enum CLISyncPull {
             )
 
             let effectiveLimit = 500
-            let nextCursor = IncrementalSyncCursor.next(
-                previous: since,
-                attemptStartedAt: startedAt,
-                limit: effectiveLimit,
-                pages: [
-                    .init(count: users.count, newestChangeAt: users.compactMap(\.updatedAt).max()),
-                    .init(count: channels.count, newestChangeAt: channels.compactMap(\.updatedAt).max()),
-                    .init(count: messages.count, newestChangeAt: messages.compactMap { changeDate($0.createdAt, $0.deletedAt) }.max()),
-                    .init(count: reputation.count, newestChangeAt: reputation.compactMap { changeDate($0.createdAt, $0.deletedAt) }.max()),
-                    .init(count: interactions.count, newestChangeAt: interactions.compactMap { changeDate($0.createdAt, $0.deletedAt) }.max()),
-                    .init(count: equity.count, newestChangeAt: equity.compactMap { changeDate($0.generatedAt, $0.deletedAt) }.max())
-                ]
+            var nextCursors = cursors
+            nextCursors.users = nextCursor(
+                previous: cursors.users ?? .initial, page: usersPage,
+                startedAt: startedAt, limit: effectiveLimit
+            )
+            nextCursors.channels = nextCursor(
+                previous: cursors.channels ?? .initial, page: channelsPage,
+                startedAt: startedAt, limit: effectiveLimit
+            )
+            nextCursors.messages = nextCursor(
+                previous: cursors.messages ?? .initial, page: messagesPage,
+                startedAt: startedAt, limit: effectiveLimit
+            )
+            nextCursors.reputation = nextCursor(
+                previous: cursors.reputation ?? .initial, page: reputationPage,
+                startedAt: startedAt, limit: effectiveLimit
+            )
+            nextCursors.interactions = nextCursor(
+                previous: cursors.interactions ?? .initial, page: interactionsPage,
+                startedAt: startedAt, limit: effectiveLimit
+            )
+            nextCursors.equity = nextCursor(
+                previous: cursors.equity ?? .initial, page: equityPage,
+                startedAt: startedAt, limit: effectiveLimit
             )
 
             do {
-                try cursorStore.applyPullOutcome(nextCursor: nextCursor, succeeded: true)
+                try cursorStore.applyPullOutcome(nextCursors: nextCursors, succeeded: true)
             } catch {
                 return [
                     "Pulled from \(client.baseURL): \(counts.summary).",
@@ -67,7 +98,8 @@ enum CLISyncPull {
                 ]
             }
 
-            let scope = since.map { "since \(Self.format($0))" } ?? "full (no cursor)"
+            let scope = cursors.earliestChangedAt.map { "incremental from \(Self.format($0))" }
+                ?? "full (compound cursor bootstrap)"
             return ["Pulled from \(client.baseURL) [\(scope)]: \(counts.summary)."]
         } catch {
             return [
@@ -82,7 +114,19 @@ enum CLISyncPull {
         return formatter.string(from: date)
     }
 
-    private static func changeDate(_ original: Date?, _ deletedAt: Date?) -> Date? {
-        [original, deletedAt].compactMap { $0 }.max()
+    private static func nextCursor<Row: Sendable>(
+        previous: SyncPullCursor,
+        page: SyncPullPage<Row>,
+        startedAt: Date,
+        limit: Int
+    ) -> SyncPullCursor? {
+        IncrementalSyncCursor.next(
+            previous: previous,
+            attemptStartedAt: startedAt,
+            limit: limit,
+            rowCount: page.rows.count,
+            serverBoundary: page.serverBoundary,
+            serverHighWatermark: page.serverHighWatermark
+        )
     }
 }

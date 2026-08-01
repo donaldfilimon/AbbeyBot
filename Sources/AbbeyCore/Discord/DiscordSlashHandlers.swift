@@ -78,6 +78,13 @@ public struct DiscordSlashHandlers: Sendable {
     public typealias EquityHandler = @Sendable (_ symbol: String) async -> String
     public typealias ModAdviceHandler = @Sendable (_ situation: String, _ userId: String, _ guildId: String, _ channelId: String) async -> String
     public typealias IndustryHandler = @Sendable () async -> String
+    public typealias AuditHandler = @Sendable (
+        _ commandName: String,
+        _ userId: String,
+        _ guildId: String,
+        _ succeeded: Bool,
+        _ latencyMs: Double
+    ) async -> Void
 
     public var ask: AskHandler
     public var rep: RepHandler
@@ -96,6 +103,7 @@ public struct DiscordSlashHandlers: Sendable {
     public var equity: EquityHandler
     public var modAdvice: ModAdviceHandler
     public var industry: IndustryHandler
+    public var audit: AuditHandler
 
     public init(
         ask: @escaping AskHandler,
@@ -114,7 +122,8 @@ public struct DiscordSlashHandlers: Sendable {
         ping: @escaping PingHandler,
         equity: @escaping EquityHandler,
         modAdvice: @escaping ModAdviceHandler,
-        industry: @escaping IndustryHandler
+        industry: @escaping IndustryHandler,
+        audit: @escaping AuditHandler = { _, _, _, _, _ in }
     ) {
         self.ask = ask
         self.rep = rep
@@ -133,6 +142,7 @@ public struct DiscordSlashHandlers: Sendable {
         self.equity = equity
         self.modAdvice = modAdvice
         self.industry = industry
+        self.audit = audit
     }
 }
 

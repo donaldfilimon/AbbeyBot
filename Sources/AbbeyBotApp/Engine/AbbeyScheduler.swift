@@ -68,14 +68,25 @@ actor AbbeyScheduler {
             descriptor.fetchLimit = 50
             guard let recent = try? context.fetch(descriptor), !recent.isEmpty else { continue }
 
+            let countDescriptor = FetchDescriptor<GuildMessage>(
+                predicate: #Predicate { $0.channelId == channelId && $0.guildId == guildId }
+            )
+            let totalMessageCount = (try? context.fetchCount(countDescriptor))
+                ?? max(channel.messageCount, recent.count)
+
             let lines = recent.reversed().map {
                 ChannelSummaryBuilder.Line(authorId: $0.authorId, content: $0.content)
             }
             channel.summary = ChannelSummaryBuilder.summarize(lines)
-            channel.messageCount = recent.count
+            channel.messageCount = totalMessageCount
             channel.updatedAt = .now
 
-            await eventBus.publish(.channelContextConsolidated(channelId: channel.channelId, messageCount: recent.count))
+            await eventBus.publish(
+                .channelContextConsolidated(
+                    channelId: channel.channelId,
+                    messageCount: totalMessageCount
+                )
+            )
         }
 
         try? context.save()

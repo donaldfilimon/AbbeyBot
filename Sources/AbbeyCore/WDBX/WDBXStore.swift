@@ -23,7 +23,7 @@ public struct WDBXManifest: Codable, Sendable, Equatable {
     public var recordCount: Int
     public var updatedAt: Date
 
-    public init(version: Int = 1, dimension: Int, segmentCount: Int = 0, recordCount: Int = 0, updatedAt: Date = .now) {
+    public init(version: Int = 2, dimension: Int, segmentCount: Int = 0, recordCount: Int = 0, updatedAt: Date = .now) {
         self.version = version
         self.dimension = dimension
         self.segmentCount = segmentCount
@@ -61,6 +61,8 @@ public final class WDBXStore: @unchecked Sendable {
     /// Retrieval never returns weak or negatively correlated rows, even if a caller
     /// accidentally requests a lower threshold.
     public static let safeMinimumSimilarity: Float = 0.35
+    private static let currentManifestVersion = 2
+    private static let sensitivePayloadKeys: Set<String> = ["contentPreview"]
 
     public let root: URL
     public let dimension: Int
@@ -117,13 +119,30 @@ public final class WDBXStore: @unchecked Sendable {
             try Self.writeManifest(self.manifest, to: manifestURL, encoder: encoder)
         }
         let loaded = try Self.loadAllRecords(root: root, decoder: decoder)
-        self.cache = loaded.records
-        self.appendedRecordCount = loaded.appendedRecordCount
+        let sanitizedRecords = loaded.records.map(Self.sanitizedRecord)
+        let scrubbedSensitivePayload = sanitizedRecords != loaded.records
+        self.cache = sanitizedRecords
+        self.appendedRecordCount = scrubbedSensitivePayload
+            ? sanitizedRecords.count
+            : loaded.appendedRecordCount
 
         // Segments are an append-only log. Rebuild logical counts from that log so
         // repeated upserts do not reappear as duplicate live rows after a restart.
-        let repairedSegmentCount = loaded.segmentCount
-        if manifest.recordCount != cache.count || manifest.segmentCount != repairedSegmentCount {
+        // Version 2 also physically compacts legacy raw `contentPreview` fields out of
+        // every segment. Retrieval uses authoritative memory stores instead.
+        let repairedSegmentCount = scrubbedSensitivePayload
+            ? try Self.rewriteSegments(
+                records: sanitizedRecords,
+                root: root,
+                maxRecordsPerSegment: self.maxRecordsPerSegment,
+                encoder: encoder
+            )
+            : loaded.segmentCount
+        if manifest.version != Self.currentManifestVersion
+            || manifest.recordCount != cache.count
+            || manifest.segmentCount != repairedSegmentCount
+        {
+            manifest.version = Self.currentManifestVersion
             manifest.recordCount = cache.count
             manifest.segmentCount = repairedSegmentCount
             manifest.updatedAt = .now
@@ -142,6 +161,7 @@ public final class WDBXStore: @unchecked Sendable {
     }
 
     public func upsert(_ record: WDBXRecord) throws {
+        let record = Self.sanitizedRecord(record)
         guard record.vector.count == dimension else {
             throw WDBXStoreError.dimensionMismatch(expected: dimension, found: record.vector.count)
         }
@@ -267,6 +287,56 @@ public final class WDBXStore: @unchecked Sendable {
             appendedRecordCount: appendedRecordCount,
             segmentCount: sorted.count
         )
+    }
+
+    private static func sanitizedRecord(_ record: WDBXRecord) -> WDBXRecord {
+        var sanitized = record
+        for key in sensitivePayloadKeys {
+            sanitized.payload.removeValue(forKey: key)
+        }
+        return sanitized
+    }
+
+    /// Rewrite the live logical rows into compacted segments. Atomic replacement happens
+    /// per file; if a process stops midway, the next initialization repeats the scrub over
+    /// every remaining segment before the store becomes available.
+    private static func rewriteSegments(
+        records: [WDBXRecord],
+        root: URL,
+        maxRecordsPerSegment: Int,
+        encoder: JSONEncoder
+    ) throws -> Int {
+        let segmentDirectory = root.appendingPathComponent("segments", isDirectory: true)
+        let existing = ((try? FileManager.default.contentsOfDirectory(
+            at: segmentDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? []).filter { $0.pathExtension == "jsonl" }
+
+        let segmentCount = records.isEmpty
+            ? 0
+            : Int(ceil(Double(records.count) / Double(maxRecordsPerSegment)))
+        for segmentIndex in 0..<segmentCount {
+            let start = segmentIndex * maxRecordsPerSegment
+            let end = min(start + maxRecordsPerSegment, records.count)
+            var data = Data()
+            for record in records[start..<end] {
+                data.append(try encoder.encode(record))
+                data.append(0x0A)
+            }
+            let url = segmentDirectory.appendingPathComponent(
+                String(format: "seg-%04d.jsonl", segmentIndex)
+            )
+            try data.write(to: url, options: .atomic)
+        }
+
+        for url in existing {
+            let stem = url.deletingPathExtension().lastPathComponent
+            guard let rawIndex = stem.split(separator: "-").last,
+                  let index = Int(rawIndex), index >= segmentCount
+            else { continue }
+            try FileManager.default.removeItem(at: url)
+        }
+        return segmentCount
     }
 
     private static func dot(_ a: [Float], _ b: [Float]) -> Float {

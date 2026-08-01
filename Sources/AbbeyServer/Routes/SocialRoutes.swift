@@ -81,13 +81,18 @@ enum SocialRoutes {
             guard let envelope = SocialWebhookParsers.parse(platform: platform, body: raw) else {
                 throw Abort(.unprocessableEntity, reason: "could not parse \(platform.rawValue) payload")
             }
-            await req.application.botRuntime.handleSocialEnvelope(envelope)
-            return try await TwitchEventSubAckDTO(
-                ok: true,
-                handled: true,
-                duplicate: false,
-                outcome: "social-accepted-\(platform.rawValue)"
-            ).encodeResponse(for: req)
+            let ingest = await req.application.botRuntime.handleSocialEnvelope(envelope)
+            let ack: WebhookAckDTO
+            do {
+                ack = try .forIngest(ingest, inserted: "social-ingested-\(platform.rawValue)")
+            } catch is BotRuntimeEventProcessingError {
+                req.logger.error("Social webhook persistence failed for \(platform.rawValue)")
+                throw Abort(
+                    .serviceUnavailable,
+                    reason: "Social event persistence failed; retry the delivery"
+                )
+            }
+            return try await ack.encodeResponse(for: req)
         }
     }
 }

@@ -62,10 +62,11 @@ public enum IngestScorer: Sendable {
         let strategy = StrategyAction.from(raw: action)
         let reward = strategy.shapedReward(intent: intent, quality: intent.quality)
 
-        // One-step transition: nextState is a lightly decayed copy so bootstrapping is not
-        // identical to `state` (was a hard-coded `nextState == state` / done:true dead end).
-        let nextState = state.map { $0 * 0.95 }
-        let done = intent == .unknown || strategy == .refuse
+        // This signal is available immediately, before any user reaction or moderation
+        // outcome. Model it honestly as a terminal contextual-bandit sample instead of
+        // inventing a future state and bootstrapping from synthetic dynamics.
+        let nextState = state
+        let done = true
 
         await dqnAgent.remember(
             Experience(state: state, action: action, reward: reward, nextState: nextState, done: done)
@@ -84,7 +85,6 @@ public enum IngestScorer: Sendable {
                         "userId": authorId,
                         "strategy": strategy.label,
                         "intent": intent.rawValue,
-                        "contentPreview": String(content.prefix(240)),
                     ],
                     createdAt: timestamp
                 )

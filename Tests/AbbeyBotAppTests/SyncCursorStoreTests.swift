@@ -1,3 +1,4 @@
+import AbbeyCore
 import Foundation
 import Testing
 
@@ -101,5 +102,60 @@ struct SyncCursorStoreTests {
         store.applyPullOutcome(nextCursor: nil, succeeded: true)
 
         #expect(store.lastPullSuccessAt == nil)
+    }
+
+    @Test func legacyTimestampMigratesIntoEveryEntityCursor() {
+        let defaults = makeDefaults()
+        let legacy = Date(timeIntervalSince1970: 1_700_000_000)
+        defaults.set(legacy.timeIntervalSince1970, forKey: SyncCursorStore.defaultsKey)
+
+        let cursors = SyncCursorStore(defaults: defaults).pullCursors
+
+        for entity in SyncPullEntity.allCases {
+            #expect(cursors[entity] == SyncPullCursor(changedAt: legacy))
+        }
+    }
+
+    @Test func compoundCursorSetRoundTripsAndReplacesLegacyKey() {
+        let defaults = makeDefaults()
+        defaults.set(100.0, forKey: SyncCursorStore.defaultsKey)
+        let store = SyncCursorStore(defaults: defaults)
+        let expected = SyncPullCursorSet(
+            users: SyncPullCursor(changedAt: Date(timeIntervalSince1970: 200), stableID: "g:u"),
+            messages: SyncPullCursor(changedAt: Date(timeIntervalSince1970: 300), stableID: "m-0500")
+        )
+
+        store.applyPullOutcome(nextCursors: expected, succeeded: true)
+
+        #expect(SyncCursorStore(defaults: defaults).pullCursors == expected)
+        #expect(defaults.object(forKey: SyncCursorStore.defaultsKey) == nil)
+    }
+
+    @Test func failedCompoundPullPreservesPreviousSet() {
+        let defaults = makeDefaults()
+        let store = SyncCursorStore(defaults: defaults)
+        let original = SyncPullCursorSet(
+            equity: SyncPullCursor(changedAt: Date(timeIntervalSince1970: 400), stableID: "ABBY")
+        )
+        store.record(original)
+
+        store.applyPullOutcome(nextCursors: SyncPullCursorSet(), succeeded: false)
+
+        #expect(store.pullCursors == original)
+    }
+
+    @Test func endpointNamespacesDoNotShareProgress() {
+        let defaults = makeDefaults()
+        let first = SyncCursorStore(defaults: defaults, endpoint: "HTTPS://Example.com:443/api/")
+        let equivalent = SyncCursorStore(defaults: defaults, endpoint: "https://example.com/api")
+        let other = SyncCursorStore(defaults: defaults, endpoint: "https://other.example/api")
+        let expected = SyncPullCursorSet(
+            users: SyncPullCursor(changedAt: Date(timeIntervalSince1970: 123), stableID: "g:u")
+        )
+
+        first.record(expected)
+
+        #expect(equivalent.pullCursors == expected)
+        #expect(other.pullCursors == SyncPullCursorSet())
     }
 }

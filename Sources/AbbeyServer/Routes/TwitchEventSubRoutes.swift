@@ -1,4 +1,5 @@
 import AbbeyServerKit
+import Fluent
 import Foundation
 import Vapor
 
@@ -20,15 +21,9 @@ struct TwitchEventSubSubscriptionDTO: Content {
     var status: String?
 }
 
-struct TwitchEventSubAckDTO: Content {
-    var ok: Bool
-    var handled: Bool
-    var duplicate: Bool?
-    var outcome: String?
-}
-
 enum TwitchEventSubRoutes {
-    /// Process-lifetime dedupe of EventSub message ids (not shared across instances).
+    /// Database-backed dedupe of EventSub message ids — survives restarts and is shared by
+    /// every instance pointed at the same database. Holds no state itself.
     static let replayGuard = TwitchEventSubReplayGuard()
 
     static func register(on app: Application) {
@@ -85,13 +80,25 @@ enum TwitchEventSubRoutes {
                 return Response(status: .ok, headers: headers, body: .init(string: challenge))
             }
 
-            if let messageId, !replayGuard.claim(messageId) {
-                req.logger.info(
-                    "Twitch EventSub webhook: duplicate messageId=\(messageId); acking without reprocessing"
-                )
-                return try await TwitchEventSubAckDTO(
-                    ok: true, handled: false, duplicate: true, outcome: "duplicate"
-                ).encodeResponse(for: req)
+            if let messageId {
+                // Fail closed: if the claim itself cannot be recorded we must not process,
+                // or the restart-safety this guard exists for is lost. Twitch retries on 503.
+                let claimed: Bool
+                do {
+                    claimed = try await replayGuard.claim(messageId, on: req.db)
+                } catch {
+                    req.logger.error("Twitch EventSub replay claim failed; asking Twitch to retry: \(error)")
+                    throw Abort(
+                        .serviceUnavailable,
+                        reason: "Twitch EventSub dedupe unavailable; retry the delivery"
+                    )
+                }
+                if !claimed {
+                    req.logger.info(
+                        "Twitch EventSub webhook: duplicate messageId=\(messageId); acking without reprocessing"
+                    )
+                    return try await WebhookAckDTO.duplicate.encodeResponse(for: req)
+                }
             }
 
             let messageType = req.headers.first(name: "Twitch-Eventsub-Message-Type") ?? "unknown"
@@ -103,57 +110,83 @@ enum TwitchEventSubRoutes {
             )
             req.logger.info("\(TwitchEventSubHandler.logLine(for: outcome))")
 
-            let handled: Bool
-            let outcomeLabel: String
-            switch outcome {
-            case .challenge:
-                handled = true
-                outcomeLabel = "challenge"
-            case .revocation:
-                handled = true
-                outcomeLabel = "revocation"
-            case .notificationChatIngest(let chat):
-                await req.application.botRuntime.handleTwitchChat(
-                    login: chat.chatterLogin,
-                    channel: chat.broadcasterLogin,
-                    text: chat.text
+            let ack: WebhookAckDTO
+            do {
+                ack = try await apply(outcome, deliveryId: messageId, on: req)
+            } catch {
+                // The claim is released here and only here, so it stays adjacent to the single
+                // call that can fail — Twitch is then free to retry this delivery id. A failed
+                // release must not mask the 503 below; worst case the id stays claimed until
+                // it ages out of the replay window.
+                if let messageId {
+                    do {
+                        try await replayGuard.release(messageId, on: req.db)
+                    } catch let releaseError {
+                        req.logger.error(
+                            "Twitch EventSub replay release failed for messageId=\(messageId): \(releaseError)"
+                        )
+                    }
+                }
+                req.logger.error("Twitch EventSub processing failed; delivery released for retry: \(error)")
+                throw Abort(
+                    .serviceUnavailable,
+                    reason: "Twitch EventSub processing failed; retry the delivery"
                 )
-                handled = true
-                outcomeLabel = "notification-ingested"
-            case .notificationStreamOnline(let lifecycle):
-                await req.application.botRuntime.handleTwitchStreamLifecycle(
-                    broadcasterLogin: lifecycle.broadcasterLogin,
-                    isLive: true
-                )
-                handled = true
-                outcomeLabel = "stream-online"
-            case .notificationStreamOffline(let lifecycle):
-                await req.application.botRuntime.handleTwitchStreamLifecycle(
-                    broadcasterLogin: lifecycle.broadcasterLogin,
-                    isLive: false
-                )
-                handled = true
-                outcomeLabel = "stream-offline"
-            case .notificationChannelSocial(let event):
-                await req.application.botRuntime.handleTwitchChannelSocial(
-                    kind: event.kind,
-                    broadcasterLogin: event.broadcasterLogin,
-                    actorLogin: event.actorLogin,
-                    detail: event.detail
-                )
-                handled = true
-                outcomeLabel = "channel-social"
-            case .notificationAcknowledged:
-                handled = false
-                outcomeLabel = "notification"
-            case .ignored:
-                handled = false
-                outcomeLabel = "ignored"
             }
 
-            return try await TwitchEventSubAckDTO(
-                ok: true, handled: handled, duplicate: false, outcome: outcomeLabel
-            ).encodeResponse(for: req)
+            return try await ack.encodeResponse(for: req)
+        }
+    }
+
+    /// Dispatch one classified EventSub outcome to the runtime and describe what happened.
+    /// Throwing means "we did not durably record this" — the caller turns that into a retryable
+    /// response; every non-throwing path has already committed whatever it claims in the ack.
+    private static func apply(
+        _ outcome: TwitchEventSubHandler.Outcome,
+        deliveryId: String?,
+        on req: Request
+    ) async throws -> WebhookAckDTO {
+        let runtime = req.application.botRuntime
+        switch outcome {
+        case .challenge:
+            return .handled("challenge")
+        case .revocation:
+            return .handled("revocation")
+        case .notificationChatIngest(let chat):
+            let ingest = await runtime.handleTwitchChat(
+                login: chat.chatterLogin,
+                channel: chat.broadcasterLogin,
+                text: chat.text,
+                deliveryId: deliveryId
+            )
+            // nil = the bot's own echo: accepted, deliberately not ingested, not a replay.
+            guard let ingest else { return .acknowledged("self-message") }
+            return try .forIngest(ingest, inserted: "notification-ingested")
+        case .notificationStreamOnline(let lifecycle):
+            await runtime.handleTwitchStreamLifecycle(
+                broadcasterLogin: lifecycle.broadcasterLogin,
+                isLive: true
+            )
+            return .handled("stream-online")
+        case .notificationStreamOffline(let lifecycle):
+            await runtime.handleTwitchStreamLifecycle(
+                broadcasterLogin: lifecycle.broadcasterLogin,
+                isLive: false
+            )
+            return .handled("stream-offline")
+        case .notificationChannelSocial(let event):
+            try await runtime.handleTwitchChannelSocial(
+                kind: event.kind,
+                broadcasterLogin: event.broadcasterLogin,
+                actorLogin: event.actorLogin,
+                detail: event.detail,
+                deliveryId: deliveryId
+            )
+            return .handled("channel-social")
+        case .notificationAcknowledged:
+            return .acknowledged("notification")
+        case .ignored:
+            return .acknowledged("ignored")
         }
     }
 }

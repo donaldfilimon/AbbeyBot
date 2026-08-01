@@ -40,6 +40,66 @@ struct SelfLearnWDBXTests {
         #expect(!hits.isEmpty)
         #expect(hits[0].record.id == "r1")
         #expect(hits[0].score > 0.9)
+        #expect(hits[0].record.payload["contentPreview"] == nil)
+    }
+
+    @Test func wdbxV1MigrationPhysicallyScrubsSensitivePayload() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-v1-scrub-\(UUID().uuidString)", isDirectory: true)
+        let segments = dir.appendingPathComponent("segments", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: segments, withIntermediateDirectories: true)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let secret = "private legacy message"
+        let record = WDBXRecord(
+            id: "legacy",
+            vector: [1, 0, 0],
+            payload: ["guildId": "g", "contentPreview": secret]
+        )
+        try encoder.encode(WDBXManifest(version: 1, dimension: 3, segmentCount: 1, recordCount: 1))
+            .write(to: dir.appendingPathComponent("manifest.json"), options: .atomic)
+        var line = try encoder.encode(record)
+        line.append(0x0A)
+        try line.write(to: segments.appendingPathComponent("seg-0000.jsonl"), options: .atomic)
+
+        let reopened = try WDBXStore(root: dir, dimension: 3)
+        let hit = try #require(reopened.search(query: [1, 0, 0], guildId: "g", limit: 1).first)
+        #expect(hit.record.payload["contentPreview"] == nil)
+        #expect(reopened.manifestSnapshot.version == 2)
+
+        let segmentURLs = try FileManager.default.contentsOfDirectory(
+            at: segments,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "jsonl" }
+        let persistedText = try segmentURLs
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+        #expect(!persistedText.contains("contentPreview"))
+        #expect(!persistedText.contains(secret))
+    }
+
+    @Test func immediateHeuristicRewardIsTerminalBanditExperience() async throws {
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-bandit-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let agent = DQNAgent(epsilon: 0, seed: 7, experienceJournalURL: journalURL)
+
+        let result = await IngestScorer.scoreAndLearn(
+            content: "How do I configure this?",
+            guildId: "g",
+            reputationBefore: 0.5,
+            authorInteractionCount: 1,
+            channelMessageCount: 2,
+            dqnAgent: agent
+        )
+
+        let persisted = try #require(try ExperienceJournal(url: journalURL).loadRecent(limit: 1).first)
+        #expect(persisted.done)
+        #expect(persisted.state == result.state)
+        #expect(persisted.nextState == result.state)
     }
 
     @Test func wdbxSearchIsGuildScopedAndAppliesSafeSimilarityFloor() throws {
@@ -144,6 +204,19 @@ struct SelfLearnWDBXTests {
         let reloaded = try ExperienceJournal(url: journalURL).loadRecent()
         #expect(reloaded.count == 1)
         #expect(await agent.bufferCount() == 1)
+
+        // Existing hosts may still supply both legacy inputs during migration. The
+        // facade wins as the one owner instead of appending twice to the same file.
+        let legacyURL = dir.appendingPathComponent("legacy.jsonl")
+        let legacyMemory = WDBXMemoryFacade(journalURL: legacyURL)
+        let legacyAgent = DQNAgent(
+            experienceJournalURL: legacyURL,
+            wdbxFacade: legacyMemory
+        )
+        await legacyAgent.remember(
+            Experience(state: state, action: 1, reward: 0.5, nextState: state, done: false)
+        )
+        #expect(try ExperienceJournal(url: legacyURL).loadRecent().count == 1)
     }
 
     @Test func corruptCheckpointDoesNotPartiallyMutateAgent() async throws {

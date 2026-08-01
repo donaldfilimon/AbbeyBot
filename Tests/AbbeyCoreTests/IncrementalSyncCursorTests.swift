@@ -7,64 +7,116 @@ struct IncrementalSyncCursorTests {
     private let previous = Date(timeIntervalSince1970: 100)
     private let started = Date(timeIntervalSince1970: 1_000)
 
-    @Test func shortPagesAdvanceThroughPullStart() {
-        let next = IncrementalSyncCursor.next(
-            previous: previous,
-            attemptStartedAt: started,
-            limit: 500,
-            pages: [.init(count: 12, newestChangeAt: Date(timeIntervalSince1970: 900))]
+    @Test func compoundFullPagePreservesTimestampTieBreaker() {
+        let previous = SyncPullCursor(changedAt: self.previous, stableID: "m-0001")
+        let boundary = SyncPullCursor(
+            changedAt: Date(timeIntervalSince1970: 600),
+            stableID: "m-0500"
         )
 
-        #expect(next == started)
-    }
-
-    @Test func fullPageAdvancesOnlyThroughNewestReturnedChange() {
-        let boundary = Date(timeIntervalSince1970: 600)
         let next = IncrementalSyncCursor.next(
             previous: previous,
             attemptStartedAt: started,
             limit: 500,
-            pages: [.init(count: 500, newestChangeAt: boundary)]
+            rowCount: 500,
+            serverBoundary: boundary
         )
 
         #expect(next == boundary)
     }
 
-    @Test func saturatedEndpointHoldsBackSharedCursor() {
-        let boundary = Date(timeIntervalSince1970: 450)
+    @Test func compoundShortPageAdvancesToPullStartWithoutTieBreaker() {
         let next = IncrementalSyncCursor.next(
-            previous: previous,
+            previous: SyncPullCursor(changedAt: previous, stableID: "m-0500"),
             attemptStartedAt: started,
             limit: 500,
-            pages: [
-                .init(count: 20, newestChangeAt: Date(timeIntervalSince1970: 300)),
-                .init(count: 500, newestChangeAt: boundary),
-                .init(count: 0, newestChangeAt: nil)
-            ]
+            rowCount: 1,
+            serverBoundary: SyncPullCursor(changedAt: previous, stableID: "m-0501")
         )
 
-        #expect(next == boundary)
+        #expect(next == SyncPullCursor(changedAt: started))
     }
 
-    @Test func missingTimestampOnFullPageRetainsPreviousCursor() {
+    @Test func shortPageUsesServerHighWatermarkInsteadOfClientClock() {
+        let serverHighWatermark = Date(timeIntervalSince1970: 800)
+        let next = IncrementalSyncCursor.next(
+            previous: SyncPullCursor(changedAt: previous),
+            attemptStartedAt: Date(timeIntervalSince1970: 5_000),
+            limit: 500,
+            rowCount: 0,
+            serverBoundary: nil,
+            serverHighWatermark: serverHighWatermark
+        )
+
+        #expect(next == SyncPullCursor(changedAt: serverHighWatermark))
+    }
+
+    @Test func fullPageClampsAgainstServerHighWatermark() {
+        let serverHighWatermark = Date(timeIntervalSince1970: 800)
+        let boundaryAfterSnapshot = SyncPullCursor(
+            changedAt: Date(timeIntervalSince1970: 900),
+            stableID: "m-after-snapshot"
+        )
+        let next = IncrementalSyncCursor.next(
+            previous: SyncPullCursor(changedAt: previous),
+            attemptStartedAt: started,
+            limit: 500,
+            rowCount: 500,
+            serverBoundary: boundaryAfterSnapshot,
+            serverHighWatermark: serverHighWatermark
+        )
+
+        #expect(next == SyncPullCursor(changedAt: serverHighWatermark))
+    }
+
+    @Test func compoundRepeatedBoundaryDoesNotRegressOrLoop() {
+        let previous = SyncPullCursor(changedAt: self.previous, stableID: "m-0500")
+        let repeated = SyncPullCursor(changedAt: self.previous, stableID: "m-0500")
+
         let next = IncrementalSyncCursor.next(
             previous: previous,
             attemptStartedAt: started,
             limit: 500,
-            pages: [.init(count: 500, newestChangeAt: nil)]
+            rowCount: 500,
+            serverBoundary: repeated
         )
 
         #expect(next == previous)
     }
 
-    @Test func serverClockAheadCannotAdvancePastPullStart() {
+    @Test func compoundMissingServerBoundaryOnFullPageRetainsPreviousCursor() {
+        let previous = SyncPullCursor(changedAt: self.previous, stableID: "m-0001")
+
         let next = IncrementalSyncCursor.next(
             previous: previous,
             attemptStartedAt: started,
             limit: 500,
-            pages: [.init(count: 500, newestChangeAt: Date(timeIntervalSince1970: 2_000))]
+            rowCount: 500,
+            serverBoundary: nil
         )
 
-        #expect(next == started)
+        #expect(next == previous)
+    }
+
+    @Test func compoundServerClockAheadCannotAdvancePastPullStart() {
+        let ahead = SyncPullCursor(changedAt: Date(timeIntervalSince1970: 2_000), stableID: "m-0500")
+
+        let next = IncrementalSyncCursor.next(
+            previous: SyncPullCursor(changedAt: previous, stableID: "m-0001"),
+            attemptStartedAt: started,
+            limit: 500,
+            rowCount: 500,
+            serverBoundary: ahead
+        )
+
+        #expect(next == SyncPullCursor(changedAt: started))
+    }
+
+    @Test func cursorSetExpandsLegacyTimestampAcrossEveryEntity() {
+        let set = SyncPullCursorSet(legacyTimestamp: previous)
+
+        for entity in SyncPullEntity.allCases {
+            #expect(set[entity] == SyncPullCursor(changedAt: previous))
+        }
     }
 }

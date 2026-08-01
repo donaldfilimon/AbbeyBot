@@ -53,6 +53,7 @@ public func configureRuntime(_ app: Application, defaultDatabaseURL: String) asy
     app.logger.info("Database dialect: \(dialect)")
 
     app.migrations.add(CreateAll())
+    app.migrations.add(AddSyncSourceTimestamps())
     try await app.autoMigrate()
 
     let runtime = BotRuntime(app: app)

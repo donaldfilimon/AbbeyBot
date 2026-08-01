@@ -238,6 +238,17 @@ struct AbbeyCoreTests {
         #expect(await router.route(intent: .unknown).name == "Aviva")
     }
 
+    @Test func naturalPersonaSwitchIsRequestScoped() async {
+        let router = ABIRouter(eventBus: EventBus())
+        await router.setPersona(named: "aviva")
+
+        #expect(await router.route(intent: .personaSwitch, userText: "switch to abi").name == "Abi")
+        #expect(await router.currentPersona().name == "Aviva")
+        #expect(IntentClassifier.classify("How does a Swift switch statement work?") == .question)
+        #expect(IntentClassifier.classify("switch to abi") == .personaSwitch)
+        #expect(IntentClassifier.classify("be abbey please") == .personaSwitch)
+    }
+
     @Test func memoryFactExtract() {
         #expect(MemoryFactText.extract(from: "remember tea") == "tea")
         #expect(MemoryFactText.extract(from: "Note that likes jazz") == "likes jazz")

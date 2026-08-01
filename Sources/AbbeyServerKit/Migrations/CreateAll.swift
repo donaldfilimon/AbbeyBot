@@ -82,9 +82,19 @@ public struct CreateAll: AsyncMigration {
             .field("pending_push_count", .int, .required)
             .field("reported_at", .datetime)
             .create()
+
+        // Durable Twitch EventSub dedupe. The unique constraint on message_id is what makes
+        // `TwitchEventSubReplayGuard.claim` atomic — the insert either wins or violates.
+        try await database.schema(TwitchEventSubDelivery.schema)
+            .id()
+            .field("message_id", .string, .required)
+            .field("claimed_at", .datetime, .required)
+            .unique(on: "message_id")
+            .create()
     }
 
     public func revert(on database: Database) async throws {
+        try await database.schema(TwitchEventSubDelivery.schema).delete()
         try await database.schema(SyncStatusRecord.schema).delete()
         try await database.schema(EquityIdea.schema).delete()
         try await database.schema(InteractionLog.schema).delete()
