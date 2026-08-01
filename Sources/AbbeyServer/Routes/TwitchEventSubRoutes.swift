@@ -34,40 +34,7 @@ enum TwitchEventSubRoutes {
             let rawBody = Data(bodyBuffer.readableBytesView)
             let messageId = req.headers.first(name: "Twitch-Eventsub-Message-Id")
 
-            if let secret = Environment.get("TWITCH_EVENTSUB_SECRET"), !secret.isEmpty {
-                let timestamp = req.headers.first(name: "Twitch-Eventsub-Message-Timestamp")
-                let signature = req.headers.first(name: "Twitch-Eventsub-Message-Signature")
-
-                guard let messageId, let timestamp,
-                      TwitchEventSubSignature.isWithinReplayWindow(timestamp: timestamp, now: Date()),
-                      TwitchEventSubSignature.verify(
-                          messageId: messageId,
-                          timestamp: timestamp,
-                          body: rawBody,
-                          signatureHeader: signature,
-                          secret: secret
-                      )
-                else {
-                    req.logger.warning("Twitch EventSub webhook: signature verification failed, rejecting")
-                    throw Abort(.forbidden, reason: "Invalid Twitch EventSub signature")
-                }
-            } else {
-                guard AbbeyAPIAuth.allowsExplicitWebhookBypass(
-                    req,
-                    switchName: "ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING"
-                ) else {
-                    req.logger.error(
-                        "Twitch EventSub webhook rejected: TWITCH_EVENTSUB_SECRET is not configured"
-                    )
-                    throw Abort(
-                        .serviceUnavailable,
-                        reason: "TWITCH_EVENTSUB_SECRET must be configured before enabling EventSub"
-                    )
-                }
-                req.logger.warning(
-                    "Twitch EventSub signature bypass active for dry-run/testing"
-                )
-            }
+            try verifySignature(req: req, messageId: messageId, rawBody: rawBody)
 
             let body = try req.content.decode(TwitchEventSubWebhookDTO.self)
 
@@ -135,6 +102,44 @@ enum TwitchEventSubRoutes {
             }
 
             return try await ack.encodeResponse(for: req)
+        }
+    }
+
+    /// Verify Twitch's HMAC-SHA256 signature, or fall back to an explicit, logged testing bypass
+    /// when no secret is configured. Throws to reject the delivery; returns normally to proceed.
+    private static func verifySignature(req: Request, messageId: String?, rawBody: Data) throws {
+        guard let secret = Environment.get("TWITCH_EVENTSUB_SECRET"), !secret.isEmpty else {
+            guard AbbeyAPIAuth.allowsExplicitWebhookBypass(
+                req,
+                switchName: "ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING"
+            ) else {
+                req.logger.error(
+                    "Twitch EventSub webhook rejected: TWITCH_EVENTSUB_SECRET is not configured"
+                )
+                throw Abort(
+                    .serviceUnavailable,
+                    reason: "TWITCH_EVENTSUB_SECRET must be configured before enabling EventSub"
+                )
+            }
+            req.logger.warning("Twitch EventSub signature bypass active for dry-run/testing")
+            return
+        }
+
+        let timestamp = req.headers.first(name: "Twitch-Eventsub-Message-Timestamp")
+        let signature = req.headers.first(name: "Twitch-Eventsub-Message-Signature")
+
+        guard let messageId, let timestamp,
+              TwitchEventSubSignature.isWithinReplayWindow(timestamp: timestamp, now: Date()),
+              TwitchEventSubSignature.verify(
+                  messageId: messageId,
+                  timestamp: timestamp,
+                  body: rawBody,
+                  signatureHeader: signature,
+                  secret: secret
+              )
+        else {
+            req.logger.warning("Twitch EventSub webhook: signature verification failed, rejecting")
+            throw Abort(.forbidden, reason: "Invalid Twitch EventSub signature")
         }
     }
 

@@ -32,22 +32,22 @@ enum CLISyncPull {
 
         do {
             async let usersTask = SyncPageDrain.run(
-                initialCursor: cursors.users ?? .initial, attemptStartedAt: startedAt
+                initialCursor: cursors[.users] ?? .initial, attemptStartedAt: startedAt
             ) { try await client.fetchUsersPage(cursor: $0) }
             async let channelsTask = SyncPageDrain.run(
-                initialCursor: cursors.channels ?? .initial, attemptStartedAt: startedAt
+                initialCursor: cursors[.channels] ?? .initial, attemptStartedAt: startedAt
             ) { try await client.fetchChannelsPage(cursor: $0) }
             async let messagesTask = SyncPageDrain.run(
-                initialCursor: cursors.messages ?? .initial, attemptStartedAt: startedAt
+                initialCursor: cursors[.messages] ?? .initial, attemptStartedAt: startedAt
             ) { try await client.fetchMessagesPage(cursor: $0) }
             async let reputationTask = SyncPageDrain.run(
-                initialCursor: cursors.reputation ?? .initial, attemptStartedAt: startedAt
+                initialCursor: cursors[.reputation] ?? .initial, attemptStartedAt: startedAt
             ) { try await client.fetchReputationPage(cursor: $0) }
             async let interactionsTask = SyncPageDrain.run(
-                initialCursor: cursors.interactions ?? .initial, attemptStartedAt: startedAt
+                initialCursor: cursors[.interactions] ?? .initial, attemptStartedAt: startedAt
             ) { try await client.fetchInteractionsPage(cursor: $0) }
             async let equityTask = SyncPageDrain.run(
-                initialCursor: cursors.equity ?? .initial, attemptStartedAt: startedAt
+                initialCursor: cursors[.equity] ?? .initial, attemptStartedAt: startedAt
             ) { try await client.fetchEquityPage(cursor: $0) }
 
             let usersDrain = try await usersTask
@@ -75,12 +75,12 @@ enum CLISyncPull {
             )
 
             var nextCursors = cursors
-            nextCursors.users = usersDrain.nextCursor
-            nextCursors.channels = channelsDrain.nextCursor
-            nextCursors.messages = messagesDrain.nextCursor
-            nextCursors.reputation = reputationDrain.nextCursor
-            nextCursors.interactions = interactionsDrain.nextCursor
-            nextCursors.equity = equityDrain.nextCursor
+            nextCursors[.users] = usersDrain.nextCursor
+            nextCursors[.channels] = channelsDrain.nextCursor
+            nextCursors[.messages] = messagesDrain.nextCursor
+            nextCursors[.reputation] = reputationDrain.nextCursor
+            nextCursors[.interactions] = interactionsDrain.nextCursor
+            nextCursors[.equity] = equityDrain.nextCursor
 
             do {
                 try cursorStore.applyPullOutcome(nextCursors: nextCursors, succeeded: true)

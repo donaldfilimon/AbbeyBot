@@ -50,12 +50,15 @@ Commands:
 ## Verify
 
 ```bash
-bash Scripts/run-smoke.sh
+bash Scripts/check-static-security.sh
+bash Scripts/run-web-smoke.sh
+bash Scripts/run-smoke.sh          # all five Swift test bundles + desktop launch
 bash Scripts/run-server-smoke.sh   # Postgres via compose, or sqlite file if Docker missing
-bash Scripts/verify-all.sh         # both
+bash Scripts/run-cli-smoke.sh
+bash Scripts/verify-all.sh         # complete local release gate
 ```
 
-CI (`.github/workflows/abbey-ci.yml`) builds the dashboard SPA (`bun test` + `bun run build`), then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
+CI (`.github/workflows/abbey-ci.yml`) runs the static/security check, lints/tests/builds the dashboard SPA, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`/`AbbeyServerTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
 
 **GitHub Actions billing:** this private repo's hosted workflows currently **`startup_failure` (0 jobs)** until Actions spending/quota is enabled under **Settings → Billing → Actions**. Use **`bash Scripts/verify-all.sh` locally** as the gate until then; after unblock, re-run **Abbey CI** (`abbey-ci`). CI is **not** green on GitHub today.
 
@@ -101,10 +104,10 @@ Dockerfile / docker-compose.yml
 - `GET /api/messages` / `GET /api/reputation` / `GET /api/interactions` / `GET /api/equity` — recent rows (`?limit=`, max 500)
 - `GET /` — Leaf status; Operator UI + JSON API nav; Dashboard SPA link when `Public/index.html` exists, else build hint
 
-Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” covers users/channels/messages/reputation/interactions/equity. Per-entity compound `(changedAt, stable ID)` cursors drain 500-row pages without losing equal-timestamp overflow; users/channels use LWW by `updatedAt`, equity by `generatedAt`, and all six entity types carry `deletedAt` tombstones that pull applies as local hard-deletes. Failures never advance cursors or block local SwiftData writes.
+Desktop: sidebar includes **Interactions**; Users uses `HSplitView`; Settings uses human titles and shows Server sync push/pull last success/failure. Optional sync (`ABBEY_SYNC_SERVER_URL` / `ABBEY_SYNC_API_TOKEN`) — push mirrors ingest/remember/forget; pull on launch + “Pull now” covers users/channels/messages/reputation/interactions/equity. Plain HTTP is accepted only for exact loopback hosts; remote sync requires HTTPS. Per-entity compound `(changedAt, stable ID)` cursors drain 500-row pages without losing equal-timestamp overflow; users/channels use LWW by `updatedAt`, equity by `generatedAt`, and all six entity types carry `deletedAt` tombstones that pull applies as local hard-deletes. Failures never advance cursors or block local SwiftData writes.
 
 The `abbey` CLI also syncs with the same server: `/sync pull` (own persisted per-entity compound cursor set, automatic legacy timestamp migration, same LWW/tombstone rules) and `/sync push` (messages + memory facts only — see Commands above).
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA, desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop↔server push + lossless compound-cursor pull with all-six-entity tombstones, CLI↔server sync (`/sync pull` + `/sync push`), and Twitch EventSub (HMAC verify, replay dedup, chat + stream-lifecycle handling, env-gated auto-subscribe — unverified against live Twitch). Still deferred: Discord Voice **audio** (Opus/UDP); true CRDT multi-writer merge (LWW + tombstones is the sync story instead).
+Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA, desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop↔server push + lossless compound-cursor pull with all-six-entity tombstones, CLI↔server sync (`/sync pull` + `/sync push`), and Twitch EventSub (HMAC verify, persistent replay dedup, chat + stream-lifecycle + follow/subscribe/cheer handling, env-gated six-type auto-subscribe — unverified against live Twitch). Still deferred: Discord Voice **audio** (Opus/UDP); true CRDT multi-writer merge (LWW + tombstones is the sync story instead).

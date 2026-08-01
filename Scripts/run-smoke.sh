@@ -17,8 +17,10 @@ echo "======== 1/4 debug build (macOS 27) ========"
 echo "======== 2/4 release build ========"
 "${SWIFT[@]}" build -c release --build-path "$BUILD_PATH"
 
-echo "======== 3/4 tests ========"
-"${SWIFT[@]}" test --filter AbbeyCoreTests --build-path "$BUILD_PATH"
+echo "======== 3/4 all Swift test targets ========"
+# The desktop graph contains all five test bundles. Running without a filter prevents the
+# release gate from silently omitting app, CLI, server-kit, or HTTP route tests.
+"${SWIFT[@]}" test --build-path "$BUILD_PATH"
 
 echo "======== 4/4 app launch ========"
 BIN="$BUILD_PATH/out/Products/Debug/AbbeyBot"

@@ -16,10 +16,18 @@ struct AbbeyServerClient: Sendable {
 
     private let session: URLSession
     private let outbox: PendingPushQueue?
+    private let syncServerURL: @Sendable () -> String
+    private let syncAPIToken: @Sendable () -> String
 
-    init(session: URLSession = .shared) {
+    init(
+        session: URLSession = .shared,
+        syncServerURL: @escaping @Sendable () -> String = { AppConfig.shared.syncServerURL },
+        syncAPIToken: @escaping @Sendable () -> String = { AppConfig.shared.syncAPIToken }
+    ) {
         self.session = session
         self.outbox = try? PendingPushQueue(url: PendingPushQueue.defaultURL())
+        self.syncServerURL = syncServerURL
+        self.syncAPIToken = syncAPIToken
     }
 
     /// Resend everything in the durable outbox (pushes that failed to reach the server
@@ -319,16 +327,23 @@ struct AbbeyServerClient: Sendable {
     }
 
     /// Shared base URL + optional Bearer token for POST and GET.
-    private func makeRequest(
+    func makeRequest(
         path: String,
         method: String,
         queryItems: [URLQueryItem] = []
     ) throws -> URLRequest {
-        let rawBase = AppConfig.shared.syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawBase = syncServerURL().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawBase.isEmpty else {
             throw SyncClientError.notConfigured
         }
-        let base = rawBase.hasSuffix("/") ? String(rawBase.dropLast()) : rawBase
+        let validatedBaseURL: URL
+        do {
+            validatedBaseURL = try SyncTransportPolicy.validate(baseURL: rawBase)
+        } catch {
+            throw SyncClientError.invalidURL(path)
+        }
+        let validatedBase = validatedBaseURL.absoluteString
+        let base = validatedBase.hasSuffix("/") ? String(validatedBase.dropLast()) : validatedBase
         let suffix = path.hasPrefix("/") ? path : "/\(path)"
         guard var components = URLComponents(string: base + suffix) else {
             throw SyncClientError.invalidURL(path)
@@ -342,7 +357,7 @@ struct AbbeyServerClient: Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
-        let token = AppConfig.shared.syncAPIToken
+        let token = syncAPIToken()
         if !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

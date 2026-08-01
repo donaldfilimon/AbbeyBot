@@ -120,6 +120,57 @@ struct IncrementalSyncCursorTests {
         }
     }
 
+    @Test func cursorSetEncodesReleasedFlatEntityKeys() throws {
+        let set = SyncPullCursorSet(
+            users: SyncPullCursor(
+                changedAt: Date(timeIntervalSinceReferenceDate: 123),
+                stableID: "g:u"
+            ),
+            messages: SyncPullCursor(
+                changedAt: Date(timeIntervalSinceReferenceDate: 456),
+                stableID: "m-0500"
+            )
+        )
+
+        let data = try JSONEncoder().encode(set)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(object["users"] != nil)
+        #expect(object["messages"] != nil)
+        #expect(object["values"] == nil)
+    }
+
+    @Test func cursorSetDecodesReleasedFlatV2Fixture() throws {
+        let data = Data(#"{"users":{"changedAt":123,"stableID":"g:u"},"messages":{"changedAt":456,"stableID":"m-0500"}}"#.utf8)
+
+        let set = try JSONDecoder().decode(SyncPullCursorSet.self, from: data)
+
+        #expect(set[.users] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 123),
+            stableID: "g:u"
+        ))
+        #expect(set[.messages] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 456),
+            stableID: "m-0500"
+        ))
+        #expect(set[.channels] == nil)
+    }
+
+    @Test func cursorSetDecodesTransientSynthesizedDictionaryFixture() throws {
+        let data = Data(#"{"values":["users",{"changedAt":123,"stableID":"g:u"},"messages",{"changedAt":456,"stableID":"m-0500"}]}"#.utf8)
+
+        let set = try JSONDecoder().decode(SyncPullCursorSet.self, from: data)
+
+        #expect(set[.users] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 123),
+            stableID: "g:u"
+        ))
+        #expect(set[.messages] == SyncPullCursor(
+            changedAt: Date(timeIntervalSinceReferenceDate: 456),
+            stableID: "m-0500"
+        ))
+    }
+
     @Test func drainConsumesSaturatedPageAndFinalShortPage() async throws {
         let firstBoundary = SyncPullCursor(
             changedAt: Date(timeIntervalSince1970: 600),

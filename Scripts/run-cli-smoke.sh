@@ -7,8 +7,9 @@ cd "$ROOT"
 unset TOOLCHAINS || true
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.cli.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
-SQLITE_PATH="${TMPDIR:-/tmp}/abbey-cli-smoke.sqlite"
-rm -f "$SQLITE_PATH" "${SQLITE_PATH}.isolated"
+SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-cli-smoke.XXXXXX")"
+trap 'rm -rf "$SMOKE_DIR"' EXIT
+SQLITE_PATH="$SMOKE_DIR/abbey.sqlite"
 
 echo "======== 1/3 build AbbeyBot (server graph) ========"
 export ABBEY_PACKAGE_ROLE=server
@@ -21,10 +22,16 @@ fi
 test -x "$BIN"
 
 echo "======== 2/3 boot cli with temp sqlite (dry-run) ========"
-OUT=/tmp/abbey-cli-smoke.log
+OUT="$SMOKE_DIR/cli.log"
 # `env` must wrap the binary (right side of the pipe), not printf.
 # Pin inference mode so desktop UserDefaults (e.g. remoteCompatible without endpoint) cannot block smoke.
-printf '/exit\n' | env ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
+# Exercise every command whose output is asserted below. `/exit` is last so process exit is
+# the synchronization boundary; no prompt polling or fixed sleep is required.
+printf '%s\n' '/sync' '/sync pull' '/sync push' '/exit' | \
+  env -u ABBEY_SYNC_SERVER_URL \
+  -u ABBEY_SYNC_API_TOKEN \
+  -u ABBEY_CLI_USE_SERVER_DATABASE \
+  ABBEY_DRY_RUN=1 ABBEY_INFERENCE_MODE=deterministicFloor \
   DATABASE_URL="sqlite://${SQLITE_PATH}" \
   "$BIN" cli >"$OUT" 2>&1 || {
   echo "CLI_SMOKE_FAIL: binary exit nonzero"
@@ -50,7 +57,7 @@ echo "cli_sync_push_unconfigured_ok"
 
 echo "======== 3/3 run-abbey DATABASE_URL gate ========"
 # Same gate as Scripts/run-abbey.sh: clear server Postgres URL unless opt-in.
-OUT2=/tmp/abbey-cli-smoke-gate.log
+OUT2="$SMOKE_DIR/cli-gate.log"
 (
   set -euo pipefail
   export DATABASE_URL="postgres://abbey:abbey@127.0.0.1:1/abbeybot"

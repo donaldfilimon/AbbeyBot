@@ -62,10 +62,9 @@ extension AppConfig {
 
         let sync = syncServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sync.isEmpty {
-            guard let url = URL(string: sync), let scheme = url.scheme,
-                  ["http", "https"].contains(scheme.lowercased()),
-                  url.host != nil
-            else {
+            do {
+                try SyncTransportPolicy.validate(baseURL: sync)
+            } catch {
                 throw AppConfigValidationError.syncServerURLInvalid(sync)
             }
         }

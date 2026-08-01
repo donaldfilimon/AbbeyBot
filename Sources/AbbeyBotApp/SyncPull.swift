@@ -58,12 +58,12 @@ enum SyncPull {
         attemptStartedAt: Date = .now
     ) async throws -> Counts {
         let effectiveLimit = min(max(limit, 1), defaultLimit)
-        let usersCursor = cursors.users ?? .initial
-        let channelsCursor = cursors.channels ?? .initial
-        let messagesCursor = cursors.messages ?? .initial
-        let reputationCursor = cursors.reputation ?? .initial
-        let interactionsCursor = cursors.interactions ?? .initial
-        let equityCursor = cursors.equity ?? .initial
+        let usersCursor = cursors[.users] ?? .initial
+        let channelsCursor = cursors[.channels] ?? .initial
+        let messagesCursor = cursors[.messages] ?? .initial
+        let reputationCursor = cursors[.reputation] ?? .initial
+        let interactionsCursor = cursors[.interactions] ?? .initial
+        let equityCursor = cursors[.equity] ?? .initial
 
         async let usersTask = SyncPageDrain.run(
             initialCursor: usersCursor, attemptStartedAt: attemptStartedAt, limit: effectiveLimit
@@ -108,12 +108,12 @@ enum SyncPull {
         try context.save()
 
         var nextCursors = cursors
-        nextCursors.users = usersDrain.nextCursor
-        nextCursors.channels = channelsDrain.nextCursor
-        nextCursors.messages = messagesDrain.nextCursor
-        nextCursors.reputation = reputationDrain.nextCursor
-        nextCursors.interactions = interactionsDrain.nextCursor
-        nextCursors.equity = equityDrain.nextCursor
+        nextCursors[.users] = usersDrain.nextCursor
+        nextCursors[.channels] = channelsDrain.nextCursor
+        nextCursors[.messages] = messagesDrain.nextCursor
+        nextCursors[.reputation] = reputationDrain.nextCursor
+        nextCursors[.interactions] = interactionsDrain.nextCursor
+        nextCursors[.equity] = equityDrain.nextCursor
 
         return Counts(
             usersUpserted: usersUpserted,
