@@ -77,6 +77,90 @@ private actor VoiceControllerDeferredBridge: DiscordVoiceGatewayPairBridge {
     func leaveVoice(guildID: String) async {}
 }
 
+private actor VoiceControllerDeferredRequestBridge: DiscordVoiceGatewayPairBridge {
+    private var requestContinuation: CheckedContinuation<Void, Never>?
+    private(set) var requestCount = 0
+    private(set) var leaveCount = 0
+    private(set) var requestIsSuspended = false
+
+    func requestGatewayState(guildID _: String, channelID _: String) async throws {
+        requestCount += 1
+        guard requestCount == 1 else { return }
+        requestIsSuspended = true
+        await withCheckedContinuation { continuation in
+            requestContinuation = continuation
+        }
+        requestIsSuspended = false
+    }
+
+    func awaitGatewayPair() async throws -> DiscordVoiceGatewayPair { testPair }
+
+    func leaveVoice(guildID _: String) async {
+        leaveCount += 1
+    }
+
+    func acceptFirstRequest() {
+        let continuation = requestContinuation
+        requestContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private actor VoiceControllerLeaveBarrierBridge: DiscordVoiceGatewayPairBridge {
+    private var leaveContinuation: CheckedContinuation<Void, Never>?
+    private(set) var requestCount = 0
+    private(set) var leaveCount = 0
+    private(set) var leaveIsSuspended = false
+
+    func requestGatewayState(guildID _: String, channelID _: String) async throws {
+        requestCount += 1
+    }
+
+    func awaitGatewayPair() async throws -> DiscordVoiceGatewayPair { testPair }
+
+    func leaveVoice(guildID _: String) async {
+        leaveCount += 1
+        guard leaveCount == 1 else { return }
+        leaveIsSuspended = true
+        await withCheckedContinuation { continuation in
+            leaveContinuation = continuation
+        }
+        leaveIsSuspended = false
+    }
+
+    func acknowledgeLeave() {
+        let continuation = leaveContinuation
+        leaveContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private actor VoiceControllerSequencedBridge: DiscordVoiceGatewayPairBridge {
+    private var pairFailuresRemaining: Int
+    private(set) var requestTargets: [String] = []
+    private(set) var leaveCount = 0
+
+    init(pairFailures: Int = 1) {
+        self.pairFailuresRemaining = pairFailures
+    }
+
+    func requestGatewayState(guildID: String, channelID: String) async throws {
+        requestTargets.append("\(guildID)/\(channelID)")
+    }
+
+    func awaitGatewayPair() async throws -> DiscordVoiceGatewayPair {
+        if pairFailuresRemaining > 0 {
+            pairFailuresRemaining -= 1
+            throw VoiceControllerTestError.failed
+        }
+        return testPair
+    }
+
+    func leaveVoice(guildID: String) async {
+        leaveCount += 1
+    }
+}
+
 private actor VoiceControllerTestGateway: DiscordVoiceGatewaySessionClient {
     enum FailureStage: Sendable {
         case none
@@ -302,6 +386,57 @@ struct DiscordVoiceControllerTests {
         #expect(await gateway.connectCount == 0)
     }
 
+    @Test("stopNow retains cleanup ownership while request acceptance is suspended")
+    func stopNowDuringRequestAcceptanceLeavesAcceptedAllocationOnce() async throws {
+        let bridge = VoiceControllerDeferredRequestBridge()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: VoiceControllerTestGateway(),
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration()
+        )
+        let join = Task { await controller.join(guildID: "g", channelID: "c") }
+        while await bridge.requestIsSuspended == false { await Task.yield() }
+
+        await controller.stopNow()
+        await bridge.acceptFirstRequest()
+        _ = await join.value
+        _ = await controller.leave()
+
+        #expect(await bridge.requestCount == 1)
+        #expect(await bridge.leaveCount == 1)
+        #expect(await controller.currentSnapshot().phase == .idle)
+    }
+
+    @Test("replacement waits for accepted stale request cleanup")
+    func replacementDuringRequestAcceptanceWaitsForLease() async throws {
+        let bridge = VoiceControllerDeferredRequestBridge()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: VoiceControllerTestGateway(),
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration()
+        )
+        let first = Task { await controller.join(guildID: "old", channelID: "one") }
+        while await bridge.requestIsSuspended == false { await Task.yield() }
+        let replacement = Task { await controller.join(guildID: "new", channelID: "two") }
+
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await bridge.requestCount == 1)
+        await bridge.acceptFirstRequest()
+
+        _ = await first.value
+        #expect(await replacement.value.phase == .readyMuted)
+        #expect(await bridge.requestCount == 2)
+        #expect(await bridge.leaveCount == 1)
+    }
+
     @Test("Failures map to their orchestration stage")
     func failureMapping() async throws {
         let bridgeFailure = try DiscordVoiceController(
@@ -400,6 +535,25 @@ struct DiscordVoiceControllerTests {
         #expect(reconnected.microphoneEnabled == false)
         #expect(reconnected.cameraEnabled == false)
         #expect(reconnected.screenShareEnabled == false)
+    }
+
+    @Test("ready reconnect leaves its old producer generation")
+    func readyReconnectLeavesOldGeneration() async throws {
+        let bridge = VoiceControllerTestBridge()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: VoiceControllerTestGateway(),
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration()
+        )
+
+        #expect(await controller.join(guildID: "g", channelID: "c").phase == .readyMuted)
+        #expect(await controller.reconnect().phase == .readyMuted)
+        #expect(await bridge.leaveCount == 1)
+        #expect(await bridge.requestCount == 2)
     }
 
     @Test("Snapshots are bounded, redacted, immutable values and terminate on shutdown")
@@ -509,6 +663,31 @@ struct DiscordVoiceControllerTests {
         #expect(await bridge.requestCount == 2)
     }
 
+    @Test("replacement does not request until the authoritative leave barrier releases")
+    func replacementWaitsForLeaveAcknowledgement() async throws {
+        let bridge = VoiceControllerLeaveBarrierBridge()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: VoiceControllerTestGateway(),
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration()
+        )
+
+        #expect(await controller.join(guildID: "old", channelID: "one").phase == .readyMuted)
+        let replacement = Task { await controller.join(guildID: "new", channelID: "two") }
+        while await bridge.leaveIsSuspended == false { await Task.yield() }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await bridge.requestCount == 1)
+
+        await bridge.acknowledgeLeave()
+        #expect(await replacement.value.phase == .readyMuted)
+        #expect(await bridge.requestCount == 2)
+        #expect(await bridge.leaveCount == 1)
+    }
+
     @Test("stop and repeated leave tear a session down once")
     func teardownIsIdempotent() async throws {
         let bridge = VoiceControllerTestBridge()
@@ -533,6 +712,41 @@ struct DiscordVoiceControllerTests {
         #expect(await gateway.disconnectCount == 1)
         #expect(await udp.disconnectCount == 1)
         #expect(await bridge.leaveCount == 1)
+    }
+
+    @Test("failed join leaves once while retaining its reconnect target")
+    func failedJoinLeaveOwnershipAndReconnectTarget() async throws {
+        let failedBridge = VoiceControllerSequencedBridge()
+        let failedController = try DiscordVoiceController(
+            bridge: failedBridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: VoiceControllerTestGateway(),
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration()
+        )
+
+        #expect(await failedController.join(guildID: "guild", channelID: "channel").failure == .bridgeUnavailable)
+        #expect(await failedBridge.leaveCount == 1)
+        _ = await failedController.leave()
+        #expect(await failedBridge.leaveCount == 1)
+
+        let reconnectBridge = VoiceControllerSequencedBridge()
+        let reconnectController = try DiscordVoiceController(
+            bridge: reconnectBridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: VoiceControllerTestGateway(),
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration()
+        )
+
+        #expect(await reconnectController.join(guildID: "guild", channelID: "channel").failure == .bridgeUnavailable)
+        let reconnected = await reconnectController.reconnect()
+        #expect(reconnected.phase == .readyMuted)
+        #expect(await reconnectBridge.requestTargets == ["guild/channel", "guild/channel"])
     }
 
     private func audio(generation: UInt64, byte: UInt8) -> DiscordVoiceOwnedAudioFrame {

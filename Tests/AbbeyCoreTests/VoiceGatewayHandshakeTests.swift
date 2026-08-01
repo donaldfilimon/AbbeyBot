@@ -287,6 +287,54 @@ struct VoiceGatewayHandshakeTests {
         #expect(handshake.begin(guildID: "guild", channelID: "second", userID: "bot") != nil)
     }
 
+    @Test("bridge and controller cleanup share one leaving generation")
+    func concurrentTimeoutCleanupIsIdempotent() async {
+        var handshake = VoiceGatewayHandshake()
+        guard let generation = handshake.begin(
+            guildID: "guild",
+            channelID: "channel",
+            userID: "bot"
+        ) else {
+            Issue.record("Expected initial generation")
+            return
+        }
+
+        guard case .cancelled(let timeoutGeneration) = handshake.cancel(
+            guildID: "guild",
+            generation: generation
+        ) else {
+            Issue.record("Expected bridge timeout to own cleanup")
+            return
+        }
+        #expect(timeoutGeneration == generation)
+        #expect(handshake.leavingGeneration(for: "guild") == generation)
+
+        var coordinator = DiscordVoiceLeaveCoordinator()
+        let bridgeTimeout = coordinator.acquire(guildID: "guild", generation: generation)
+        let controllerTimeout = coordinator.acquire(guildID: "guild", generation: generation)
+        #expect(bridgeTimeout.ownsCleanupOpcode)
+        #expect(!controllerTimeout.ownsCleanupOpcode)
+        #expect(bridgeTimeout.signal === controllerTimeout.signal)
+
+        // The controller's concurrent timeout sees the same leaving barrier;
+        // it cannot acquire a second cleanup generation/opcode.
+        guard case .ignored = handshake.cancel(guildID: "guild", generation: generation) else {
+            Issue.record("Duplicate cleanup must be ignored")
+            return
+        }
+        #expect(handshake.leavingGeneration(for: "guild") == generation)
+        let completedSignal = coordinator.complete(guildID: "guild", generation: generation)
+        #expect(completedSignal === bridgeTimeout.signal)
+        let bridgeWaiter = Task { await bridgeTimeout.signal.wait() }
+        let controllerWaiter = Task { await controllerTimeout.signal.wait() }
+        await completedSignal?.resolve(.expired)
+        #expect(await bridgeWaiter.value == .expired)
+        #expect(await controllerWaiter.value == .expired)
+        let expired = handshake.expire(guildID: "guild", generation: generation)
+        #expect(expired)
+        #expect(handshake.activeGuildID == nil)
+    }
+
     private func assertRejection(
         _ outcome: VoiceGatewayHandshake.Outcome,
         generation: VoiceGatewayHandshake.Generation,

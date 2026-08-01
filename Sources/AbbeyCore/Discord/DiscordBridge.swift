@@ -2,6 +2,107 @@ import Foundation
 import DiscordBM
 import Logging
 
+enum DiscordVoiceGatewayPairRequestOutcome: Equatable, Sendable {
+    case requested(VoiceGatewayHandshake.Generation)
+    case cancelled
+    case requestInProgress
+    case gatewayUnavailable
+    case invalidIdentifiers
+
+    var voiceUpdateResult: VoiceUpdateResult {
+        switch self {
+        case .requested: .requested
+        case .cancelled: .requestInProgress
+        case .requestInProgress: .requestInProgress
+        case .gatewayUnavailable: .gatewayUnavailable
+        case .invalidIdentifiers: .invalidIdentifiers
+        }
+    }
+}
+
+enum DiscordVoiceLeaveCompletion: Equatable, Sendable {
+    case acknowledged
+    case expired
+    case gatewayClosed
+}
+
+actor DiscordVoiceLeaveSignal {
+    private var completion: DiscordVoiceLeaveCompletion?
+    private var waiters: [CheckedContinuation<DiscordVoiceLeaveCompletion, Never>] = []
+
+    func wait() async -> DiscordVoiceLeaveCompletion {
+        if let completion { return completion }
+        return await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func resolve(_ completion: DiscordVoiceLeaveCompletion) {
+        guard self.completion == nil else { return }
+        self.completion = completion
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        for waiter in pending {
+            waiter.resume(returning: completion)
+        }
+    }
+}
+
+struct DiscordVoiceLeaveLease: Sendable {
+    let signal: DiscordVoiceLeaveSignal
+    let ownsCleanupOpcode: Bool
+}
+
+struct DiscordVoiceLeaveCoordinator: Sendable {
+    private struct Operation: Sendable {
+        let guildID: String
+        let generation: VoiceGatewayHandshake.Generation
+        let signal: DiscordVoiceLeaveSignal
+    }
+
+    private var operation: Operation?
+
+    var activeGuildID: String? { operation?.guildID }
+
+    mutating func acquire(
+        guildID: String,
+        generation: VoiceGatewayHandshake.Generation
+    ) -> DiscordVoiceLeaveLease {
+        if let operation,
+           operation.guildID == guildID,
+           operation.generation == generation
+        {
+            return .init(signal: operation.signal, ownsCleanupOpcode: false)
+        }
+        let signal = DiscordVoiceLeaveSignal()
+        operation = .init(guildID: guildID, generation: generation, signal: signal)
+        return .init(signal: signal, ownsCleanupOpcode: true)
+    }
+
+    mutating func complete(
+        guildID: String,
+        generation: VoiceGatewayHandshake.Generation
+    ) -> DiscordVoiceLeaveSignal? {
+        guard let operation,
+              operation.guildID == guildID,
+              operation.generation == generation
+        else { return nil }
+        self.operation = nil
+        return operation.signal
+    }
+
+    mutating func completeCurrent() -> DiscordVoiceLeaveSignal? {
+        defer { operation = nil }
+        return operation?.signal
+    }
+}
+
+private struct DiscordUntrackedVoiceLeaveOperation: Sendable {
+    let id: UInt64
+    let guildID: String
+    let signal: DiscordVoiceLeaveSignal
+}
+
 public enum DiscordConnectionState: String, Sendable {
     case disconnected
     case connecting
@@ -101,6 +202,10 @@ public actor DiscordBridge {
     private var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
     private var voiceGatewayHandshake = VoiceGatewayHandshake()
     private var voiceHandshakeDeadlineTask: Task<Void, Never>?
+    private var voiceLeaveSendTask: Task<Void, Never>?
+    private var voiceLeaveCoordinator = DiscordVoiceLeaveCoordinator()
+    private var nextUntrackedVoiceLeaveID: UInt64 = 0
+    private var untrackedVoiceLeaveOperation: DiscordUntrackedVoiceLeaveOperation?
     private var eventTask: Task<Void, Never>?
     private var lifecycle = DiscordGatewayLifecycle()
     private let voiceHandshakeTimeout: Duration
@@ -183,14 +288,20 @@ public actor DiscordBridge {
     }
 
     public func disconnect() async {
-        lifecycle.disconnect()
-        if let guildId = voiceGuildId {
-            _ = await leaveVoice(guildId: guildId)
+        // Keep consuming Gateway events while the bounded voice-leave barrier
+        // waits for Discord's self Voice State Update acknowledgement.
+        if let guildId = voiceGuildId ?? voiceGatewayHandshake.activeGuildID {
+            _ = await leaveVoiceAndWaitForAcknowledgement(guildId: guildId)
         }
+        let untrackedLeaveSignal = untrackedVoiceLeaveOperation?.signal
+        untrackedVoiceLeaveOperation = nil
+        lifecycle.disconnect()
         eventTask?.cancel()
         eventTask = nil
         voiceHandshakeDeadlineTask?.cancel()
         voiceHandshakeDeadlineTask = nil
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
         await gateway?.disconnect()
         gateway = nil
         botUserId = nil
@@ -198,18 +309,32 @@ public actor DiscordBridge {
         voiceGuildId = nil
         voiceGatewayCredentials = nil
         voiceGatewayHandshake.reset()
+        await resolveVoiceLeaveOperation(.gatewayClosed)
+        if let untrackedLeaveSignal {
+            await untrackedLeaveSignal.resolve(.gatewayClosed)
+        }
     }
 
     /// Appear in a voice channel via gateway `Voice State Update` (self-mute + self-deaf).
     /// DiscordBM has no Opus/UDP — this is presence only, not audio.
     @discardableResult
     public func joinVoice(guildId: String, channelId: String) async -> VoiceUpdateResult {
+        await requestVoiceGatewayPair(guildId: guildId, channelId: channelId).voiceUpdateResult
+    }
+
+    /// Begins the producer-owned credential attempt before opcode 4 is sent and
+    /// returns its opaque identity only to the internal media adapter.
+    func requestVoiceGatewayPair(
+        guildId: String,
+        channelId: String
+    ) async -> DiscordVoiceGatewayPairRequestOutcome {
         guard let gateway else { return .gatewayUnavailable }
+        guard untrackedVoiceLeaveOperation == nil else { return .requestInProgress }
         let trimmedGuild = guildId.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedChannel = channelId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGuild.isEmpty, !trimmedChannel.isEmpty else { return .invalidIdentifiers }
         let handshakeResult = beginVoiceGatewayHandshake(guildId: trimmedGuild, channelId: trimmedChannel)
-        guard handshakeResult == .requested else { return handshakeResult }
+        guard case .requested = handshakeResult else { return handshakeResult }
         await gateway.updateVoiceState(
             payload: VoiceStateUpdate(
                 guildId: GuildSnowflake(trimmedGuild),
@@ -218,37 +343,107 @@ public actor DiscordBridge {
                 selfDeaf: true
             )
         )
-        return .requested
+        guard case .requested(let generation) = handshakeResult,
+              voiceGatewayHandshake.generation(for: trimmedGuild) == generation
+        else {
+            return .cancelled
+        }
+        return .requested(generation)
     }
 
     /// Leave voice by sending `channel_id: null` for the guild (defaults to tracked guild).
     @discardableResult
     public func leaveVoice(guildId: String? = nil) async -> VoiceUpdateResult {
-        guard let gateway else { return .gatewayUnavailable }
+        let result = await initiateVoiceLeave(
+            guildId: guildId,
+            forceUntrackedPresence: true
+        )
+        return result.outcome
+    }
+
+    /// Internal media path: do not permit a replacement opcode 4 until Discord
+    /// acknowledges the old allocation or its generation-scoped deadline fires.
+    func leaveVoiceAndWaitForAcknowledgement(guildId: String? = nil) async -> VoiceUpdateResult {
+        let result = await initiateVoiceLeave(
+            guildId: guildId,
+            forceUntrackedPresence: false
+        )
+        if let signal = result.signal {
+            _ = await signal.wait()
+        }
+        return result.outcome
+    }
+
+    private func initiateVoiceLeave(
+        guildId: String?,
+        forceUntrackedPresence: Bool
+    ) async -> (outcome: VoiceUpdateResult, signal: DiscordVoiceLeaveSignal?) {
+        guard let gateway else { return (.gatewayUnavailable, nil) }
         let trimmed = (guildId ?? voiceGuildId)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return .invalidIdentifiers }
+        guard !trimmed.isEmpty else { return (.invalidIdentifiers, nil) }
         let cancellation = voiceGatewayHandshake.cancel(guildID: trimmed)
         if voiceGatewayCredentials?.guildID == trimmed {
             voiceGatewayCredentials = nil
         }
-        await gateway.updateVoiceState(
-            payload: VoiceStateUpdate(
-                guildId: GuildSnowflake(trimmed),
-                channelId: nil,
-                selfMute: true,
-                selfDeaf: true
+
+        let generation: VoiceGatewayHandshake.Generation?
+        switch cancellation {
+        case .cancelled(let value):
+            generation = value
+        default:
+            generation = voiceGatewayHandshake.leavingGeneration(for: trimmed)
+        }
+
+        guard let generation else {
+            guard forceUntrackedPresence else {
+                // Internal teardown is idempotent: if no producer generation
+                // remains, cleanup is already complete.
+                return (.requested, nil)
+            }
+            if let operation = untrackedVoiceLeaveOperation {
+                guard operation.guildID == trimmed else {
+                    return (.requestInProgress, nil)
+                }
+                _ = await operation.signal.wait()
+                return (.requested, nil)
+            }
+            guard voiceGatewayHandshake.activeGuildID == nil,
+                  voiceLeaveCoordinator.activeGuildID == nil
+            else {
+                return (.requestInProgress, nil)
+            }
+            // Preserve the public force-leave contract while bounding a stuck
+            // send. Until the send completes or its Gateway epoch is closed,
+            // a replacement request is rejected above.
+            let signal = startUntrackedVoiceLeave(
+                gateway: gateway,
+                guildID: trimmed
             )
+            _ = await signal.wait()
+            return (.requested, nil)
+        }
+
+        let lease = voiceLeaveCoordinator.acquire(
+            guildID: trimmed,
+            generation: generation
         )
-        // Only clear tracked presence when leaving the guild we are tracking.
-        if voiceGuildId == trimmed {
-            voiceGuildId = nil
-            voiceChannelId = nil
+        if lease.ownsCleanupOpcode {
+            scheduleVoiceLeaveDeadline(guildId: trimmed, generation: generation)
+            voiceLeaveSendTask?.cancel()
+            voiceLeaveSendTask = Task {
+                guard !Task.isCancelled else { return }
+                await gateway.updateVoiceState(
+                    payload: VoiceStateUpdate(
+                        guildId: GuildSnowflake(trimmed),
+                        channelId: nil,
+                        selfMute: true,
+                        selfDeaf: true
+                    )
+                )
+            }
         }
-        if case .cancelled(let generation) = cancellation {
-            scheduleVoiceHandshakeDeadline(guildId: trimmed, generation: generation, sendCleanupLeave: false)
-        }
-        return .requested
+        return (.requested, lease.signal)
     }
 
     /// READY events must enter through `handleGatewayEvent`, which carries the
@@ -281,11 +476,20 @@ extension DiscordBridge {
             return
         }
 
-        await AbbeyGatewayHandler(event: event, hooks: hooks, bridge: self).handleAsync()
+        await AbbeyGatewayHandler(
+            event: event,
+            hooks: hooks,
+            bridge: self,
+            generation: generation
+        ).handleAsync()
     }
 
-    private func noteEventStreamEnded(generation: DiscordGatewayLifecycle.Generation) {
+    private func noteEventStreamEnded(generation: DiscordGatewayLifecycle.Generation) async {
         guard lifecycle.eventStreamEnded(generation: generation) else { return }
+        voiceHandshakeDeadlineTask?.cancel()
+        voiceHandshakeDeadlineTask = nil
+        await resolveVoiceLeaveOperation(.gatewayClosed)
+        await resolveUntrackedVoiceLeaveOperation(.gatewayClosed)
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
@@ -296,8 +500,12 @@ extension DiscordBridge {
         logger.error("Discord bridge failure: \(DiscordGatewayLifecycle.streamEndedError)")
     }
 
-    private func noteEventStreamFailed(generation: DiscordGatewayLifecycle.Generation) {
+    private func noteEventStreamFailed(generation: DiscordGatewayLifecycle.Generation) async {
         guard lifecycle.eventStreamFailed(generation: generation) else { return }
+        voiceHandshakeDeadlineTask?.cancel()
+        voiceHandshakeDeadlineTask = nil
+        await resolveVoiceLeaveOperation(.gatewayClosed)
+        await resolveUntrackedVoiceLeaveOperation(.gatewayClosed)
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
@@ -309,7 +517,10 @@ extension DiscordBridge {
     }
 
     /// Begins correlation before Gateway opcode 4 is sent.
-    private func beginVoiceGatewayHandshake(guildId: String, channelId: String) -> VoiceUpdateResult {
+    private func beginVoiceGatewayHandshake(
+        guildId: String,
+        channelId: String
+    ) -> DiscordVoiceGatewayPairRequestOutcome {
         guard let botUserId else { return .gatewayUnavailable }
         guard let generation = voiceGatewayHandshake.begin(
             guildID: guildId,
@@ -319,14 +530,13 @@ extension DiscordBridge {
             return .requestInProgress
         }
         voiceGatewayCredentials = nil
-        scheduleVoiceHandshakeDeadline(guildId: guildId, generation: generation, sendCleanupLeave: true)
-        return .requested
+        scheduleVoiceJoinDeadline(guildId: guildId, generation: generation)
+        return .requested(generation)
     }
 
-    private func scheduleVoiceHandshakeDeadline(
+    private func scheduleVoiceJoinDeadline(
         guildId: String,
-        generation: VoiceGatewayHandshake.Generation,
-        sendCleanupLeave: Bool
+        generation: VoiceGatewayHandshake.Generation
     ) {
         voiceHandshakeDeadlineTask?.cancel()
         let timeout = voiceHandshakeTimeout
@@ -335,11 +545,7 @@ extension DiscordBridge {
             do {
                 try await sleep(timeout)
                 try Task.checkCancellation()
-                await self?.expireVoiceHandshake(
-                    guildId: guildId,
-                    generation: generation,
-                    sendCleanupLeave: sendCleanupLeave
-                )
+                await self?.timeOutVoiceJoin(guildId: guildId, generation: generation)
             } catch {
                 // Cancellation is the normal completion path after Discord
                 // confirms the current generation.
@@ -347,28 +553,148 @@ extension DiscordBridge {
         }
     }
 
-    private func expireVoiceHandshake(
+    private func scheduleVoiceLeaveDeadline(
         guildId: String,
-        generation: VoiceGatewayHandshake.Generation,
-        sendCleanupLeave: Bool
+        generation: VoiceGatewayHandshake.Generation
+    ) {
+        voiceHandshakeDeadlineTask?.cancel()
+        let timeout = voiceHandshakeTimeout
+        let sleep = voiceHandshakeSleep
+        voiceHandshakeDeadlineTask = Task { [weak self] in
+            do {
+                try await sleep(timeout)
+                try Task.checkCancellation()
+                await self?.expireVoiceLeave(guildId: guildId, generation: generation)
+            } catch {
+                // A matching acknowledgement or Gateway close owns completion.
+            }
+        }
+    }
+
+    private func startUntrackedVoiceLeave(
+        gateway: BotGatewayManager,
+        guildID: String
+    ) -> DiscordVoiceLeaveSignal {
+        nextUntrackedVoiceLeaveID &+= 1
+        let operation = DiscordUntrackedVoiceLeaveOperation(
+            id: nextUntrackedVoiceLeaveID,
+            guildID: guildID,
+            signal: DiscordVoiceLeaveSignal()
+        )
+        untrackedVoiceLeaveOperation = operation
+
+        voiceHandshakeDeadlineTask?.cancel()
+        let timeout = voiceHandshakeTimeout
+        let sleep = voiceHandshakeSleep
+        voiceHandshakeDeadlineTask = Task { [weak self] in
+            do {
+                try await sleep(timeout)
+                try Task.checkCancellation()
+                await self?.expireUntrackedVoiceLeave(id: operation.id)
+            } catch {
+                // Send completion, disconnect, or Gateway failure owns cleanup.
+            }
+        }
+
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            await gateway.updateVoiceState(
+                payload: VoiceStateUpdate(
+                    guildId: GuildSnowflake(guildID),
+                    channelId: nil,
+                    selfMute: true,
+                    selfDeaf: true
+                )
+            )
+            guard !Task.isCancelled else { return }
+            await self?.completeUntrackedVoiceLeave(id: operation.id)
+        }
+        return operation.signal
+    }
+
+    private func completeUntrackedVoiceLeave(id: UInt64) async {
+        guard let operation = untrackedVoiceLeaveOperation,
+              operation.id == id
+        else { return }
+        untrackedVoiceLeaveOperation = nil
+        voiceHandshakeDeadlineTask?.cancel()
+        voiceHandshakeDeadlineTask = nil
+        voiceLeaveSendTask = nil
+        await operation.signal.resolve(.acknowledged)
+    }
+
+    private func expireUntrackedVoiceLeave(id: UInt64) async {
+        guard let operation = untrackedVoiceLeaveOperation,
+              operation.id == id
+        else { return }
+        untrackedVoiceLeaveOperation = nil
+        voiceHandshakeDeadlineTask = nil
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
+        lifecycle.disconnect()
+        eventTask?.cancel()
+        eventTask = nil
+        let gatewayToClose = gateway
+        gateway = nil
+        botUserId = nil
+        voiceChannelId = nil
+        voiceGuildId = nil
+        voiceGatewayCredentials = nil
+        voiceGatewayHandshake.reset()
+        await gatewayToClose?.disconnect()
+        await operation.signal.resolve(.gatewayClosed)
+        logger.warning("Discord force-leave send timed out; Gateway closed before reuse")
+    }
+
+    private func timeOutVoiceJoin(
+        guildId: String,
+        generation: VoiceGatewayHandshake.Generation
     ) async {
-        guard voiceGatewayHandshake.expire(guildID: guildId, generation: generation) else { return }
+        guard case .cancelled = voiceGatewayHandshake.cancel(
+            guildID: guildId,
+            generation: generation
+        ) else { return }
         voiceHandshakeDeadlineTask = nil
         voiceGatewayCredentials = nil
-        if voiceGuildId == guildId {
-            voiceGuildId = nil
-            voiceChannelId = nil
-        }
-        logger.warning("Discord voice handshake timed out; generation invalidated")
-        guard sendCleanupLeave, let gateway else { return }
-        await gateway.updateVoiceState(
-            payload: VoiceStateUpdate(
-                guildId: GuildSnowflake(guildId),
-                channelId: nil,
-                selfMute: true,
-                selfDeaf: true
-            )
+        logger.warning("Discord voice handshake timed out; leaving generation")
+        _ = await initiateVoiceLeave(
+            guildId: guildId,
+            forceUntrackedPresence: false
         )
+    }
+
+    private func expireVoiceLeave(
+        guildId: String,
+        generation: VoiceGatewayHandshake.Generation
+    ) async {
+        guard voiceGatewayHandshake.expire(guildID: guildId, generation: generation) else { return }
+        guard let signal = voiceLeaveCoordinator.complete(
+            guildID: guildId,
+            generation: generation
+        ) else { return }
+
+        // Discord does not echo our local generation in Voice State Updates.
+        // After an unacknowledged leave expires, a late nil-channel event from
+        // this generation could otherwise cancel a replacement generation on
+        // the same Gateway event epoch. Close that epoch before releasing the
+        // barrier; acknowledgement is the only same-connection success path.
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
+        voiceHandshakeDeadlineTask = nil
+        lifecycle.disconnect()
+        eventTask?.cancel()
+        eventTask = nil
+        let gatewayToClose = gateway
+        gateway = nil
+        botUserId = nil
+        voiceChannelId = nil
+        voiceGuildId = nil
+        voiceGatewayCredentials = nil
+        voiceGatewayHandshake.reset()
+        await gatewayToClose?.disconnect()
+        await signal.resolve(.gatewayClosed)
+        logger.warning("Discord voice leave acknowledgement timed out; Gateway closed before reuse")
     }
 
     private func completeVoiceHandshakeDeadline() {
@@ -376,10 +702,52 @@ extension DiscordBridge {
         voiceHandshakeDeadlineTask = nil
     }
 
+    private func completeVoiceLeave(
+        guildId: String,
+        generation: VoiceGatewayHandshake.Generation,
+        completion: DiscordVoiceLeaveCompletion
+    ) {
+        guard let signal = voiceLeaveCoordinator.complete(
+            guildID: guildId,
+            generation: generation
+        ) else { return }
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
+        completeVoiceHandshakeDeadline()
+        if voiceGatewayCredentials?.guildID == guildId {
+            voiceGatewayCredentials = nil
+        }
+        if voiceGuildId == guildId {
+            voiceGuildId = nil
+            voiceChannelId = nil
+        }
+        Task { await signal.resolve(completion) }
+    }
+
+    private func resolveVoiceLeaveOperation(_ completion: DiscordVoiceLeaveCompletion) async {
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
+        guard let signal = voiceLeaveCoordinator.completeCurrent() else { return }
+        await signal.resolve(completion)
+    }
+
+    private func resolveUntrackedVoiceLeaveOperation(
+        _ completion: DiscordVoiceLeaveCompletion
+    ) async {
+        guard let operation = untrackedVoiceLeaveOperation else { return }
+        untrackedVoiceLeaveOperation = nil
+        voiceLeaveSendTask?.cancel()
+        voiceLeaveSendTask = nil
+        await operation.signal.resolve(completion)
+    }
+
     /// Transfers ephemeral credentials to the internal media controller once.
     /// Keeping this package-internal prevents UI/server callers from retaining
     /// or displaying the Discord voice capability.
-    func consumeVoiceGatewayCredentials() -> VoiceGatewayHandshake.Credentials? {
+    func consumeVoiceGatewayCredentials(
+        for generation: VoiceGatewayHandshake.Generation
+    ) -> VoiceGatewayHandshake.Credentials? {
+        guard voiceGatewayCredentials?.generation == generation else { return nil }
         defer { voiceGatewayCredentials = nil }
         return voiceGatewayCredentials
     }
@@ -409,8 +777,13 @@ extension DiscordBridge {
                 voiceGatewayCredentials = credentials
                 completeVoiceHandshakeDeadline()
             }
-        case .cancelled:
+        case .cancelled(let generation):
             completeVoiceHandshakeDeadline()
+            completeVoiceLeave(
+                guildId: guildId,
+                generation: generation,
+                completion: .acknowledged
+            )
             if voiceGatewayCredentials?.guildID == guildId {
                 voiceGatewayCredentials = nil
             }
@@ -427,6 +800,14 @@ extension DiscordBridge {
         case .rejected:
             break
         }
+    }
+
+    func handleVoiceStateUpdate(
+        _ payload: VoiceState,
+        generation: DiscordGatewayLifecycle.Generation
+    ) {
+        guard lifecycle.isCurrent(generation) else { return }
+        handleVoiceStateUpdate(payload)
     }
 
     /// Receives Discord's ephemeral Voice Gateway endpoint and token. The token
@@ -447,6 +828,14 @@ extension DiscordBridge {
         {
             voiceGatewayCredentials = nil
         }
+    }
+
+    func handleVoiceServerUpdate(
+        _ payload: Gateway.VoiceServerUpdate,
+        generation: DiscordGatewayLifecycle.Generation
+    ) {
+        guard lifecycle.isCurrent(generation) else { return }
+        handleVoiceServerUpdate(payload)
     }
 }
 
