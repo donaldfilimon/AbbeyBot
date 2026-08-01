@@ -125,6 +125,45 @@ private actor VoiceControllerTestGateway: DiscordVoiceGatewaySessionClient {
     }
 }
 
+private actor VoiceControllerSuspendedDisconnectGateway: DiscordVoiceGatewaySessionClient {
+    private var disconnectContinuation: CheckedContinuation<Void, Never>?
+    private(set) var connectCount = 0
+    private(set) var disconnectCount = 0
+    private(set) var isDisconnectSuspended = false
+
+    func connect(using pair: DiscordVoiceGatewayPair) async throws -> DiscordVoiceGatewayTransportReady {
+        connectCount += 1
+        return .init(
+            address: "127.0.0.1",
+            port: 5_000,
+            ssrc: 42,
+            encryptionModes: ["aead_xchacha20_poly1305_rtpsize"]
+        )
+    }
+
+    func selectTransport(_ endpoint: DiscordVoiceDiscoveredEndpoint) async throws {}
+
+    func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities {
+        .init(dave: true, aead: true, opus: true)
+    }
+
+    func disconnect() async {
+        disconnectCount += 1
+        guard disconnectCount == 1 else { return }
+        isDisconnectSuspended = true
+        await withCheckedContinuation { continuation in
+            disconnectContinuation = continuation
+        }
+        isDisconnectSuspended = false
+    }
+
+    func resumeDisconnect() {
+        let continuation = disconnectContinuation
+        disconnectContinuation = nil
+        continuation?.resume()
+    }
+}
+
 private actor VoiceControllerTestUDP: DiscordVoiceUDPDiscoverySession {
     let fails: Bool
     private(set) var disconnectCount = 0
@@ -237,11 +276,12 @@ struct DiscordVoiceControllerTests {
     @Test("stopNow wins over a late credential and prevents resurrection")
     func stopNowPreventsResurrection() async throws {
         let bridge = VoiceControllerDeferredBridge()
+        let gateway = VoiceControllerTestGateway()
         let controller = try DiscordVoiceController(
             bridge: bridge,
             factory: VoiceControllerTestFactory(
                 mediaAdapterAvailability: .fullyWired,
-                gateway: VoiceControllerTestGateway(),
+                gateway: gateway,
                 udp: VoiceControllerTestUDP()
             ),
             configuration: configuration(),
@@ -259,6 +299,7 @@ struct DiscordVoiceControllerTests {
         #expect(final.phase == .idle)
         #expect(final.generation > 1)
         #expect(final.microphoneEnabled == false)
+        #expect(await gateway.connectCount == 0)
     }
 
     @Test("Failures map to their orchestration stage")
@@ -438,7 +479,72 @@ struct DiscordVoiceControllerTests {
         #expect(await bridge.requestCount == 2)
     }
 
+    @Test("suspended teardown finishes before replacement transport connects")
+    func suspendedTeardownCannotCloseReplacement() async throws {
+        let bridge = VoiceControllerTestBridge()
+        let gateway = VoiceControllerSuspendedDisconnectGateway()
+        let udp = VoiceControllerTestUDP()
+        let factory = VoiceControllerSuspendedGatewayFactory(gateway: gateway, udp: udp)
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: factory,
+            configuration: configuration()
+        )
+
+        #expect(await controller.join(guildID: "first", channelID: "one").phase == .readyMuted)
+        await controller.stopNow()
+        while await gateway.isDisconnectSuspended == false { await Task.yield() }
+
+        let replacement = Task {
+            await controller.join(guildID: "second", channelID: "two")
+        }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(await gateway.connectCount == 1)
+        #expect(await bridge.requestCount == 1)
+
+        await gateway.resumeDisconnect()
+        let result = await replacement.value
+        #expect(result.phase == .readyMuted)
+        #expect(await gateway.connectCount == 2)
+        #expect(await bridge.requestCount == 2)
+    }
+
+    @Test("stop and repeated leave tear a session down once")
+    func teardownIsIdempotent() async throws {
+        let bridge = VoiceControllerTestBridge()
+        let gateway = VoiceControllerTestGateway()
+        let udp = VoiceControllerTestUDP()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: VoiceControllerTestFactory(
+                mediaAdapterAvailability: .fullyWired,
+                gateway: gateway,
+                udp: udp
+            ),
+            configuration: configuration()
+        )
+
+        #expect(await controller.join(guildID: "guild", channelID: "channel").phase == .readyMuted)
+        await controller.stopNow()
+        async let firstLeave = controller.leave()
+        async let secondLeave = controller.leave()
+        _ = await (firstLeave, secondLeave)
+
+        #expect(await gateway.disconnectCount == 1)
+        #expect(await udp.disconnectCount == 1)
+        #expect(await bridge.leaveCount == 1)
+    }
+
     private func audio(generation: UInt64, byte: UInt8) -> DiscordVoiceOwnedAudioFrame {
         .init(generation: generation, captureTimestamp: UInt64(byte), sampleCount: 960, bytes: [byte])
     }
+}
+
+private struct VoiceControllerSuspendedGatewayFactory: DiscordVoiceSessionFactory {
+    let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability = .fullyWired
+    let gateway: VoiceControllerSuspendedDisconnectGateway
+    let udp: VoiceControllerTestUDP
+
+    func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient { gateway }
+    func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession { udp }
 }

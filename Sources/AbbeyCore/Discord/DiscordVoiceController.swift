@@ -216,6 +216,17 @@ private struct DiscordVoiceJoinTarget: Sendable {
     let channelID: String
 }
 
+private struct DiscordVoiceDetachedSession: Sendable {
+    let gateway: (any DiscordVoiceGatewaySessionClient)?
+    let udp: (any DiscordVoiceUDPDiscoverySession)?
+    let bridge: any DiscordVoiceGatewayPairBridge
+    let guildID: String?
+
+    var needsTeardown: Bool {
+        gateway != nil || udp != nil || guildID != nil
+    }
+}
+
 private enum DiscordVoicePairRaceResult: Sendable {
     case pair(DiscordVoiceGatewayPair)
     case failure
@@ -241,6 +252,8 @@ public actor DiscordVoiceController {
     private var gatewayClient: (any DiscordVoiceGatewaySessionClient)?
     private var udpSession: (any DiscordVoiceUDPDiscoverySession)?
     private var acceptsFrames = false
+    private var nextTeardownID: UInt64 = 0
+    private var teardownTasks: [UInt64: Task<Void, Never>] = [:]
 
     private var microphoneEnabled = false
     private var cameraEnabled = false
@@ -288,20 +301,18 @@ public actor DiscordVoiceController {
 
     @discardableResult
     public func join(guildID: String, channelID: String) async -> DiscordVoiceControllerSnapshot {
-        // A replacement join owns a fresh generation and cannot share the old
-        // Gateway or UDP session. Teardown is awaited before requesting another
-        // main-Gateway capability pair.
+        // Register teardown before beginning the replacement. A stopNow task or
+        // another replacement may already own older resources, and every such
+        // task must finish before a new main-Gateway request is allowed.
         let prior = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
-        await prior.udp?.disconnect()
-        await prior.gateway?.disconnect()
-        if let guildID = prior.guildID {
-            await prior.bridge.leaveVoice(guildID: guildID)
-        }
+        enqueueTeardown(prior)
         let localGeneration = beginGeneration(
             target: DiscordVoiceJoinTarget(guildID: guildID, channelID: channelID),
             initialPhase: .requestingGatewayState
         )
+        await drainPendingTeardowns()
+        guard generation == localGeneration else { return makeSnapshot() }
         return await runJoin(generation: localGeneration)
     }
 
@@ -313,8 +324,15 @@ public actor DiscordVoiceController {
         let localGeneration = beginGeneration(target: target, initialPhase: .reconnecting)
         gatewayClient = nil
         udpSession = nil
-        await oldUDP?.disconnect()
-        await oldGateway?.disconnect()
+        enqueueTeardown(
+            DiscordVoiceDetachedSession(
+                gateway: oldGateway,
+                udp: oldUDP,
+                bridge: bridge,
+                guildID: nil
+            )
+        )
+        await drainPendingTeardowns()
         guard generation == localGeneration else { return makeSnapshot() }
         transition(to: .requestingGatewayState)
         return await runJoin(generation: localGeneration)
@@ -326,24 +344,15 @@ public actor DiscordVoiceController {
     public func stopNow() {
         let teardown = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
-        Task {
-            await teardown.udp?.disconnect()
-            await teardown.gateway?.disconnect()
-            if let guildID = teardown.guildID {
-                await teardown.bridge.leaveVoice(guildID: guildID)
-            }
-        }
+        enqueueTeardown(teardown)
     }
 
     @discardableResult
     public func leave() async -> DiscordVoiceControllerSnapshot {
         let teardown = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
-        await teardown.udp?.disconnect()
-        await teardown.gateway?.disconnect()
-        if let guildID = teardown.guildID {
-            await teardown.bridge.leaveVoice(guildID: guildID)
-        }
+        enqueueTeardown(teardown)
+        await drainPendingTeardowns()
         return makeSnapshot()
     }
 
@@ -545,12 +554,7 @@ public actor DiscordVoiceController {
         return generation
     }
 
-    private func invalidateAndDetach(clearTarget: Bool) -> (
-        gateway: (any DiscordVoiceGatewaySessionClient)?,
-        udp: (any DiscordVoiceUDPDiscoverySession)?,
-        bridge: any DiscordVoiceGatewayPairBridge,
-        guildID: String?
-    ) {
+    private func invalidateAndDetach(clearTarget: Bool) -> DiscordVoiceDetachedSession {
         generation &+= 1
         acceptsFrames = false
         microphoneEnabled = false
@@ -560,11 +564,39 @@ public actor DiscordVoiceController {
         videoQueue.removeAll()
         failure = nil
         let guildID = target?.guildID
-        let teardown = (gatewayClient, udpSession, bridge, guildID)
+        let teardown = DiscordVoiceDetachedSession(
+            gateway: gatewayClient,
+            udp: udpSession,
+            bridge: bridge,
+            guildID: guildID
+        )
         gatewayClient = nil
         udpSession = nil
         if clearTarget { target = nil }
         return teardown
+    }
+
+    private func enqueueTeardown(_ session: DiscordVoiceDetachedSession) {
+        guard session.needsTeardown else { return }
+        nextTeardownID &+= 1
+        let teardownID = nextTeardownID
+        teardownTasks[teardownID] = Task {
+            await session.udp?.disconnect()
+            await session.gateway?.disconnect()
+            if let guildID = session.guildID {
+                await session.bridge.leaveVoice(guildID: guildID)
+            }
+        }
+    }
+
+    private func drainPendingTeardowns() async {
+        while !teardownTasks.isEmpty {
+            let pending = teardownTasks
+            for (teardownID, task) in pending {
+                await task.value
+                teardownTasks.removeValue(forKey: teardownID)
+            }
+        }
     }
 
     private func fail(
@@ -586,11 +618,15 @@ public actor DiscordVoiceController {
         self.failure = failure
         phase = .failed
         publish()
-        await udp?.disconnect()
-        await gateway?.disconnect()
-        if let guildID {
-            await bridge.leaveVoice(guildID: guildID)
-        }
+        enqueueTeardown(
+            DiscordVoiceDetachedSession(
+                gateway: gateway,
+                udp: udp,
+                bridge: bridge,
+                guildID: guildID
+            )
+        )
+        await drainPendingTeardowns()
         return makeSnapshot()
     }
 
