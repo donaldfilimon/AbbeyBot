@@ -668,7 +668,7 @@ final class AbbeyEngine {
             },
             forget: { [weak self] userId, guildId, index in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                return self.forgetFact(userId: userId, guildId: guildId, index: index)
+                return await self.forgetFact(userId: userId, guildId: guildId, index: index)
             },
             context: { [weak self] channelId, guildId in
                 guard let self else { return DiscordCopy.engineUnavailable }
