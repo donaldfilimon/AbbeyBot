@@ -19,6 +19,7 @@ protocol NativeDAVEControlSession: AnyObject, Sendable {
         recognizedUserIDs: [String]
     ) async throws -> Data
     func processCommit(_ commit: Data) async throws -> NativeDAVECommitOutcome
+    func activatePendingCommit() async throws
     func processWelcome(
         _ welcome: Data,
         recognizedUserIDs: [String]
@@ -34,11 +35,26 @@ typealias NativeDAVEControlSessionFactory = @Sendable (
 ) throws -> any NativeDAVEControlSession
 
 private struct NativeDAVEPendingTransition: Sendable {
+    enum Origin: Equatable, Sendable {
+        case replacementSession
+        case activeSessionCommit
+    }
+
     let generation: UInt64
     let transitionID: UInt16
     let protocolVersion: UInt16
     let session: (any NativeDAVEControlSession)?
-    let isMediaReady: Bool
+    let origin: Origin
+    let isReadyToExecute: Bool
+    let isExecuting: Bool
+    let requiresCommitActivation: Bool
+}
+
+private struct NativeDAVEExternalSenderState: Equatable, Sendable {
+    let bytes: Data
+    let activeGeneration: UInt64
+    let groupID: UInt64
+    let selfUserID: UInt64
 }
 
 /// Owns the libdave MLS sessions shared by Voice Gateway control handling and
@@ -55,11 +71,15 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
     private var context: VoiceGatewayDAVEConnectionContext?
     private var activeSession: (any NativeDAVEControlSession)?
     private var activeGeneration: UInt64 = 0
+    private var activeProtocolVersion: UInt16?
     private var pendingTransition: NativeDAVEPendingTransition?
     private var pendingGeneration: UInt64 = 0
     private var recognizedUserIDs: [UInt64] = []
     private var recognizedMembershipGeneration: UInt64 = 0
-    private var externalSender: Data?
+    private var externalSender: NativeDAVEExternalSenderState?
+    private var externalSenderIntent: NativeDAVEExternalSenderState?
+    private var externalSenderIntentGeneration: UInt64 = 0
+    private var externalSenderPublicationGeneration: UInt64 = 0
     private let sessionFactory: NativeDAVEControlSessionFactory
 
     public nonisolated var description: String {
@@ -114,9 +134,22 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         context: VoiceGatewayDAVEConnectionContext,
         protocolVersion: UInt16
     ) async throws -> [VoiceGatewayDAVEClientMessage] {
+        let previousContext = self.context
+        let previousActiveGeneration = activeGeneration
         activeGeneration &+= 1
         let activeGeneration = self.activeGeneration
         activeSession = nil
+        activeProtocolVersion = nil
+        if previousContext?.groupID == context.groupID,
+           previousContext?.selfUserID == context.selfUserID {
+            rescopeExternalSenderState(
+                from: previousActiveGeneration,
+                to: activeGeneration,
+                context: context
+            )
+        } else {
+            invalidateExternalSenderState()
+        }
         self.context = context
         if !recognizedUserIDs.contains(context.selfUserID) {
             recognizedUserIDs.append(context.selfUserID)
@@ -133,6 +166,7 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
             throw NativeDAVEControlAdapterError.sessionUnavailable
         }
         activeSession = prepared.session
+        activeProtocolVersion = protocolVersion
         return [.keyPackage(prepared.keyPackage)]
     }
 
@@ -155,22 +189,61 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         switch (event, frame.message) {
         case (.externalSenderRetained, .externalSenderPackage(let package)):
             let marshalled = package.marshalledBytes
-            let active = activeSession
-            let activeGeneration = self.activeGeneration
-            let pending = pendingTransition
-            if let active {
-                try await active.setExternalSender(marshalled)
-                try requireCurrentActiveSession(active, generation: activeGeneration)
-                try requireCurrentPendingTransition(pending)
+            guard let context, let active = activeSession else {
+                throw NativeDAVEControlAdapterError.sessionUnavailable
             }
+            let activeGeneration = self.activeGeneration
+            externalSenderIntentGeneration &+= 1
+            let senderGeneration = externalSenderIntentGeneration
+            externalSenderIntent = NativeDAVEExternalSenderState(
+                bytes: marshalled,
+                activeGeneration: activeGeneration,
+                groupID: context.groupID,
+                selfUserID: context.selfUserID
+            )
+
+            try await stabilizeExternalSender(
+                on: active,
+                activeGeneration: activeGeneration,
+                context: context
+            )
+            try requireCurrentActiveSession(active, generation: activeGeneration)
+            try requireCurrentContext(context)
+
+            // Capture the pending session only after the active write resumes.
+            // A transition constructed during that await must receive the same
+            // latest package before this transaction can publish retention.
+            let pending = pendingTransition
             if let pendingSession = pending?.session {
-                try await pendingSession.setExternalSender(marshalled)
+                // An active-epoch candidate aliases the active session; do not
+                // send the same package twice to one libdave actor.
+                if !sameSession(pendingSession, active) {
+                    try await stabilizeExternalSender(
+                        on: pendingSession,
+                        activeGeneration: activeGeneration,
+                        context: context
+                    )
+                }
                 try requireCurrentActiveSession(active, generation: activeGeneration)
+                try requireCurrentContext(context)
                 try requireCurrentPendingTransition(pending)
             }
             try requireCurrentActiveSession(active, generation: activeGeneration)
-            try requireCurrentPendingTransition(pending)
-            externalSender = marshalled
+            try requireCurrentContext(context)
+            if pending != nil {
+                try requireCurrentPendingTransition(pending)
+            }
+            guard externalSenderIntentGeneration == senderGeneration,
+                  let latest = externalSenderIntent,
+                  externalSenderState(latest, matches: activeGeneration, context: context)
+            else {
+                // A newer same-context transaction owns publication. This
+                // older call may have converged the native actors to its value,
+                // but it must never overwrite retained state.
+                return []
+            }
+            externalSender = latest
+            externalSenderPublicationGeneration &+= 1
             return []
 
         case (.transitionPrepared(let transitionID), .prepareTransition(let preparation)):
@@ -184,7 +257,10 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
                 transitionID: transitionID,
                 protocolVersion: preparation.protocolVersion,
                 session: nil,
-                isMediaReady: preparation.protocolVersion == 0
+                origin: .replacementSession,
+                isReadyToExecute: preparation.protocolVersion == 0,
+                isExecuting: false,
+                requiresCommitActivation: false
             )
             return [.transitionReady(
                 VoiceGatewayDAVETransitionReady(transitionID: transitionID)
@@ -208,11 +284,18 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
                 transitionID: epoch.transitionID,
                 protocolVersion: epoch.protocolVersion,
                 session: prepared.session,
-                isMediaReady: false
+                origin: .replacementSession,
+                isReadyToExecute: false,
+                isExecuting: false,
+                requiresCommitActivation: false
             )
             return [.keyPackage(prepared.keyPackage)]
 
         case (.mlsPayloadReceived(.proposals), .proposals(let proposals)):
+            if pendingTransition?.isExecuting == true
+                || pendingTransition?.origin == .activeSessionCommit {
+                throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
+            }
             let pending = pendingTransition.flatMap { transition in
                 transition.protocolVersion > 0 && transition.session != nil
                     ? transition
@@ -236,7 +319,17 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
                     pending: pending,
                     activeGeneration: activeGeneration
                 )
-                try requireCurrentRecognizedMembership(membership.generation)
+                try requireCurrentMembershipOrDiscardMutatedSession(
+                    membership.generation,
+                    session: proposalSession,
+                    pending: pending,
+                    activeGeneration: activeGeneration
+                )
+                discardMutatedProposalSessionIfCurrent(
+                    proposalSession,
+                    pending: pending,
+                    activeGeneration: activeGeneration
+                )
                 throw error
             }
             try requireCurrentProposalSession(
@@ -244,33 +337,63 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
                 pending: pending,
                 activeGeneration: activeGeneration
             )
-            try requireCurrentRecognizedMembership(membership.generation)
+            try requireCurrentMembershipOrDiscardMutatedSession(
+                membership.generation,
+                session: proposalSession,
+                pending: pending,
+                activeGeneration: activeGeneration
+            )
             return [.commitWelcome(try VoiceGatewayDAVEOpaquePayload(commitWelcome))]
 
         case (.requiresMLSProcessing(let transitionID), .announceCommitTransition(let commit)):
             guard transitionID == commit.transitionID else {
                 throw NativeDAVEControlAdapterError.transitionEventMismatch
             }
-            let pending = try pendingSession(for: transitionID)
+            let pending = try commitSession(for: transitionID)
+            let isActiveSessionCommit = pendingTransition?.generation == pending.generation
+                && pendingTransition?.origin == .activeSessionCommit
             do {
                 let outcome = try await pending.session.processCommit(commit.commit.bytes)
                 switch outcome {
                 case .applied:
-                    return try await markPendingMediaReady(pending)
+                    return try markPendingCommitReady(pending)
                 case .ignored:
                     try requireCurrentPendingSession(pending)
                     return []
                 }
             } catch let error as NativeMediaError where error.isInvalidMLSControlInput {
+                guard isCurrentPendingSession(pending) else {
+                    if isActiveSessionCommit {
+                        poisonActiveSessionIfCurrent(
+                            pending.session,
+                            transitionGeneration: pending.generation
+                        )
+                    }
+                    throw NativeDAVEControlAdapterError.staleOperation
+                }
                 return try await recoveryMessages(
                     transitionID: transitionID,
                     poisonedGeneration: pending.generation
                 )
+            } catch {
+                if isActiveSessionCommit {
+                    poisonActiveSessionIfCurrent(
+                        pending.session,
+                        transitionGeneration: pending.generation
+                    )
+                } else if isCurrentPendingSession(pending),
+                          let current = pendingTransition {
+                    invalidatePendingTransitionIfCurrent(current)
+                }
+                throw error
             }
 
         case (.requiresMLSProcessing(let transitionID), .welcome(let welcome)):
             guard transitionID == welcome.transitionID else {
                 throw NativeDAVEControlAdapterError.transitionEventMismatch
+            }
+            guard pendingTransition?.origin == .replacementSession else {
+                throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
             }
             let pending = try pendingSession(for: transitionID)
             let membership = recognizedMembershipSnapshot()
@@ -279,21 +402,35 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
                     welcome.welcome.bytes,
                     recognizedUserIDs: membership.userIDs
                 )
-                try requireCurrentRecognizedMembership(membership.generation)
+                try requireCurrentMembershipOrDiscardPendingSession(
+                    membership.generation,
+                    processed: pending
+                )
                 return try await markPendingMediaReady(
                     pending,
                     recognizedMembershipGeneration: membership.generation
                 )
+            } catch let error as NativeDAVEControlAdapterError {
+                throw error
             } catch let error as NativeMediaError where error.isInvalidMLSControlInput {
-                try requireCurrentRecognizedMembership(membership.generation)
+                try requireCurrentMembershipOrDiscardPendingSession(
+                    membership.generation,
+                    processed: pending
+                )
                 return try await recoveryMessages(
                     transitionID: transitionID,
                     poisonedGeneration: pending.generation,
                     recognizedMembershipGeneration: membership.generation
                 )
             } catch {
-                try requireCurrentRecognizedMembership(membership.generation)
                 try requireCurrentPendingSession(pending)
+                try requireCurrentMembershipOrDiscardPendingSession(
+                    membership.generation,
+                    processed: pending
+                )
+                if let current = pendingTransition {
+                    invalidatePendingTransitionIfCurrent(current)
+                }
                 throw error
             }
 
@@ -303,7 +440,8 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
             }
             guard let pendingTransition,
                   pendingTransition.transitionID == transitionID,
-                  pendingTransition.isMediaReady
+                  pendingTransition.isReadyToExecute,
+                  !pendingTransition.isExecuting
             else {
                 throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
             }
@@ -312,10 +450,57 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
             {
                 throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
             }
-            // No suspension occurs between validating the correlation/readiness
-            // and publishing the new media epoch.
+
+            let executing = NativeDAVEPendingTransition(
+                generation: pendingTransition.generation,
+                transitionID: pendingTransition.transitionID,
+                protocolVersion: pendingTransition.protocolVersion,
+                session: pendingTransition.session,
+                origin: pendingTransition.origin,
+                isReadyToExecute: true,
+                isExecuting: true,
+                requiresCommitActivation: pendingTransition.requiresCommitActivation
+            )
+            self.pendingTransition = executing
+            if executing.requiresCommitActivation,
+               let session = executing.session {
+                do {
+                    try await session.activatePendingCommit()
+                } catch {
+                    if executing.origin == .activeSessionCommit {
+                        poisonActiveSessionIfCurrent(
+                            session,
+                            transitionGeneration: executing.generation
+                        )
+                    } else {
+                        invalidatePendingTransitionIfCurrent(executing)
+                    }
+                    throw error
+                }
+                try requireCurrentPendingTransition(executing)
+                if executing.origin == .activeSessionCommit,
+                   !sameSession(activeSession, session) {
+                    throw NativeDAVEControlAdapterError.staleOperation
+                }
+            }
+
+            // No suspension remains between validating the execution lease and
+            // publishing the new media epoch.
+            let previousActiveGeneration = activeGeneration
             activeGeneration &+= 1
-            activeSession = pendingTransition.session
+            activeSession = executing.session
+            activeProtocolVersion = executing.protocolVersion > 0
+                ? executing.protocolVersion
+                : nil
+            if executing.protocolVersion > 0, let context {
+                rescopeExternalSenderState(
+                    from: previousActiveGeneration,
+                    to: activeGeneration,
+                    context: context
+                )
+            } else {
+                invalidateExternalSenderState()
+            }
             self.pendingTransition = nil
             return []
 
@@ -327,12 +512,13 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
     public func reset() {
         activeGeneration &+= 1
         activeSession = nil
+        activeProtocolVersion = nil
         pendingTransition = nil
         pendingGeneration &+= 1
         context = nil
         recognizedUserIDs.removeAll(keepingCapacity: false)
         recognizedMembershipGeneration &+= 1
-        externalSender = nil
+        invalidateExternalSenderState()
     }
 
     private func recoveryMessages(
@@ -354,6 +540,11 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         // Remove the poisoned session before any await so a re-entrant Execute
         // cannot promote it. The generation reserves this recovery transaction;
         // a newer control event wins instead of being overwritten on resume.
+        if poisoned.origin == .activeSessionCommit,
+           let poisonedSession = poisoned.session,
+           activeSession === poisonedSession {
+            invalidateActiveSessionPreservingValidatedSender()
+        }
         let generation = invalidatePendingTransition()
         let prepared = try await makeSession(protocolVersion: protocolVersion)
         if let recognizedMembershipGeneration {
@@ -367,7 +558,10 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
             transitionID: transitionID,
             protocolVersion: protocolVersion,
             session: prepared.session,
-            isMediaReady: false
+            origin: .replacementSession,
+            isReadyToExecute: false,
+            isExecuting: false,
+            requiresCommitActivation: false
         )
         return [
             .invalidCommitWelcome(
@@ -383,25 +577,60 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         session: any NativeDAVEControlSession,
         keyPackage: VoiceGatewayDAVEOpaquePayload
     ) {
-        guard let context else {
-            throw NativeDAVEControlAdapterError.sessionUnavailable
+        for _ in 0..<3 {
+            guard let context else {
+                throw NativeDAVEControlAdapterError.sessionUnavailable
+            }
+            let intentGeneration = externalSenderIntentGeneration
+            let publicationGeneration = externalSenderPublicationGeneration
+            if let intent = externalSenderIntent,
+               externalSenderState(
+                   intent,
+                   matches: activeGeneration,
+                   context: context
+               ),
+               externalSender != intent {
+                // A current-context sender write has begun but has not yet
+                // passed transaction validation. Building a Key Package from
+                // the previously published sender would mix generations.
+                throw NativeDAVEControlAdapterError.staleOperation
+            }
+            let sender = externalSender.flatMap { state in
+                externalSenderState(
+                    state,
+                    matches: activeGeneration,
+                    context: context
+                ) ? state.bytes : nil
+            }
+            let replacement = try sessionFactory(
+                protocolVersion,
+                context.groupID,
+                String(context.selfUserID)
+            )
+            if let sender {
+                try await replacement.setExternalSender(sender)
+            }
+            let keyPackage = try await replacement.marshalledKeyPackage()
+            guard externalSenderIntentGeneration == intentGeneration,
+                  externalSenderPublicationGeneration == publicationGeneration,
+                  isCurrentContext(context)
+            else {
+                // This replacement contains a Key Package derived from an old
+                // External Sender. Drop it and retry; never publish it.
+                continue
+            }
+            let opaque = try VoiceGatewayDAVEOpaquePayload(keyPackage)
+            return (replacement, opaque)
         }
-        let replacement = try sessionFactory(
-            protocolVersion,
-            context.groupID,
-            String(context.selfUserID)
-        )
-        if let externalSender {
-            try await replacement.setExternalSender(externalSender)
-        }
-        let keyPackage = try await replacement.marshalledKeyPackage()
-        let opaque = try VoiceGatewayDAVEOpaquePayload(keyPackage)
-        return (replacement, opaque)
+        throw NativeDAVEControlAdapterError.staleOperation
     }
 
     private func requireCompatiblePendingTransition(_ transitionID: UInt16) throws {
         guard pendingTransition == nil
-                || pendingTransition?.transitionID == transitionID
+                || (pendingTransition?.transitionID == transitionID
+                    && pendingTransition?.origin == .replacementSession
+                    && pendingTransition?.session == nil
+                    && pendingTransition?.isExecuting == false)
         else {
             throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
         }
@@ -427,6 +656,11 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         case (.some(let current), .some(let operation)):
             guard current.generation == operation.generation,
                   current.transitionID == operation.transitionID,
+                  current.protocolVersion == operation.protocolVersion,
+                  current.origin == operation.origin,
+                  current.isReadyToExecute == operation.isReadyToExecute,
+                  current.isExecuting == operation.isExecuting,
+                  current.requiresCommitActivation == operation.requiresCommitActivation,
                   sameSession(current.session, operation.session)
             else {
                 throw NativeDAVEControlAdapterError.staleOperation
@@ -476,6 +710,186 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         }
     }
 
+    private func requireCurrentMembershipOrDiscardMutatedSession(
+        _ membershipGeneration: UInt64,
+        session: any NativeDAVEControlSession,
+        pending operationTransition: NativeDAVEPendingTransition?,
+        activeGeneration operationActiveGeneration: UInt64
+    ) throws {
+        guard recognizedMembershipGeneration != membershipGeneration else { return }
+        if let operationTransition {
+            invalidatePendingTransitionIfCurrent(operationTransition)
+        } else if activeGeneration == operationActiveGeneration,
+                  activeSession === session {
+            // processProposals is stateful. Once its roster snapshot is stale,
+            // the active MLS object cannot remain observable even though its
+            // output is rejected. A fresh beginSession is the recovery point.
+            invalidateActiveSessionPreservingValidatedSender()
+            if let pendingTransition,
+               pendingTransition.session === session {
+                _ = invalidatePendingTransition()
+            }
+        }
+        throw NativeDAVEControlAdapterError.staleOperation
+    }
+
+    private func discardMutatedProposalSessionIfCurrent(
+        _ session: any NativeDAVEControlSession,
+        pending operationTransition: NativeDAVEPendingTransition?,
+        activeGeneration operationActiveGeneration: UInt64
+    ) {
+        if let operationTransition {
+            invalidatePendingTransitionIfCurrent(operationTransition)
+        } else if activeGeneration == operationActiveGeneration,
+                  activeSession === session {
+            invalidateActiveSessionPreservingValidatedSender()
+            if let pendingTransition,
+               pendingTransition.session === session {
+                _ = invalidatePendingTransition()
+            }
+        }
+    }
+
+    private func requireCurrentMembershipOrDiscardPendingSession(
+        _ membershipGeneration: UInt64,
+        processed: (
+            generation: UInt64,
+            session: any NativeDAVEControlSession
+        )
+    ) throws {
+        guard recognizedMembershipGeneration != membershipGeneration else { return }
+        if let pendingTransition,
+           pendingTransition.generation == processed.generation,
+           pendingTransition.session === processed.session {
+            _ = invalidatePendingTransition()
+        }
+        throw NativeDAVEControlAdapterError.staleOperation
+    }
+
+    private func stabilizeExternalSender(
+        on session: any NativeDAVEControlSession,
+        activeGeneration operationActiveGeneration: UInt64,
+        context operationContext: VoiceGatewayDAVEConnectionContext
+    ) async throws {
+        for _ in 0..<3 {
+            let appliedGeneration = externalSenderIntentGeneration
+            guard let sender = externalSenderIntent,
+                  externalSenderState(
+                      sender,
+                      matches: operationActiveGeneration,
+                      context: operationContext
+                  )
+            else {
+                throw NativeDAVEControlAdapterError.staleOperation
+            }
+            try await session.setExternalSender(sender.bytes)
+            try requireCurrentContext(operationContext)
+            guard activeGeneration == operationActiveGeneration else {
+                throw NativeDAVEControlAdapterError.staleOperation
+            }
+            guard externalSenderIntentGeneration != appliedGeneration else { return }
+        }
+        throw NativeDAVEControlAdapterError.staleOperation
+    }
+
+    private func requireCurrentContext(
+        _ operationContext: VoiceGatewayDAVEConnectionContext
+    ) throws {
+        guard isCurrentContext(operationContext) else {
+            throw NativeDAVEControlAdapterError.staleOperation
+        }
+    }
+
+    private func isCurrentContext(
+        _ operationContext: VoiceGatewayDAVEConnectionContext
+    ) -> Bool {
+        context?.groupID == operationContext.groupID
+            && context?.selfUserID == operationContext.selfUserID
+    }
+
+    private func externalSenderState(
+        _ state: NativeDAVEExternalSenderState,
+        matches operationActiveGeneration: UInt64,
+        context operationContext: VoiceGatewayDAVEConnectionContext
+    ) -> Bool {
+        state.activeGeneration == operationActiveGeneration
+            && state.groupID == operationContext.groupID
+            && state.selfUserID == operationContext.selfUserID
+    }
+
+    private func invalidateExternalSenderState() {
+        externalSender = nil
+        externalSenderIntent = nil
+        externalSenderIntentGeneration &+= 1
+        externalSenderPublicationGeneration &+= 1
+    }
+
+    private func invalidateActiveSessionPreservingValidatedSender() {
+        let previousGeneration = activeGeneration
+        activeGeneration &+= 1
+        activeSession = nil
+        activeProtocolVersion = nil
+        if let context {
+            rescopeExternalSenderState(
+                from: previousGeneration,
+                to: activeGeneration,
+                context: context
+            )
+        } else {
+            invalidateExternalSenderState()
+        }
+    }
+
+    private func rescopeExternalSenderState(
+        from previousGeneration: UInt64,
+        to currentGeneration: UInt64,
+        context: VoiceGatewayDAVEConnectionContext
+    ) {
+        guard let published = externalSender,
+              published == externalSenderIntent,
+              externalSenderState(
+                  published,
+                  matches: previousGeneration,
+                  context: context
+              )
+        else {
+            invalidateExternalSenderState()
+            return
+        }
+        let rescoped = NativeDAVEExternalSenderState(
+            bytes: published.bytes,
+            activeGeneration: currentGeneration,
+            groupID: context.groupID,
+            selfUserID: context.selfUserID
+        )
+        externalSender = rescoped
+        externalSenderIntent = rescoped
+        externalSenderIntentGeneration &+= 1
+        externalSenderPublicationGeneration &+= 1
+    }
+
+    private func invalidatePendingTransitionIfCurrent(
+        _ operationTransition: NativeDAVEPendingTransition
+    ) {
+        guard let current = pendingTransition,
+              current.generation == operationTransition.generation,
+              current.transitionID == operationTransition.transitionID,
+              sameSession(current.session, operationTransition.session)
+        else { return }
+        _ = invalidatePendingTransition()
+    }
+
+    private func poisonActiveSessionIfCurrent(
+        _ session: any NativeDAVEControlSession,
+        transitionGeneration: UInt64
+    ) {
+        guard activeSession === session else { return }
+        invalidateActiveSessionPreservingValidatedSender()
+        if pendingTransition?.generation == transitionGeneration {
+            _ = invalidatePendingTransition()
+        }
+    }
+
     private func pendingSession(
         for transitionID: UInt16
     ) throws -> (
@@ -484,11 +898,42 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
     ) {
         guard let pendingTransition,
               pendingTransition.transitionID == transitionID,
+              !pendingTransition.isExecuting,
               let session = pendingTransition.session
         else {
             throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
         }
         return (pendingTransition.generation, session)
+    }
+
+    private func commitSession(
+        for transitionID: UInt16
+    ) throws -> (
+        generation: UInt64,
+        session: any NativeDAVEControlSession
+    ) {
+        if pendingTransition != nil {
+            return try pendingSession(for: transitionID)
+        }
+        guard let activeSession,
+              let activeProtocolVersion,
+              activeProtocolVersion > 0
+        else {
+            throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
+        }
+        pendingGeneration &+= 1
+        let transition = NativeDAVEPendingTransition(
+            generation: pendingGeneration,
+            transitionID: transitionID,
+            protocolVersion: activeProtocolVersion,
+            session: activeSession,
+            origin: .activeSessionCommit,
+            isReadyToExecute: false,
+            isExecuting: false,
+            requiresCommitActivation: false
+        )
+        pendingTransition = transition
+        return (transition.generation, activeSession)
     }
 
     private func markPendingMediaReady(
@@ -500,12 +945,16 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
     ) async throws -> [VoiceGatewayDAVEClientMessage] {
         let isMediaReady = await processed.session.isMediaReady
         if let recognizedMembershipGeneration {
-            try requireCurrentRecognizedMembership(recognizedMembershipGeneration)
+            try requireCurrentMembershipOrDiscardPendingSession(
+                recognizedMembershipGeneration,
+                processed: processed
+            )
         }
         guard isMediaReady,
               let pendingTransition,
               pendingTransition.generation == processed.generation,
-              pendingTransition.session === processed.session
+              pendingTransition.session === processed.session,
+              !pendingTransition.isExecuting
         else {
             throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
         }
@@ -514,7 +963,40 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
             transitionID: pendingTransition.transitionID,
             protocolVersion: pendingTransition.protocolVersion,
             session: pendingTransition.session,
-            isMediaReady: true
+            origin: pendingTransition.origin,
+            isReadyToExecute: true,
+            isExecuting: false,
+            requiresCommitActivation: false
+        )
+        return [.transitionReady(
+            VoiceGatewayDAVETransitionReady(
+                transitionID: pendingTransition.transitionID
+            )
+        )]
+    }
+
+    private func markPendingCommitReady(
+        _ processed: (
+            generation: UInt64,
+            session: any NativeDAVEControlSession
+        )
+    ) throws -> [VoiceGatewayDAVEClientMessage] {
+        guard let pendingTransition,
+              pendingTransition.generation == processed.generation,
+              pendingTransition.session === processed.session,
+              !pendingTransition.isExecuting
+        else {
+            throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
+        }
+        self.pendingTransition = NativeDAVEPendingTransition(
+            generation: pendingTransition.generation,
+            transitionID: pendingTransition.transitionID,
+            protocolVersion: pendingTransition.protocolVersion,
+            session: pendingTransition.session,
+            origin: pendingTransition.origin,
+            isReadyToExecute: true,
+            isExecuting: false,
+            requiresCommitActivation: true
         )
         return [.transitionReady(
             VoiceGatewayDAVETransitionReady(
@@ -535,6 +1017,17 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
         else {
             throw NativeDAVEControlAdapterError.transitionProtocolUnavailable
         }
+    }
+
+    private func isCurrentPendingSession(
+        _ processed: (
+            generation: UInt64,
+            session: any NativeDAVEControlSession
+        )
+    ) -> Bool {
+        guard let pendingTransition else { return false }
+        return pendingTransition.generation == processed.generation
+            && pendingTransition.session === processed.session
     }
 
     @discardableResult

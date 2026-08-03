@@ -179,6 +179,102 @@ struct NativeDAVEControlAdapterTests {
         #expect(await pending.proposalCallCount == 3)
     }
 
+    @Test("active-group Proposals Commit Execute stages ratchets until Execute")
+    func activeGroupCommitStagesUntilExecute() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(initiallyReady: true, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 750, selfUserID: 751)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let active = try #require(factory.session(at: 0))
+
+        let proposalOutput = try await adapter.handle(
+            proposalsFrame(),
+            event: .mlsPayloadReceived(.proposals)
+        )
+        #expect(proposalOutput.map(\.opcode) == [.commitWelcome])
+        #expect(await active.proposalCallCount == 1)
+
+        let ready = try await adapter.handle(
+            commitFrame(transitionID: 21),
+            event: .requiresMLSProcessing(21)
+        )
+        #expect(ready.map(\.opcode) == [.transitionReady])
+        #expect(await active.commitCallCount == 1)
+        #expect(await active.commitActivationCallCount == 0)
+        #expect(await active.isMediaReady)
+
+        _ = try await adapter.handle(
+            executeFrame(transitionID: 21),
+            event: .transitionExecuted(21)
+        )
+        #expect(await active.commitActivationCallCount == 1)
+        #expect(await active.isMediaReady)
+    }
+
+    @Test("discarding an active Commit candidate never activates its ratchets")
+    func discardedActiveCommitCandidateDoesNotActivate() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(initiallyReady: true, processing: .succeed),
+            .init(initiallyReady: true, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 760, selfUserID: 761)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let discarded = try #require(factory.session(at: 0))
+        _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        _ = try await adapter.handle(
+            commitFrame(transitionID: 22),
+            event: .requiresMLSProcessing(22)
+        )
+
+        await adapter.reset()
+        #expect(await discarded.commitActivationCallCount == 0)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let replacement = try #require(factory.session(at: 1))
+        await #expect(throws: NativeDAVEControlAdapterError.transitionProtocolUnavailable) {
+            _ = try await adapter.handle(
+                executeFrame(transitionID: 22),
+                event: .transitionExecuted(22)
+            )
+        }
+        #expect(await discarded.commitActivationCallCount == 0)
+        #expect(await replacement.commitActivationCallCount == 0)
+    }
+
+    @Test("Welcome cannot complete an active Commit candidate before Execute")
+    func welcomeCannotBypassActiveCommitExecute() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(initiallyReady: true, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 770, selfUserID: 771)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let active = try #require(factory.session(at: 0))
+        _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        _ = try await adapter.handle(
+            commitFrame(transitionID: 23),
+            event: .requiresMLSProcessing(23)
+        )
+
+        await #expect(throws: NativeDAVEControlAdapterError.transitionProtocolUnavailable) {
+            _ = try await adapter.handle(
+                welcomeFrame(transitionID: 23),
+                event: .requiresMLSProcessing(23)
+            )
+        }
+        #expect(await active.welcomeCallCount == 0)
+        #expect(await active.commitActivationCallCount == 0)
+        #expect(await active.isMediaReady)
+
+        _ = try await adapter.handle(
+            executeFrame(transitionID: 23),
+            event: .transitionExecuted(23)
+        )
+        #expect(await active.commitActivationCallCount == 1)
+    }
+
     @Test("overlapping and stale IDs cannot replace or execute a pending downgrade")
     func overlappingStaleAndDuplicateExecute() async throws {
         let adapter = NativeDAVEControlAdapter()
@@ -271,6 +367,35 @@ struct NativeDAVEControlAdapterTests {
         )
         _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
         #expect(await replacement.proposalCallCount == 2)
+    }
+
+    @Test("active Commit recovery preserves a validated same-context External Sender")
+    func activeCommitRecoveryPreservesExternalSender() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(
+                initiallyReady: true,
+                processing: .failNative(.daveCommitFailed)
+            ),
+            .init(initiallyReady: false, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 950, selfUserID: 951)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let senderFrame = try externalSenderFrame(signature: 0x91, credential: 0x92)
+        _ = try await adapter.handle(senderFrame, event: .externalSenderRetained)
+        let poisoned = try #require(factory.session(at: 0))
+        #expect(await poisoned.externalSenderValues.last == senderFrame.externalSenderBytes)
+
+        _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        let recovery = try await adapter.handle(
+            commitFrame(transitionID: 45),
+            event: .requiresMLSProcessing(45)
+        )
+
+        #expect(recovery.map(\.opcode) == [.invalidCommitWelcome, .keyPackage])
+        let replacement = try #require(factory.session(at: 1))
+        #expect(await replacement.externalSenderCallCount == 1)
+        #expect(await replacement.externalSenderValues.last == senderFrame.externalSenderBytes)
     }
 
     @Test("non-native processing errors propagate without manufacturing recovery")
@@ -388,7 +513,7 @@ struct NativeDAVEControlAdapterTests {
         #expect(await replacement.proposalCallCount == 1)
     }
 
-    @Test("a suspended External Sender cannot write through a replacement begin")
+    @Test("a suspended External Sender cannot seed a replacement begin")
     func suspendedExternalSenderCannotCompleteAfterReplacement() async throws {
         let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
             .init(
@@ -430,6 +555,7 @@ struct NativeDAVEControlAdapterTests {
             _ = try await senderTask.value
         }
         #expect(await replacement.externalSenderCallCount == 0)
+        #expect(await replacement.externalSenderValues.isEmpty)
 
         _ = try await adapter.handle(
             prepareEpochFrame(transitionID: 70, epoch: 7),
@@ -441,6 +567,7 @@ struct NativeDAVEControlAdapterTests {
         )
         let pending = try #require(factory.session(at: 2))
         #expect(await pending.externalSenderCallCount == 0)
+        #expect(await pending.externalSenderValues.isEmpty)
     }
 
     @Test("duplicated transition fields must match before state or native work")
@@ -602,6 +729,42 @@ struct NativeDAVEControlAdapterTests {
         }
     }
 
+    @Test("membership-stale active Proposals poisons the session until a fresh begin")
+    func membershipChangePoisonsActiveProposalsAndRecoversOnBegin() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(
+                initiallyReady: true,
+                processing: .succeed,
+                suspensions: [.proposals]
+            ),
+            .init(initiallyReady: true, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 1_750, selfUserID: 1_751)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let poisoned = try #require(factory.session(at: 0))
+
+        let proposalTask = Task {
+            try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        }
+        await poisoned.waitUntilStarted(.proposals)
+        await adapter.replaceRecognizedUserIDs([1_751, 1_752])
+        await poisoned.release(.proposals)
+
+        await #expect(throws: NativeDAVEControlAdapterError.staleOperation) {
+            _ = try await proposalTask.value
+        }
+        #expect(await adapter.mediaSession() == nil)
+        await #expect(throws: NativeDAVEControlAdapterError.sessionUnavailable) {
+            _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        }
+
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let replacement = try #require(factory.session(at: 1))
+        _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        #expect(await replacement.proposalCallCount == 1)
+    }
+
     @Test("membership replacement invalidates a suspended Welcome before readiness")
     func membershipChangeInvalidatesSuspendedWelcome() async throws {
         let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
@@ -611,6 +774,7 @@ struct NativeDAVEControlAdapterTests {
                 processing: .succeed,
                 suspensions: [.welcome]
             ),
+            .init(initiallyReady: false, processing: .succeed),
         ])
         let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
         let context = try VoiceGatewayDAVEConnectionContext(groupID: 1_800, selfUserID: 1_801)
@@ -644,6 +808,99 @@ struct NativeDAVEControlAdapterTests {
                 event: .transitionExecuted(110)
             )
         }
+
+        _ = try await adapter.handle(
+            prepareEpochFrame(transitionID: 110, epoch: 12),
+            event: .epochAnnounced(.init(
+                protocolVersion: 1,
+                transitionID: 110,
+                epoch: 12
+            ))
+        )
+        let replacement = try #require(factory.session(at: 2))
+        _ = try await adapter.handle(
+            welcomeFrame(transitionID: 110),
+            event: .requiresMLSProcessing(110)
+        )
+        _ = try await adapter.handle(
+            executeFrame(transitionID: 110),
+            event: .transitionExecuted(110)
+        )
+        #expect(await replacement.welcomeCallCount == 1)
+    }
+
+    @Test("an older External Sender completion cannot overwrite a newer package")
+    func olderExternalSenderCompletionConvergesToNewestPackage() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(
+                initiallyReady: true,
+                processing: .succeed,
+                suspensions: [.externalSender]
+            ),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 1_850, selfUserID: 1_851)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let active = try #require(factory.session(at: 0))
+        let olderFrame = try externalSenderFrame(signature: 0xA1, credential: 0xA2)
+        let newerFrame = try externalSenderFrame(signature: 0xB1, credential: 0xB2)
+
+        let olderTask = Task {
+            try await adapter.handle(olderFrame, event: .externalSenderRetained)
+        }
+        await active.waitUntilStarted(.externalSender)
+        _ = try await adapter.handle(newerFrame, event: .externalSenderRetained)
+        await active.release(.externalSender)
+        _ = try await olderTask.value
+
+        #expect(await active.externalSenderValues.last == newerFrame.externalSenderBytes)
+    }
+
+    @Test("session construction retries when a newer External Sender overtakes it")
+    func externalSenderOvertakingConstructionDropsStaleCandidate() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(initiallyReady: true, processing: .succeed),
+            .init(
+                initiallyReady: false,
+                processing: .succeed,
+                suspensions: [.externalSender]
+            ),
+            .init(initiallyReady: false, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 1_860, selfUserID: 1_861)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let olderFrame = try externalSenderFrame(signature: 0xC1, credential: 0xC2)
+        let newerFrame = try externalSenderFrame(signature: 0xD1, credential: 0xD2)
+        _ = try await adapter.handle(olderFrame, event: .externalSenderRetained)
+
+        let prepareTask = Task {
+            try await adapter.handle(
+                prepareEpochFrame(transitionID: 115, epoch: 13),
+                event: .epochAnnounced(.init(
+                    protocolVersion: 1,
+                    transitionID: 115,
+                    epoch: 13
+                ))
+            )
+        }
+        for _ in 0..<1_000 where factory.sessionCount < 2 {
+            await Task.yield()
+        }
+        let staleCandidate = try #require(factory.session(at: 1))
+        await staleCandidate.waitUntilStarted(.externalSender)
+        _ = try await adapter.handle(newerFrame, event: .externalSenderRetained)
+        await staleCandidate.release(.externalSender)
+        let outbound = try await prepareTask.value
+
+        #expect(outbound.map(\.opcode) == [.keyPackage])
+        #expect(factory.sessionCount == 3)
+        let publishedCandidate = try #require(factory.session(at: 2))
+        #expect(await staleCandidate.externalSenderValues.last == olderFrame.externalSenderBytes)
+        #expect(await publishedCandidate.externalSenderValues.last == newerFrame.externalSenderBytes)
+        _ = try await adapter.handle(proposalsFrame(), event: .mlsPayloadReceived(.proposals))
+        #expect(await staleCandidate.proposalCallCount == 0)
+        #expect(await publishedCandidate.proposalCallCount == 1)
     }
 
     @Test("an ignored duplicate Commit emits no readiness and cannot execute")
@@ -705,14 +962,24 @@ private func prepareEpochFrame(
     )
 }
 
-private func externalSenderFrame() throws -> VoiceGatewayDAVEInboundFrame {
+private func externalSenderFrame(
+    signature: UInt8 = 0xAA,
+    credential: UInt8 = 0xBB
+) throws -> VoiceGatewayDAVEInboundFrame {
     VoiceGatewayDAVEInboundFrame(
         sequence: nil,
         message: .externalSenderPackage(.init(
-            signatureKey: try VoiceGatewayDAVEOpaquePayload(Data([0xAA])),
-            credentialIdentity: try VoiceGatewayDAVEOpaquePayload(Data([0xBB]))
+            signatureKey: try VoiceGatewayDAVEOpaquePayload(Data([signature])),
+            credentialIdentity: try VoiceGatewayDAVEOpaquePayload(Data([credential]))
         ))
     )
+}
+
+private extension VoiceGatewayDAVEInboundFrame {
+    var externalSenderBytes: Data? {
+        guard case .externalSenderPackage(let package) = message else { return nil }
+        return package.marshalledBytes
+    }
 }
 
 private func executeFrame(transitionID: UInt16) -> VoiceGatewayDAVEInboundFrame {
@@ -838,8 +1105,12 @@ private actor NativeDAVEControlSessionDouble: NativeDAVEControlSession {
     private(set) var proposalCallCount = 0
     private(set) var externalSenderCallCount = 0
     private(set) var commitCallCount = 0
+    private(set) var commitActivationCallCount = 0
     private(set) var welcomeCallCount = 0
+    private(set) var externalSenderValues: [Data] = []
+    private var hasPendingCommit = false
     private var startedSuspensions: Set<Suspension> = []
+    private var consumedSuspensions: Set<Suspension> = []
     private var startWaiters: [Suspension: [CheckedContinuation<Void, Never>]] = [:]
     private var releaseWaiters: [Suspension: [CheckedContinuation<Void, Never>]] = [:]
 
@@ -856,8 +1127,9 @@ private actor NativeDAVEControlSessionDouble: NativeDAVEControlSession {
     }
 
     func marshalledKeyPackage() -> Data { Data([keyPackageMarker]) }
-    func setExternalSender(_: Data) async {
+    func setExternalSender(_ bytes: Data) async {
         externalSenderCallCount += 1
+        externalSenderValues.append(bytes)
         await suspendIfConfigured(.externalSender)
     }
 
@@ -872,11 +1144,26 @@ private actor NativeDAVEControlSessionDouble: NativeDAVEControlSession {
 
     func processCommit(_: Data) throws -> NativeDAVECommitOutcome {
         commitCallCount += 1
-        if case .ignoreCommit = processing {
+        switch processing {
+        case .ignoreCommit:
+            hasPendingCommit = false
             return .ignored
+        case .succeed:
+            hasPendingCommit = true
+            return .applied(rosterMemberIDs: [])
+        case .failNative, .failForeign:
+            try finishProcessing()
+            return .applied(rosterMemberIDs: [])
         }
-        try finishProcessing()
-        return .applied(rosterMemberIDs: [])
+    }
+
+    func activatePendingCommit() throws {
+        commitActivationCallCount += 1
+        guard hasPendingCommit else {
+            throw NativeMediaError.daveCommitFailed
+        }
+        hasPendingCommit = false
+        isMediaReady = true
     }
 
     func processWelcome(
@@ -915,7 +1202,9 @@ private actor NativeDAVEControlSessionDouble: NativeDAVEControlSession {
     }
 
     private func suspendIfConfigured(_ suspension: Suspension) async {
-        guard suspensions.contains(suspension) else { return }
+        guard suspensions.contains(suspension),
+              consumedSuspensions.insert(suspension).inserted
+        else { return }
         startedSuspensions.insert(suspension)
         let waiters = startWaiters.removeValue(forKey: suspension) ?? []
         for waiter in waiters { waiter.resume() }
