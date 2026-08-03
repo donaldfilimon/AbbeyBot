@@ -471,13 +471,29 @@ struct MediaSessionModelTests {
         #expect(await bridge.didStartRequest())
         #expect(model.isOperationInFlight)
 
-        await model.disconnect()
+        let requesting = await controller.currentSnapshot()
+        let disconnect = Task { @MainActor in
+            await model.disconnect()
+        }
+        for _ in 0..<100 {
+            let current = await controller.currentSnapshot()
+            if current.phase == .idle, current.generation > requesting.generation { break }
+            await Task.yield()
+        }
+        let preempted = await controller.currentSnapshot()
+        #expect(preempted.phase == .idle)
+        #expect(preempted.generation > requesting.generation)
+
+        // Teardown deliberately waits for the accepted-request lease. Release
+        // the fake request only after disconnect has invalidated its generation;
+        // awaiting disconnect before this point would deadlock the test itself.
+        await bridge.resumeRequest()
+        await disconnect.value
+        await join.value
+
         #expect(model.snapshot.phase == .idle)
         #expect(model.isOperationInFlight == false)
         #expect(await bridge.leaveCalls() == 1)
-
-        await bridge.resumeRequest()
-        await join.value
         for _ in 0..<4 { await Task.yield() }
 
         #expect(model.snapshot.phase == .idle)
