@@ -135,7 +135,7 @@ public struct VoiceGatewayV8Endpoint: Equatable, Sendable, CustomStringConvertib
     }
 }
 
-private enum VoiceGatewayV8Bounds {
+enum VoiceGatewayV8Bounds {
     static let identifier = 128
     static let sessionID = 512
     static let token = 4_096
@@ -164,13 +164,23 @@ public struct VoiceGatewayV8Identify: Codable, Equatable, Sendable,
     /// Highest DAVE protocol version the active media runtime can complete.
     /// Portable callers default to zero and therefore remain fail-closed.
     public let maxDAVEProtocolVersion: Int
+    /// Whether this connection supports video (documented Identify field,
+    /// default false when omitted). Signaling advertisement only — no video
+    /// media path exists in this repository.
+    public let video: Bool?
+    /// Proposed simulcast streams to send. The voice server assigns the real
+    /// SSRCs in Ready. Omitted entirely when nil, preserving the historical
+    /// audio-only wire shape.
+    public let streams: [VoiceGatewayV8Stream]?
 
     public init(
         serverID: String,
         userID: String,
         sessionID: String,
         token: String,
-        maxDAVEProtocolVersion: Int = 0
+        maxDAVEProtocolVersion: Int = 0,
+        video: Bool? = nil,
+        streams: [VoiceGatewayV8Stream]? = nil
     ) throws {
         try VoiceGatewayV8Bounds.require(serverID, field: "server_id", maximum: VoiceGatewayV8Bounds.identifier)
         try VoiceGatewayV8Bounds.require(userID, field: "user_id", maximum: VoiceGatewayV8Bounds.identifier)
@@ -179,11 +189,17 @@ public struct VoiceGatewayV8Identify: Codable, Equatable, Sendable,
         guard (0...VoiceGatewayV8Bounds.maximumDAVEProtocolVersion).contains(maxDAVEProtocolVersion) else {
             throw VoiceGatewayV8Error.unsupportedDAVEVersion(maxDAVEProtocolVersion)
         }
+        if let streams {
+            guard video == true else { throw VoiceGatewayV8Error.malformedPayload }
+            try VoiceGatewayV8VideoValidation.validateIdentifyStreams(streams)
+        }
         self.serverID = serverID
         self.userID = userID
         self.sessionID = sessionID
         self.token = token
         self.maxDAVEProtocolVersion = maxDAVEProtocolVersion
+        self.video = video
+        self.streams = try streams.map { try $0.map { try $0.validated() } }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -192,6 +208,8 @@ public struct VoiceGatewayV8Identify: Codable, Equatable, Sendable,
         case sessionID = "session_id"
         case token
         case maxDAVEProtocolVersion = "max_dave_protocol_version"
+        case video
+        case streams
     }
 
     public var description: String {
@@ -254,8 +272,17 @@ public struct VoiceGatewayV8Ready: Codable, Equatable, Sendable {
     public let ip: String
     public let port: UInt16
     public let modes: [String]
+    /// Populated simulcast streams: the server-assigned local send SSRCs for
+    /// the streams offered in Identify. Absent on audio-only connections.
+    public let streams: [VoiceGatewayV8Stream]?
 
-    public init(ssrc: UInt32, ip: String, port: UInt16, modes: [String]) throws {
+    public init(
+        ssrc: UInt32,
+        ip: String,
+        port: UInt16,
+        modes: [String],
+        streams: [VoiceGatewayV8Stream]? = nil
+    ) throws {
         try VoiceGatewayV8Bounds.require(ip, field: "ip", maximum: VoiceGatewayV8Bounds.address)
         guard port > 0, !modes.isEmpty, modes.count <= VoiceGatewayV8Bounds.maximumModes else {
             throw VoiceGatewayV8Error.invalidReadyPayload
@@ -263,13 +290,27 @@ public struct VoiceGatewayV8Ready: Codable, Equatable, Sendable {
         for mode in modes {
             try VoiceGatewayV8Bounds.require(mode, field: "mode", maximum: VoiceGatewayV8Bounds.mode)
         }
+        let validatedStreams = try streams.map { try $0.map { try $0.validated() } }
+        if let validatedStreams {
+            try VoiceGatewayV8VideoValidation.validateNegotiatedStreams(
+                validatedStreams,
+                audioSSRC: ssrc,
+                requireType: true,
+                failure: .invalidReadyPayload
+            )
+        } else if ssrc == 0 {
+            throw VoiceGatewayV8Error.invalidReadyPayload
+        }
         self.ssrc = ssrc
         self.ip = ip
         self.port = port
         self.modes = modes
+        self.streams = validatedStreams
     }
 
-    fileprivate func validated() throws -> Self { try Self(ssrc: ssrc, ip: ip, port: port, modes: modes) }
+    fileprivate func validated() throws -> Self {
+        try Self(ssrc: ssrc, ip: ip, port: port, modes: modes, streams: streams)
+    }
 }
 
 public struct VoiceGatewayV8SelectProtocol: Codable, Equatable, Sendable {
@@ -461,6 +502,10 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
     case heartbeat(VoiceGatewayV8Heartbeat)
     case speaking(VoiceGatewayV8Speaking)
     case resume(VoiceGatewayV8Resume)
+    /// Video state announcement (signaling only; no media path exists).
+    case video(VoiceGatewayV8Video)
+    /// Desired remote media stream quality (signaling only).
+    case mediaSinkWants(VoiceGatewayV8MediaSinkWants)
 
     enum CodingKeys: String, CodingKey { case op, d }
 
@@ -482,6 +527,13 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
         case .resume(let payload):
             try container.encode(VoiceGatewayV8Resume.opcode, forKey: .op)
             try container.encode(payload, forKey: .d)
+        case .video(let payload):
+            try payload.validateForOutboundEncoding()
+            try container.encode(VoiceGatewayV8Video.opcode, forKey: .op)
+            try container.encode(payload, forKey: .d)
+        case .mediaSinkWants(let payload):
+            try container.encode(VoiceGatewayV8MediaSinkWants.opcode, forKey: .op)
+            try container.encode(payload, forKey: .d)
         }
     }
 
@@ -492,9 +544,36 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
         case .heartbeat(let value): "VoiceGatewayV8Outbound.heartbeat(\(value))"
         case .speaking(let value): "VoiceGatewayV8Outbound.speaking(\(value))"
         case .resume(let value): "VoiceGatewayV8Outbound.resume(\(value))"
+        case .video(let value): "VoiceGatewayV8Outbound.video(\(value))"
+        case .mediaSinkWants(let value): "VoiceGatewayV8Outbound.mediaSinkWants(\(value))"
         }
     }
     public var debugDescription: String { description }
+}
+
+private extension VoiceGatewayV8Video {
+    /// Opcode 12 is direction-asymmetric. Discord's inbound event adds
+    /// `user_id` and may omit the top-level RTX SSRC, while AbbeyBot's outbound
+    /// announcement must never impersonate a server event and must identify the
+    /// exact primary/RTX pair it will send. Keep this validation at the encoder
+    /// boundary so valid inbound fixtures remain decodable.
+    func validateForOutboundEncoding() throws {
+        guard userID == nil else { throw VoiceGatewayV8Error.malformedPayload }
+
+        if streams.isEmpty {
+            guard videoSSRC == 0, rtxSSRC == 0 else {
+                throw VoiceGatewayV8Error.malformedPayload
+            }
+            return
+        }
+
+        guard videoSSRC != 0,
+              let outboundRTXSSRC = rtxSSRC,
+              outboundRTXSSRC != 0,
+              let selected = streams.first(where: { $0.ssrc == videoSSRC }),
+              selected.derivedRTXSSRC == outboundRTXSSRC
+        else { throw VoiceGatewayV8Error.malformedPayload }
+    }
 }
 
 public struct VoiceGatewayV8Inbound: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -507,6 +586,10 @@ public struct VoiceGatewayV8Inbound: Sendable, CustomStringConvertible, CustomDe
         case resumed(VoiceGatewayV8Resumed)
         case clientsConnect(VoiceGatewayV8ClientsConnect)
         case clientDisconnect(VoiceGatewayV8ClientDisconnect)
+        /// A user's video state was announced (signaling only).
+        case video(VoiceGatewayV8Video)
+        /// Requested media stream quality updated (signaling only).
+        case mediaSinkWants(VoiceGatewayV8MediaSinkWants)
     }
 
     public let sequence: Int?
@@ -522,6 +605,8 @@ public struct VoiceGatewayV8Inbound: Sendable, CustomStringConvertible, CustomDe
         case .resumed: "resumed"
         case .clientsConnect: "clientsConnect"
         case .clientDisconnect: "clientDisconnect"
+        case .video: "video"
+        case .mediaSinkWants: "mediaSinkWants"
         }
         return "VoiceGatewayV8Inbound(sequence: \(sequence.map(String.init) ?? "nil"), payload: \(name))"
     }
@@ -574,6 +659,12 @@ public enum VoiceGatewayV8Decoder {
             case VoiceGatewayV8ClientDisconnect.opcode:
                 let envelope = try decoder.decode(Envelope<VoiceGatewayV8ClientDisconnect>.self, from: data)
                 return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .clientDisconnect(try envelope.d.validated()))
+            case VoiceGatewayV8Video.opcode:
+                let envelope = try decoder.decode(Envelope<VoiceGatewayV8Video>.self, from: data)
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .video(try envelope.d.validated()))
+            case VoiceGatewayV8MediaSinkWants.opcode:
+                let envelope = try decoder.decode(Envelope<VoiceGatewayV8MediaSinkWants>.self, from: data)
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .mediaSinkWants(try envelope.d.validated()))
             default:
                 throw VoiceGatewayV8Error.unsupportedOpcode(header.op)
             }

@@ -16,6 +16,7 @@ struct DiscordView: View {
             slashCommandsSection
             voiceTransportSection
             privacySection
+            localCaptureSection
             deviceSection
 
             Section("Intents") {
@@ -34,6 +35,9 @@ struct DiscordView: View {
         .formStyle(.grouped)
         .padding()
         .navigationTitle("Discord")
+        .onDisappear {
+            Task { await engine.mediaSession.stopLocalCaptureWhenViewDisappears() }
+        }
         .task {
             await engine.refreshDiscordStatus()
             await engine.mediaSession.refreshPrivacyStatus()
@@ -222,6 +226,74 @@ struct DiscordView: View {
             Text("Meters remain at zero because capture/playback is not connected to Discord media.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder
+    private var localCaptureSection: some View {
+        Section("Local video capture — preview only") {
+            Text(MediaSessionCopy.localPreviewOnly)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(engine.mediaSession.localCaptureActive ? Color.green : Color.secondary)
+                    .frame(width: 8, height: 8)
+                Text(
+                    engine.mediaSession.localCaptureActive
+                        ? "Local capture active — nothing is transmitted"
+                        : "Local capture stopped"
+                )
+                .font(.caption)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                engine.mediaSession.localCaptureActive
+                    ? "Local capture active, nothing is transmitted"
+                    : "Local capture stopped"
+            )
+
+            ControlGroup {
+                Button("Start camera (local preview)") {
+                    Task { await engine.mediaSession.startCameraCapture() }
+                }
+                .help("Start LOCAL camera capture with an in-app preview. Frames are never transmitted.")
+                .disabled(
+                    engine.mediaSession.mediaDisabled
+                        || engine.mediaSession.isOperationInFlight
+                        || engine.mediaSession.localVideoCaptureActive
+                )
+
+                Button("Start screen capture (local only)") {
+                    Task { await engine.mediaSession.startScreenCapture() }
+                }
+                .help("Start LOCAL screen capture. Frames are never transmitted.")
+                .disabled(
+                    engine.mediaSession.mediaDisabled
+                        || engine.mediaSession.isOperationInFlight
+                        || engine.mediaSession.localVideoCaptureActive
+                )
+
+                Button("Stop local capture", role: .destructive) {
+                    Task { await engine.mediaSession.stopLocalCapture() }
+                }
+                .help("Stop local capture immediately via the kill switch. Discord signaling is untouched.")
+                .disabled(!engine.mediaSession.localCaptureActive || engine.mediaSession.isOperationInFlight)
+            }
+
+            if let preview = engine.mediaSession.cameraPreviewImage {
+                Image(decorative: preview, scale: 1)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 320, maxHeight: 180)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .accessibilityLabel("Local camera preview — not transmitted")
+            } else if engine.mediaSession.runtime.cameraCapturing {
+                Text("Camera capture is active locally; waiting for the first preview frame…")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 

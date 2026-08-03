@@ -1,5 +1,7 @@
 import AbbeyCore
 import AbbeyMediaMacOS
+import CoreVideo
+import Foundation
 import Testing
 @testable import AbbeyBotApp
 
@@ -96,6 +98,8 @@ private struct MediaSessionPlatformCalls: Equatable, Sendable {
     var inputSelections: [String?] = []
     var outputSelections: [String?] = []
     var runtimeSnapshots = 0
+    var cameraStarts = 0
+    var screenStarts = 0
     var stopCalls = 0
 }
 
@@ -109,8 +113,16 @@ private actor FakeMediaSessionPlatform: MediaSessionPlatform {
     private var permissionFails = false
     private var inputError: MediaRuntimeError?
     private var outputError: MediaRuntimeError?
+    private var captureStartError: VideoCaptureError?
     private var shouldSuspendNextStop = false
     private var pendingStop: CheckedContinuation<Void, Never>?
+    private var shouldSuspendNextRuntimeSnapshot = false
+    private var pendingRuntimeSnapshot: CheckedContinuation<MediaSessionRuntimeSnapshot, Never>?
+    private var pendingRuntimeSnapshotValue: MediaSessionRuntimeSnapshot?
+    private var runtimeSnapshotSuspensionObservers: [CheckedContinuation<Void, Never>] = []
+    private var captureGeneration: UInt64 = 0
+    private let captureEventStream: AsyncStream<VideoCaptureEvent>
+    private let captureEventContinuation: AsyncStream<VideoCaptureEvent>.Continuation
 
     init(
         disabled: Bool = false,
@@ -119,6 +131,11 @@ private actor FakeMediaSessionPlatform: MediaSessionPlatform {
         devices: [MediaSessionDevice] = [],
         runtime: MediaSessionRuntimeSnapshot = .stopped
     ) {
+        let eventPair = AsyncStream<VideoCaptureEvent>.makeStream(
+            bufferingPolicy: .bufferingNewest(8)
+        )
+        captureEventStream = eventPair.stream
+        captureEventContinuation = eventPair.continuation
         self.disabled = disabled
         self.statuses = statuses
         self.requestedStatuses = requestedStatuses
@@ -163,11 +180,57 @@ private actor FakeMediaSessionPlatform: MediaSessionPlatform {
 
     func runtimeSnapshot() async -> MediaSessionRuntimeSnapshot {
         calls.runtimeSnapshots += 1
-        return runtime
+        let capturedRuntime = runtime
+        guard shouldSuspendNextRuntimeSnapshot else { return capturedRuntime }
+        shouldSuspendNextRuntimeSnapshot = false
+        return await withCheckedContinuation { continuation in
+            pendingRuntimeSnapshot = continuation
+            pendingRuntimeSnapshotValue = capturedRuntime
+            let observers = runtimeSnapshotSuspensionObservers
+            runtimeSnapshotSuspensionObservers.removeAll()
+            observers.forEach { $0.resume() }
+        }
+    }
+
+    func startCameraCapture() async throws -> UInt64 {
+        calls.cameraStarts += 1
+        if let captureStartError { throw captureStartError }
+        captureGeneration &+= 1
+        runtime = MediaSessionRuntimeSnapshot(
+            microphoneCapturing: false,
+            cameraCapturing: true,
+            screenCapturing: false,
+            inputLevel: 0,
+            outputLevel: 0
+        )
+        publishStatus(.capturing)
+        return captureGeneration
+    }
+
+    func startScreenCapture() async throws -> UInt64 {
+        calls.screenStarts += 1
+        if let captureStartError { throw captureStartError }
+        captureGeneration &+= 1
+        runtime = MediaSessionRuntimeSnapshot(
+            microphoneCapturing: false,
+            cameraCapturing: false,
+            screenCapturing: true,
+            inputLevel: 0,
+            outputLevel: 0
+        )
+        publishStatus(.capturing)
+        return captureGeneration
+    }
+
+    func captureEvents() -> AsyncStream<VideoCaptureEvent> {
+        captureEventStream
     }
 
     func stopAllCapture() async {
         calls.stopCalls += 1
+        captureGeneration &+= 1
+        runtime = .stopped
+        publishStatus(.stopped)
         guard shouldSuspendNextStop else { return }
         shouldSuspendNextStop = false
         await withCheckedContinuation { continuation in
@@ -189,6 +252,10 @@ private actor FakeMediaSessionPlatform: MediaSessionPlatform {
         outputError = error
     }
 
+    func failCaptureStarts(with error: VideoCaptureError) {
+        captureStartError = error
+    }
+
     func suspendNextStop() {
         shouldSuspendNextStop = true
     }
@@ -197,6 +264,51 @@ private actor FakeMediaSessionPlatform: MediaSessionPlatform {
         let continuation = pendingStop
         pendingStop = nil
         continuation?.resume()
+    }
+
+    func suspendNextRuntimeSnapshot() {
+        shouldSuspendNextRuntimeSnapshot = true
+    }
+
+    func waitForRuntimeSnapshotSuspension() async {
+        guard pendingRuntimeSnapshot == nil else { return }
+        await withCheckedContinuation { continuation in
+            runtimeSnapshotSuspensionObservers.append(continuation)
+        }
+    }
+
+    func releaseRuntimeSnapshot() {
+        let continuation = pendingRuntimeSnapshot
+        let snapshot = pendingRuntimeSnapshotValue ?? runtime
+        pendingRuntimeSnapshot = nil
+        pendingRuntimeSnapshotValue = nil
+        continuation?.resume(returning: snapshot)
+    }
+
+    func currentCaptureGeneration() -> UInt64 { captureGeneration }
+
+    func emitFrame(_ frame: OwnedVideoFrame, generation: UInt64) {
+        _ = captureEventContinuation.yield(.frame(generation: generation, frame: frame))
+    }
+
+    func emitTerminalState(_ state: VideoCaptureState) {
+        captureGeneration &+= 1
+        runtime = .stopped
+        publishStatus(state)
+    }
+
+    private func publishStatus(_ state: VideoCaptureState) {
+        _ = captureEventContinuation.yield(
+            .status(
+                VideoCaptureStatusSnapshot(
+                    state: state,
+                    selectedSource: nil,
+                    droppedSourceFrames: 0,
+                    droppedConsumerFrames: 0,
+                    generation: captureGeneration
+                )
+            )
+        )
     }
 }
 
@@ -359,13 +471,29 @@ struct MediaSessionModelTests {
         #expect(await bridge.didStartRequest())
         #expect(model.isOperationInFlight)
 
-        await model.disconnect()
+        let requesting = await controller.currentSnapshot()
+        let disconnect = Task { @MainActor in
+            await model.disconnect()
+        }
+        for _ in 0..<100 {
+            let current = await controller.currentSnapshot()
+            if current.phase == .idle, current.generation > requesting.generation { break }
+            await Task.yield()
+        }
+        let preempted = await controller.currentSnapshot()
+        #expect(preempted.phase == .idle)
+        #expect(preempted.generation > requesting.generation)
+
+        // Teardown deliberately waits for the accepted-request lease. Release
+        // the fake request only after disconnect has invalidated its generation;
+        // awaiting disconnect before this point would deadlock the test itself.
+        await bridge.resumeRequest()
+        await disconnect.value
+        await join.value
+
         #expect(model.snapshot.phase == .idle)
         #expect(model.isOperationInFlight == false)
         #expect(await bridge.leaveCalls() == 1)
-
-        await bridge.resumeRequest()
-        await join.value
         for _ in 0..<4 { await Task.yield() }
 
         #expect(model.snapshot.phase == .idle)
@@ -393,5 +521,301 @@ struct MediaSessionModelTests {
         #expect(model.operatorError?.contains("token") == false)
         #expect(model.operatorError?.contains("secret-output-uid") == false)
         await model.shutdown()
+    }
+
+    @Test("Explicit camera start flips local capture state and clears errors")
+    func startCameraCaptureHappyPath() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startCameraCapture()
+
+        #expect(model.runtime.cameraCapturing)
+        #expect(model.runtime.screenCapturing == false)
+        #expect(model.localCaptureActive)
+        #expect(model.operatorError == nil)
+        #expect(model.isOperationInFlight == false)
+        let calls = await platform.callSnapshot()
+        #expect(calls.cameraStarts == 1)
+        #expect(calls.screenStarts == 0)
+        await model.shutdown()
+    }
+
+    @Test("Explicit screen start flips local capture state")
+    func startScreenCaptureHappyPath() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startScreenCapture()
+
+        #expect(model.runtime.screenCapturing)
+        #expect(model.runtime.cameraCapturing == false)
+        #expect(model.localCaptureActive)
+        #expect(model.operatorError == nil)
+        #expect(await platform.callSnapshot().screenStarts == 1)
+        await model.shutdown()
+    }
+
+    @Test("Camera permission denial fails closed with an operator-visible error")
+    func startCameraCapturePermissionDeniedFailsClosed() async throws {
+        let platform = FakeMediaSessionPlatform()
+        await platform.failCaptureStarts(with: .permissionRequired(.camera, .denied))
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startCameraCapture()
+
+        #expect(model.runtime == .stopped)
+        #expect(model.localCaptureActive == false)
+        #expect(model.cameraPreviewImage == nil)
+        #expect(model.operatorError == "Camera permission is not granted. Local camera capture was not started.")
+
+        await platform.failCaptureStarts(with: .permissionRequired(.screen, .denied))
+        await model.startScreenCapture()
+        #expect(model.operatorError == "Screen Recording permission is not granted. Local screen capture was not started.")
+        await model.shutdown()
+    }
+
+    @Test("Disabled policy blocks local capture start before any platform action")
+    func disabledPolicyBlocksLocalCaptureStart() async throws {
+        let platform = FakeMediaSessionPlatform(disabled: true)
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startCameraCapture()
+
+        #expect(model.operatorError == "Media is disabled by ABBEY_MEDIA_DISABLED=1. Local capture was not started.")
+        #expect(model.runtime == .stopped)
+        let calls = await platform.callSnapshot()
+        #expect(calls.cameraStarts == 0)
+        #expect(calls.screenStarts == 0)
+        await model.shutdown()
+    }
+
+    @Test("Kill switch stops an active local capture and clears the preview")
+    func killSwitchStopsActiveCapture() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startCameraCapture()
+        #expect(model.runtime.cameraCapturing)
+
+        await model.stopAllMedia()
+
+        #expect(model.runtime == .stopped)
+        #expect(model.localCaptureActive == false)
+        #expect(model.cameraPreviewImage == nil)
+        #expect(model.operatorError == nil)
+        #expect(await platform.callSnapshot().stopCalls == 1)
+        await model.shutdown()
+    }
+
+    @Test("stopLocalCapture is idempotent and never invents errors")
+    func stopLocalCaptureIsIdempotent() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startCameraCapture()
+        await model.stopLocalCapture()
+        await model.stopLocalCapture()
+
+        #expect(model.runtime == .stopped)
+        #expect(model.localCaptureActive == false)
+        #expect(model.cameraPreviewImage == nil)
+        #expect(model.operatorError == nil)
+        #expect(await platform.callSnapshot().stopCalls == 2)
+        await model.shutdown()
+    }
+
+    @Test("BGRA frames render to a bounded CGImage; other formats are rejected")
+    func previewRendererConvertsOnlyBGRA() throws {
+        let bgra = try OwnedVideoFrame(
+            width: 2,
+            height: 2,
+            bytesPerRow: 8,
+            presentationTimeNanoseconds: 1,
+            bytes: Data([
+                0xFF, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF,
+                0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+            ])
+        )
+        let image = VideoFramePreviewRenderer.makeCGImage(from: bgra)
+        #expect(image != nil)
+        #expect(image?.width == 2)
+        #expect(image?.height == 2)
+        #expect(image?.bitsPerPixel == 32)
+
+        let nonBGRA = try OwnedVideoFrame(
+            width: 2,
+            height: 2,
+            bytesPerRow: 8,
+            pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            presentationTimeNanoseconds: 1,
+            bytes: Data(count: 16)
+        )
+        #expect(VideoFramePreviewRenderer.makeCGImage(from: nonBGRA) == nil)
+    }
+
+    @Test("A frame buffered by an old capture generation never renders after restart")
+    func staleCaptureGenerationCannotRenderAfterRestart() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.startCameraCapture()
+        let firstGeneration = await platform.currentCaptureGeneration()
+        await model.stopLocalCapture()
+        await model.startCameraCapture()
+        let currentGeneration = await platform.currentCaptureGeneration()
+        #expect(currentGeneration > firstGeneration)
+
+        await platform.emitFrame(try previewFrame(marker: 0x11), generation: firstGeneration)
+        for _ in 0..<100 { await Task.yield() }
+        #expect(model.cameraPreviewImage == nil)
+
+        await platform.emitFrame(try previewFrame(marker: 0x22), generation: currentGeneration)
+        for _ in 0..<100 {
+            if model.cameraPreviewImage != nil { break }
+            await Task.yield()
+        }
+        #expect(model.cameraPreviewImage != nil)
+        await model.shutdown()
+    }
+
+    @Test("Terminal adapter states erase preview pixels and mark video capture stopped")
+    func terminalAdapterStatesClearPreview() async throws {
+        let terminalStates: [VideoCaptureState] = [
+            .interrupted,
+            .sourceUnavailable,
+            .failed("redacted adapter failure")
+        ]
+
+        for terminalState in terminalStates {
+            let platform = FakeMediaSessionPlatform()
+            let model = MediaSessionModel(controller: try makeController(), platform: platform)
+            await model.startCameraCapture()
+            let generation = await platform.currentCaptureGeneration()
+            await platform.emitFrame(try previewFrame(marker: 0x33), generation: generation)
+            for _ in 0..<100 {
+                if model.cameraPreviewImage != nil { break }
+                await Task.yield()
+            }
+            #expect(model.cameraPreviewImage != nil)
+
+            await platform.emitTerminalState(terminalState)
+            for _ in 0..<100 {
+                if model.cameraPreviewImage == nil, !model.runtime.cameraCapturing { break }
+                await Task.yield()
+            }
+            #expect(model.cameraPreviewImage == nil)
+            #expect(model.runtime.cameraCapturing == false)
+            #expect(model.runtime.screenCapturing == false)
+            #expect(model.localCaptureActive == false)
+            await model.shutdown()
+        }
+    }
+
+    @Test("Terminal status during a suspended runtime snapshot cannot restore stale capture state")
+    func terminalDuringRuntimeSnapshotCannotReactivatePreview() async throws {
+        let platform = FakeMediaSessionPlatform()
+        await platform.suspendNextRuntimeSnapshot()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        let start = Task { await model.startCameraCapture() }
+        await platform.waitForRuntimeSnapshotSuspension()
+        let generation = await platform.currentCaptureGeneration()
+        await platform.emitFrame(try previewFrame(marker: 0x44), generation: generation)
+        for _ in 0..<100 {
+            if model.cameraPreviewImage != nil { break }
+            await Task.yield()
+        }
+        #expect(model.cameraPreviewImage != nil)
+
+        await platform.emitTerminalState(.interrupted)
+        for _ in 0..<100 {
+            if model.cameraPreviewImage == nil, !model.localVideoCaptureActive { break }
+            await Task.yield()
+        }
+
+        #expect(model.cameraPreviewImage == nil)
+        #expect(model.localVideoCaptureActive == false)
+        await platform.releaseRuntimeSnapshot()
+        await start.value
+
+        #expect(model.cameraPreviewImage == nil)
+        #expect(model.runtime.cameraCapturing == false)
+        #expect(model.runtime.screenCapturing == false)
+        #expect(model.localVideoCaptureActive == false)
+        #expect(model.isOperationInFlight == false)
+        await model.shutdown()
+    }
+
+    @Test("A second video start is rejected without invalidating the active preview")
+    func secondStartPreservesActiveCapture() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+        await model.startCameraCapture()
+        let generation = await platform.currentCaptureGeneration()
+        await platform.emitFrame(try previewFrame(marker: 0x55), generation: generation)
+        for _ in 0..<100 {
+            if model.cameraPreviewImage != nil { break }
+            await Task.yield()
+        }
+        #expect(model.cameraPreviewImage != nil)
+
+        await model.startScreenCapture()
+
+        #expect(model.runtime.cameraCapturing)
+        #expect(model.runtime.screenCapturing == false)
+        #expect(model.cameraPreviewImage != nil)
+        #expect(model.operatorError == "Local capture is already running. Stop it before starting another.")
+        let calls = await platform.callSnapshot()
+        #expect(calls.cameraStarts == 1)
+        #expect(calls.screenStarts == 0)
+        await model.shutdown()
+    }
+
+    @Test("Discord view disappearance stops active or starting preview but is passive while idle")
+    func viewDisappearanceStopsOnlyActivePreview() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.stopLocalCaptureWhenViewDisappears()
+        #expect(await platform.callSnapshot().stopCalls == 0)
+
+        await model.startCameraCapture()
+        await model.stopLocalCaptureWhenViewDisappears()
+
+        #expect(model.cameraPreviewImage == nil)
+        #expect(model.localVideoCaptureActive == false)
+        #expect(model.runtime == .stopped)
+        #expect(await platform.callSnapshot().stopCalls == 1)
+        await model.shutdown()
+
+        let startingPlatform = FakeMediaSessionPlatform()
+        await startingPlatform.suspendNextRuntimeSnapshot()
+        let startingModel = MediaSessionModel(
+            controller: try makeController(),
+            platform: startingPlatform
+        )
+        let start = Task { await startingModel.startCameraCapture() }
+        await startingPlatform.waitForRuntimeSnapshotSuspension()
+
+        await startingModel.stopLocalCaptureWhenViewDisappears()
+        await startingPlatform.releaseRuntimeSnapshot()
+        await start.value
+
+        #expect(startingModel.cameraPreviewImage == nil)
+        #expect(startingModel.localVideoCaptureActive == false)
+        #expect(startingModel.runtime == .stopped)
+        #expect(await startingPlatform.callSnapshot().stopCalls == 1)
+        await startingModel.shutdown()
+    }
+
+    private func previewFrame(marker: UInt8) throws -> OwnedVideoFrame {
+        try OwnedVideoFrame(
+            width: 1,
+            height: 1,
+            bytesPerRow: 4,
+            presentationTimeNanoseconds: UInt64(marker),
+            bytes: Data(repeating: marker, count: 4)
+        )
     }
 }

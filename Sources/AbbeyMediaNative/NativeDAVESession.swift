@@ -147,6 +147,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     private let selfNumericUserID: UInt64
     private let configuredProtocolVersion: UInt16
     private var activeRoster: [UInt64] = []
+    private var pendingCommitRoster: [UInt64]?
 
     public nonisolated var description: String {
         "NativeDAVESession(credentials: <redacted>, media: encrypted)"
@@ -318,9 +319,11 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
             }
             let result = NativeDAVECommitResultStorage(rawResult)
             guard !daveCommitResultIsFailed(result.raw) else {
+                pendingCommitRoster = nil
                 throw NativeMediaError.daveCommitFailed
             }
             if daveCommitResultIsIgnored(result.raw) {
+                pendingCommitRoster = nil
                 return .ignored
             }
             do {
@@ -349,12 +352,34 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
                     current: activeRoster,
                     changes: changes
                 )
-                try activateRoster(memberIDs: roster)
+                _ = try validateRoster(memberIDs: roster)
+                // Commit processing mutates the MLS epoch, but Discord does
+                // not authorize media-ratchet publication until the matching
+                // Execute Transition. Retain the current encryptor/decryptor
+                // ratchets and stage only the candidate roster here.
+                pendingCommitRoster = roster
                 return .applied(rosterMemberIDs: roster)
             } catch {
                 invalidateMediaReadiness()
                 throw error
             }
+        }
+    }
+
+    /// Activates the ratchets prepared by the most recent applied Commit.
+    /// Callers must correlate this operation with Discord's Execute Transition.
+    public func activatePendingCommit() throws {
+        try requireMLSHealthy(operation: "activate-commit")
+        guard let pendingCommitRoster else {
+            throw NativeMediaError.daveCommitFailed
+        }
+        do {
+            try activateRoster(memberIDs: pendingCommitRoster)
+            self.pendingCommitRoster = nil
+        } catch {
+            self.pendingCommitRoster = nil
+            invalidateMediaReadiness()
+            throw error
         }
     }
 
@@ -403,10 +428,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     }
 
     private func activateRosterUnchecked(memberIDs: [UInt64]) throws {
-        let unique = Array(Set(memberIDs)).sorted()
-        guard !unique.isEmpty, unique.count <= 1_024, unique.contains(selfNumericUserID) else {
-            throw NativeMediaError.daveParticipantUnavailable
-        }
+        let unique = try validateRoster(memberIDs: memberIDs)
 
         enum PreparedParticipant {
             case retained(ratchet: OpaquePointer)
@@ -478,6 +500,14 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         if let oldSelfRatchet {
             daveKeyRatchetDestroy(oldSelfRatchet)
         }
+    }
+
+    private func validateRoster(memberIDs: [UInt64]) throws -> [UInt64] {
+        let unique = Array(Set(memberIDs)).sorted()
+        guard !unique.isEmpty, unique.count <= 1_024, unique.contains(selfNumericUserID) else {
+            throw NativeMediaError.daveParticipantUnavailable
+        }
+        return unique
     }
 
     public func protect(
@@ -633,6 +663,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         // call and destroying participant decryptors prevents stale-epoch use.
         storage.participants.removeAll(keepingCapacity: false)
         activeRoster.removeAll(keepingCapacity: false)
+        pendingCommitRoster = nil
     }
 
     private func validateMediaFrame(_ frame: Data) throws {

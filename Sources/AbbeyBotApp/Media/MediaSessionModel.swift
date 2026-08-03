@@ -1,5 +1,6 @@
 import AbbeyCore
 import AbbeyMediaMacOS
+import CoreGraphics
 import Foundation
 import Observation
 #if canImport(AbbeyMediaNative)
@@ -74,6 +75,14 @@ protocol MediaSessionPlatform: Sendable {
     func selectInput(uid: String?) async throws -> String?
     func selectOutput(uid: String?) async throws -> String?
     func runtimeSnapshot() async -> MediaSessionRuntimeSnapshot
+    /// Explicit opt-in LOCAL camera capture. Frames never leave this process;
+    /// there is no Discord transmission path.
+    func startCameraCapture() async throws -> UInt64
+    /// Explicit opt-in LOCAL screen capture. Frames never leave this process;
+    /// there is no Discord transmission path.
+    func startScreenCapture() async throws -> UInt64
+    /// Generation-scoped frames and terminal status changes for in-app preview only.
+    func captureEvents() async -> AsyncStream<VideoCaptureEvent>
     func stopAllCapture() async
 }
 
@@ -161,9 +170,49 @@ actor MacOSMediaSessionPlatform: MediaSessionPlatform {
         )
     }
 
+    func startCameraCapture() async throws -> UInt64 {
+        try await startVideoCapture(permission: .camera)
+    }
+
+    func startScreenCapture() async throws -> UInt64 {
+        try await startVideoCapture(permission: .screen)
+    }
+
+    func captureEvents() -> AsyncStream<VideoCaptureEvent> {
+        video.captureEvents
+    }
+
     func stopAllCapture() async {
         await video.killSwitch()
         await audio.stopNow()
+    }
+
+    /// Explicit opt-in LOCAL start path. It preflights authorization via the shared
+    /// permission controller and fails closed before touching any device. It never
+    /// prompts, never transmits, and starts nothing without an authorized TCC grant.
+    private func startVideoCapture(permission kind: MediaPermissionKind) async throws -> UInt64 {
+        let status = await permissions.authorizationStatus(for: kind)
+        guard status == .authorized else {
+            throw VideoCaptureError.permissionRequired(kind, status)
+        }
+        switch await video.statusSnapshot().state {
+        case .capturing, .starting:
+            throw VideoCaptureError.sourceRefreshRequiresStoppedCapture
+        case .stopped:
+            break
+        case .interrupted, .sourceUnavailable, .failed:
+            // Clear terminal residue so refresh/select see a stopped adapter.
+            await video.stopCapture()
+        }
+        let sources = try await video.refreshSources()
+        let source: VideoCaptureSourceSnapshot? = if kind == .camera {
+            sources.first { $0.kind == .camera }
+        } else {
+            sources.first { $0.kind == .display } ?? sources.first { $0.kind == .window }
+        }
+        guard let source else { throw VideoCaptureError.sourceRequired }
+        try await video.selectSource(id: source.id)
+        return try await video.startCapture()
     }
 }
 
@@ -171,6 +220,8 @@ enum MediaSessionCopy {
     static let daveUnavailable = "DAVE unavailable — encrypted Discord media cannot start"
     static let captureUnavailable = "Capture/transmit disabled — Discord media is not shipped"
     static let sessionOnlySelection = "Device selections are session-only and are not persisted"
+    static let localPreviewOnly =
+        "Local preview only — frames stay on this Mac and are not transmitted; Discord video is not shipped"
 
     static func signaling(_ snapshot: MediaSessionVoiceSnapshot) -> String {
         switch snapshot.phase {
@@ -216,6 +267,10 @@ final class MediaSessionModel {
     private let controller: DiscordVoiceController
     private let platform: any MediaSessionPlatform
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
+    @ObservationIgnored private var captureEventTask: Task<Void, Never>?
+    @ObservationIgnored private var activeCaptureGeneration: UInt64?
+    @ObservationIgnored private var activePreviewGeneration: UInt64?
+    @ObservationIgnored private var localCaptureStartInFlight = false
     @ObservationIgnored private var operationGeneration: UInt64 = 0
 
     private(set) var snapshot: MediaSessionVoiceSnapshot
@@ -228,11 +283,20 @@ final class MediaSessionModel {
     private(set) var isOperationInFlight = false
     private(set) var permissionInFlight: MediaPermissionKind?
     private(set) var operatorError: String?
+    /// Latest LOCAL camera preview frame. Rendered in-app only; never transmitted.
+    private(set) var cameraPreviewImage: CGImage?
 
     var signalingLabel: String { MediaSessionCopy.signaling(snapshot) }
     var transportLabel: String { MediaSessionCopy.transport(snapshot) }
     var daveLabel: String { MediaSessionCopy.daveUnavailable }
     var captureLabel: String { MediaSessionCopy.captureUnavailable }
+    var localPreviewLabel: String { MediaSessionCopy.localPreviewOnly }
+    var localCaptureActive: Bool {
+        runtime.microphoneCapturing || runtime.cameraCapturing || runtime.screenCapturing
+    }
+    var localVideoCaptureActive: Bool {
+        runtime.cameraCapturing || runtime.screenCapturing
+    }
 
     init(controller: DiscordVoiceController, platform: any MediaSessionPlatform) {
         self.controller = controller
@@ -297,6 +361,7 @@ final class MediaSessionModel {
         operationGeneration &+= 1
         let localGeneration = operationGeneration
         isOperationInFlight = true
+        invalidateLocalCapture()
         await platform.stopAllCapture()
         let leftSnapshot = MediaSessionVoiceSnapshot(await controller.leave())
         let stoppedRuntime = await platform.runtimeSnapshot()
@@ -311,6 +376,7 @@ final class MediaSessionModel {
         operationGeneration &+= 1
         let localGeneration = operationGeneration
         isOperationInFlight = true
+        invalidateLocalCapture()
         await platform.stopAllCapture()
         let disconnectedSnapshot = MediaSessionVoiceSnapshot(await controller.disconnect())
         let stoppedRuntime = await platform.runtimeSnapshot()
@@ -326,6 +392,7 @@ final class MediaSessionModel {
         operationGeneration &+= 1
         let localGeneration = operationGeneration
         isOperationInFlight = true
+        invalidateLocalCapture()
         await platform.stopAllCapture()
         let stoppedSnapshot = MediaSessionVoiceSnapshot(await controller.leave())
         let stoppedRuntime = await platform.runtimeSnapshot()
@@ -340,6 +407,9 @@ final class MediaSessionModel {
         operationGeneration &+= 1
         snapshotTask?.cancel()
         snapshotTask = nil
+        captureEventTask?.cancel()
+        captureEventTask = nil
+        invalidateLocalCapture()
         await platform.stopAllCapture()
         await controller.shutdown()
         snapshot = MediaSessionVoiceSnapshot(await controller.currentSnapshot())
@@ -387,6 +457,49 @@ final class MediaSessionModel {
         operatorError = nil
     }
 
+    /// Explicit opt-in LOCAL camera capture with in-app preview. Frames never leave
+    /// this process; there is no Discord transmission path.
+    func startCameraCapture() async {
+        await startLocalCapture(preview: true) { platform in
+            try await platform.startCameraCapture()
+        }
+    }
+
+    /// Explicit opt-in LOCAL screen capture. Frames never leave this process;
+    /// there is no Discord transmission path.
+    func startScreenCapture() async {
+        await startLocalCapture(preview: false) { platform in
+            try await platform.startScreenCapture()
+        }
+    }
+
+    /// Stops LOCAL capture only. Discord signaling state (if any) is untouched.
+    func stopLocalCapture() async {
+        operationGeneration &+= 1
+        let localGeneration = operationGeneration
+        isOperationInFlight = true
+        invalidateLocalCapture()
+        await platform.stopAllCapture()
+        let stoppedRuntime = await platform.runtimeSnapshot()
+        guard operationGeneration == localGeneration else { return }
+        runtime = stoppedRuntime
+        isOperationInFlight = false
+        operatorError = nil
+    }
+
+    /// View-lifecycle privacy boundary. Preview-only capture must not outlive the
+    /// Discord controls that disclose and stop it.
+    func stopLocalCaptureWhenViewDisappears() async {
+        guard localCaptureStartInFlight
+                || activeCaptureGeneration != nil
+                || localVideoCaptureActive
+                || cameraPreviewImage != nil
+        else {
+            return
+        }
+        await stopLocalCapture()
+    }
+
     func selectInput(uid: String?) async {
         await select { try await platform.selectInput(uid: uid) } assign: { selectedInputUID = $0 }
     }
@@ -411,6 +524,122 @@ final class MediaSessionModel {
                 self.snapshot = incoming
             }
         }
+    }
+
+    private func startLocalCapture(
+        preview: Bool,
+        _ operation: (any MediaSessionPlatform) async throws -> UInt64
+    ) async {
+        mediaDisabled = await platform.isMediaDisabled()
+        guard !mediaDisabled else {
+            operatorError = "Media is disabled by ABBEY_MEDIA_DISABLED=1. Local capture was not started."
+            return
+        }
+        guard !isOperationInFlight else { return }
+        guard activeCaptureGeneration == nil, !localVideoCaptureActive else {
+            operatorError = "Local capture is already running. Stop it before starting another."
+            return
+        }
+        operationGeneration &+= 1
+        let localGeneration = operationGeneration
+        isOperationInFlight = true
+        localCaptureStartInFlight = true
+        defer { localCaptureStartInFlight = false }
+        invalidateLocalCapture()
+        ensureCaptureEventTask()
+        do {
+            let captureGeneration = try await operation(platform)
+            guard operationGeneration == localGeneration else { return }
+            activeCaptureGeneration = captureGeneration
+            activePreviewGeneration = preview ? captureGeneration : nil
+            let startedRuntime = await platform.runtimeSnapshot()
+            guard operationGeneration == localGeneration else { return }
+            guard activeCaptureGeneration == captureGeneration else {
+                // A terminal status arrived while the runtime snapshot was suspended.
+                // Preserve the terminal handler's stopped state and cleared pixels.
+                isOperationInFlight = false
+                return
+            }
+            runtime = startedRuntime
+            let expectedCaptureIsActive = preview
+                ? startedRuntime.cameraCapturing
+                : startedRuntime.screenCapturing
+            guard expectedCaptureIsActive else {
+                invalidateLocalCapture()
+                operatorError = "Local capture ended before it became active. No media was sent."
+                isOperationInFlight = false
+                return
+            }
+            operatorError = nil
+        } catch {
+            let currentRuntime = await platform.runtimeSnapshot()
+            guard operationGeneration == localGeneration else { return }
+            runtime = currentRuntime
+            operatorError = Self.safeMessage(for: error)
+            invalidateLocalCapture()
+        }
+        isOperationInFlight = false
+    }
+
+    /// The adapter event stream is single-consumer. It carries capture generations
+    /// with frames and lifecycle states, so queued work cannot cross a stop/restart.
+    private func ensureCaptureEventTask() {
+        guard captureEventTask == nil else { return }
+        let platform = platform
+        captureEventTask = Task { [weak self] in
+            let events = await platform.captureEvents()
+            for await event in events {
+                guard !Task.isCancelled, let self else { return }
+                self.handleCaptureEvent(event)
+            }
+        }
+    }
+
+    private func handleCaptureEvent(_ event: VideoCaptureEvent) {
+        switch event {
+        case let .frame(generation, frame):
+            guard generation == activePreviewGeneration else { return }
+            cameraPreviewImage = VideoFramePreviewRenderer.makeCGImage(from: frame)
+        case let .status(status):
+            handleCaptureStatus(status)
+        }
+    }
+
+    private func handleCaptureStatus(_ status: VideoCaptureStatusSnapshot) {
+        switch status.state {
+        case .stopped, .interrupted, .sourceUnavailable, .failed:
+            guard let activeCaptureGeneration,
+                  status.generation >= activeCaptureGeneration
+            else { return }
+            invalidateLocalCapture()
+            runtime = MediaSessionRuntimeSnapshot(
+                microphoneCapturing: runtime.microphoneCapturing,
+                cameraCapturing: false,
+                screenCapturing: false,
+                inputLevel: runtime.inputLevel,
+                outputLevel: runtime.outputLevel
+            )
+            switch status.state {
+            case .failed:
+                operatorError = "The local media operation failed. No media was sent."
+            case .interrupted, .sourceUnavailable:
+                operatorError = "Local capture stopped safely. No media was sent."
+            case .stopped, .starting, .capturing:
+                break
+            }
+        case .starting, .capturing:
+            break
+        }
+    }
+
+    private func clearLocalPreview() {
+        activePreviewGeneration = nil
+        cameraPreviewImage = nil
+    }
+
+    private func invalidateLocalCapture() {
+        activeCaptureGeneration = nil
+        clearLocalPreview()
     }
 
     private func select(
@@ -438,8 +667,18 @@ final class MediaSessionModel {
             "The selected output device is unavailable."
         case MediaRuntimeError.deviceSelectionRequiresStoppedEngine:
             "Stop local capture before changing its device."
-        case MediaRuntimeError.disabledByEnvironment:
+        case MediaRuntimeError.disabledByEnvironment,
+             VideoCaptureError.disabledByEnvironment:
             "Media is disabled by ABBEY_MEDIA_DISABLED=1."
+        case let VideoCaptureError.permissionRequired(kind, _):
+            kind == .camera
+                ? "Camera permission is not granted. Local camera capture was not started."
+                : "Screen Recording permission is not granted. Local screen capture was not started."
+        case VideoCaptureError.sourceRequired, VideoCaptureError.unknownSource:
+            "No local capture source is available."
+        case VideoCaptureError.sourceRefreshRequiresStoppedCapture,
+             VideoCaptureError.sourceSelectionRequiresStoppedCapture:
+            "Local capture is already running. Stop it before starting another."
         default:
             "The local media operation failed. No media was sent."
         }
