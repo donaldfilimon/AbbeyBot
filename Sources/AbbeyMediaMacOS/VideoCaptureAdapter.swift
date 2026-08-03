@@ -206,6 +206,28 @@ public struct VideoCaptureStatusSnapshot: Equatable, Sendable {
     public let droppedSourceFrames: Int
     public let droppedConsumerFrames: Int
     public let generation: UInt64
+
+    public init(
+        state: VideoCaptureState,
+        selectedSource: VideoCaptureSourceMetadata?,
+        droppedSourceFrames: Int,
+        droppedConsumerFrames: Int,
+        generation: UInt64
+    ) {
+        self.state = state
+        self.selectedSource = selectedSource
+        self.droppedSourceFrames = droppedSourceFrames
+        self.droppedConsumerFrames = droppedConsumerFrames
+        self.generation = generation
+    }
+}
+
+/// Ordered, process-local capture output. Every frame carries the generation that
+/// produced it, and lifecycle state changes share the same bounded channel so a
+/// preview consumer can invalidate pixels without polling or retaining platform IDs.
+public enum VideoCaptureEvent: Equatable, Sendable {
+    case frame(generation: UInt64, frame: OwnedVideoFrame)
+    case status(VideoCaptureStatusSnapshot)
 }
 
 public struct VideoCaptureAdapterConfiguration: Equatable, Sendable {
@@ -245,9 +267,9 @@ public actor VideoCaptureAdapter {
     private let runtime: any VideoCaptureRuntime
     private let permissions: MediaPermissionController
     private let policy: any MediaRuntimePolicyProviding
-    private let frameContinuation: AsyncStream<OwnedVideoFrame>.Continuation
+    private let eventContinuation: AsyncStream<VideoCaptureEvent>.Continuation
 
-    public nonisolated let capturedFrames: AsyncStream<OwnedVideoFrame>
+    public nonisolated let captureEvents: AsyncStream<VideoCaptureEvent>
 
     private var sources: [VideoCaptureSourceSnapshot] = []
     private var selectedSource: VideoCaptureSourceSnapshot?
@@ -270,11 +292,11 @@ public actor VideoCaptureAdapter {
         self.runtime = runtime
         self.permissions = permissions
         self.policy = policy
-        let pair = AsyncStream<OwnedVideoFrame>.makeStream(
+        let eventPair = AsyncStream<VideoCaptureEvent>.makeStream(
             bufferingPolicy: .bufferingNewest(configuration.maximumCapturedFrames)
         )
-        capturedFrames = pair.stream
-        frameContinuation = pair.continuation
+        captureEvents = eventPair.stream
+        eventContinuation = eventPair.continuation
     }
 
     public init(configuration: VideoCaptureAdapterConfiguration = .init()) {
@@ -295,7 +317,7 @@ public actor VideoCaptureAdapter {
     }
 
     deinit {
-        frameContinuation.finish()
+        eventContinuation.finish()
     }
 
     public func authorizationStatus(for kind: VideoCaptureSourceKind) async -> MediaAuthorizationStatus {
@@ -372,6 +394,7 @@ public actor VideoCaptureAdapter {
         generation &+= 1
         let startingGeneration = generation
         state = .starting
+        publishStatus()
         let task = Task { [weak self] in
             guard let self else { throw CancellationError() }
             return try await self.performStart(
@@ -434,12 +457,14 @@ public actor VideoCaptureAdapter {
                 throw CancellationError()
             }
             state = .capturing
+            publishStatus()
             return startingGeneration
         } catch {
             await runtime.stopCapture()
             if generation == startingGeneration, state == .starting {
                 generation &+= 1
                 state = .failed(Self.describe(error))
+                publishStatus()
             }
             throw error
         }
@@ -463,6 +488,7 @@ public actor VideoCaptureAdapter {
         guard teardownGeneration == stoppingGeneration else { return }
         teardownGeneration = nil
         state = .stopped
+        publishStatus()
     }
 
     private func installEventsIfNeeded() async {
@@ -482,16 +508,7 @@ public actor VideoCaptureAdapter {
         else { return }
         switch delivery {
         case let .frame(frame):
-            switch frameContinuation.yield(frame) {
-            case .enqueued:
-                break
-            case .dropped:
-                consumerDropCount += 1
-            case .terminated:
-                return
-            @unknown default:
-                consumerDropCount += 1
-            }
+            yieldEvent(.frame(generation: callbackGeneration, frame: frame))
         case let .droppedSourceFrames(count):
             if count > 0 { sourceDropCount += count }
         }
@@ -517,6 +534,9 @@ public actor VideoCaptureAdapter {
         let eventGeneration = generation
         teardownGeneration = eventGeneration
         startOperation?.task.cancel()
+        // Publish invalidation before awaiting runtime teardown. A blocked framework
+        // stop must never leave the last preview pixels visible after lock/suspend.
+        publishStatus()
         await runtime.stopNow()
         if teardownGeneration == eventGeneration {
             teardownGeneration = nil
@@ -526,6 +546,25 @@ public actor VideoCaptureAdapter {
     private func clearStart(generation completedGeneration: UInt64) {
         guard startOperation?.generation == completedGeneration else { return }
         startOperation = nil
+    }
+
+    private func publishStatus() {
+        yieldEvent(.status(statusSnapshot()))
+    }
+
+    private func yieldEvent(_ event: VideoCaptureEvent) {
+        switch eventContinuation.yield(event) {
+        case .enqueued, .terminated:
+            break
+        case let .dropped(droppedEvent):
+            if case .frame = droppedEvent {
+                consumerDropCount += 1
+            }
+        @unknown default:
+            if case .frame = event {
+                consumerDropCount += 1
+            }
+        }
     }
 
     private func requireEnabled() throws {

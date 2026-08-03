@@ -89,6 +89,7 @@ struct VideoCaptureAdapterTests {
         let fixture = VideoFixture(statuses: [.camera: .authorized])
         try await fixture.prepareCamera()
         await fixture.permissions.setStatus(.denied, for: .camera)
+        var events = fixture.adapter.captureEvents.makeAsyncIterator()
 
         await #expect(
             throws: VideoCaptureError.permissionRequired(.camera, .denied)
@@ -97,6 +98,13 @@ struct VideoCaptureAdapterTests {
         }
         #expect(await fixture.runtime.startCount() == 0)
         #expect(await fixture.runtime.stopCount() == 1)
+        #expect(await nextStatus(from: &events)?.state == .starting)
+        let failed = try #require(await nextStatus(from: &events))
+        guard case .failed = failed.state else {
+            Issue.record("Expected a generation-scoped failed capture status")
+            return
+        }
+        #expect(failed.generation > 0)
     }
 
     @Test("both frame queues are bounded and account for independent drops")
@@ -115,9 +123,9 @@ struct VideoCaptureAdapterTests {
         let snapshot = await fixture.adapter.statusSnapshot()
         #expect(snapshot.droppedConsumerFrames == 1)
         #expect(snapshot.droppedSourceFrames == 4)
-        var iterator = fixture.adapter.capturedFrames.makeAsyncIterator()
-        #expect(await iterator.next()?.bytes.first == 2)
-        #expect(await iterator.next()?.bytes.first == 3)
+        var iterator = fixture.adapter.captureEvents.makeAsyncIterator()
+        #expect(await nextFrame(from: &iterator)?.frame.bytes.first == 2)
+        #expect(await nextFrame(from: &iterator)?.frame.bytes.first == 3)
 
         await fixture.adapter.stopCapture()
         await fixture.runtime.emit(try frame(marker: 9), generation: generation)
@@ -126,6 +134,26 @@ struct VideoCaptureAdapterTests {
         #expect(stopped.state == .stopped)
         #expect(stopped.droppedSourceFrames == 4)
         #expect(stopped.droppedConsumerFrames == 1)
+    }
+
+    @Test("A status event accounts for any buffered frame it evicts")
+    func statusEvictionCountsDroppedFrame() async throws {
+        let fixture = VideoFixture(
+            statuses: [.camera: .authorized],
+            configuration: .init(maximumPendingSourceFrames: 2, maximumCapturedFrames: 2)
+        )
+        try await fixture.prepareCamera()
+        let generation = try await fixture.adapter.startCapture()
+        await fixture.runtime.emit(try frame(marker: 1), generation: generation)
+        await fixture.runtime.emit(try frame(marker: 2), generation: generation)
+        #expect(await fixture.adapter.statusSnapshot().droppedConsumerFrames == 0)
+
+        await fixture.adapter.stopCapture()
+
+        #expect(await fixture.adapter.statusSnapshot().droppedConsumerFrames == 1)
+        var events = fixture.adapter.captureEvents.makeAsyncIterator()
+        #expect(await nextFrame(from: &events)?.frame.bytes.first == 2)
+        #expect(await nextStatus(from: &events)?.state == .stopped)
     }
 
     @Test("pre-actor pixel queue is bounded and produces an owned byte copy")
@@ -195,6 +223,57 @@ struct VideoCaptureAdapterTests {
         #expect(snapshot.selectedSource == source.metadata)
         #expect(await fixture.runtime.stopNowCount() == 1)
         #expect(await fixture.runtime.startCount() == 1)
+    }
+
+    @Test("Every terminal lifecycle path publishes a generation-scoped status")
+    func terminalLifecycleEventsArePublished() async throws {
+        let fixture = VideoFixture(statuses: [.camera: .authorized])
+        let source = try await fixture.prepareCamera()
+        var events = fixture.adapter.captureEvents.makeAsyncIterator()
+        let lifecycleEvents: [(VideoCaptureRuntimeEvent, VideoCaptureState)] = [
+            (.sourceRemoved(source.id), .sourceUnavailable),
+            (.screenLocked, .interrupted),
+            (.systemSuspended, .interrupted),
+            (.interrupted, .interrupted),
+            (.configurationChanged, .interrupted)
+        ]
+
+        for (lifecycleEvent, expectedState) in lifecycleEvents {
+            let captureGeneration = try await fixture.adapter.startCapture()
+            #expect(await nextStatus(from: &events)?.state == .starting)
+            #expect(await nextStatus(from: &events)?.state == .capturing)
+
+            await fixture.runtime.emit(event: lifecycleEvent, generation: captureGeneration)
+            let terminal = try #require(await nextStatus(from: &events))
+            #expect(terminal.state == expectedState)
+            #expect(terminal.generation > captureGeneration)
+
+            await fixture.adapter.stopCapture()
+            #expect(await nextStatus(from: &events)?.state == .stopped)
+        }
+    }
+
+    @Test("Terminal invalidation is published before framework teardown completes")
+    func terminalStatusPrecedesSlowRuntimeStop() async throws {
+        let fixture = VideoFixture(statuses: [.camera: .authorized])
+        try await fixture.prepareCamera()
+        var events = fixture.adapter.captureEvents.makeAsyncIterator()
+        let generation = try await fixture.adapter.startCapture()
+        #expect(await nextStatus(from: &events)?.state == .starting)
+        #expect(await nextStatus(from: &events)?.state == .capturing)
+        await fixture.runtime.holdNextStopNow()
+
+        let lifecycle = Task {
+            await fixture.runtime.emit(event: .screenLocked, generation: generation)
+        }
+        await fixture.runtime.waitForStopNowCount(1)
+
+        let terminal = try #require(await nextStatus(from: &events))
+        #expect(terminal.state == .interrupted)
+        #expect(terminal.generation > generation)
+
+        await fixture.runtime.releaseHeldStopNow()
+        await lifecycle.value
     }
 
     @Test("operator kill switch explicitly stops the runtime")
@@ -366,6 +445,24 @@ struct VideoCaptureAdapterTests {
         CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
         return pixelBuffer
     }
+
+    private func nextStatus(
+        from iterator: inout AsyncStream<VideoCaptureEvent>.Iterator
+    ) async -> VideoCaptureStatusSnapshot? {
+        while let event = await iterator.next() {
+            if case let .status(status) = event { return status }
+        }
+        return nil
+    }
+
+    private func nextFrame(
+        from iterator: inout AsyncStream<VideoCaptureEvent>.Iterator
+    ) async -> (generation: UInt64, frame: OwnedVideoFrame)? {
+        while let event = await iterator.next() {
+            if case let .frame(generation, frame) = event { return (generation, frame) }
+        }
+        return nil
+    }
 }
 
 private struct VideoFixture {
@@ -464,6 +561,9 @@ private actor VideoRuntimeSpy: VideoCaptureRuntime {
     private var holdStart = false
     private var heldStartContinuation: CheckedContinuation<Void, Never>?
     private var startObservers: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var holdStopNow = false
+    private var heldStopNowContinuation: CheckedContinuation<Void, Never>?
+    private var stopNowObservers: [(Int, CheckedContinuation<Void, Never>)] = []
 
     func installEventHandler(
         _ handler: @escaping @Sendable (UInt64, VideoCaptureRuntimeEvent) async -> Void
@@ -489,7 +589,16 @@ private actor VideoRuntimeSpy: VideoCaptureRuntime {
     }
 
     func stopCapture() { stops += 1 }
-    func stopNow() { fullStops += 1 }
+    func stopNow() async {
+        fullStops += 1
+        resumeStopNowObservers()
+        if holdStopNow {
+            holdStopNow = false
+            await withCheckedContinuation { continuation in
+                heldStopNowContinuation = continuation
+            }
+        }
+    }
 
     func emit(_ frame: OwnedVideoFrame, generation: UInt64) async {
         await deliver?(generation, .frame(frame))
@@ -519,10 +628,24 @@ private actor VideoRuntimeSpy: VideoCaptureRuntime {
         heldStartContinuation = nil
     }
 
+    func holdNextStopNow() { holdStopNow = true }
+
+    func releaseHeldStopNow() {
+        heldStopNowContinuation?.resume()
+        heldStopNowContinuation = nil
+    }
+
     func waitForStartCount(_ expected: Int) async {
         guard starts < expected else { return }
         await withCheckedContinuation { continuation in
             startObservers.append((expected, continuation))
+        }
+    }
+
+    func waitForStopNowCount(_ expected: Int) async {
+        guard fullStops < expected else { return }
+        await withCheckedContinuation { continuation in
+            stopNowObservers.append((expected, continuation))
         }
     }
 
@@ -536,6 +659,18 @@ private actor VideoRuntimeSpy: VideoCaptureRuntime {
             }
         }
         startObservers = remaining
+    }
+
+    private func resumeStopNowObservers() {
+        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
+        for (expected, continuation) in stopNowObservers {
+            if fullStops >= expected {
+                continuation.resume()
+            } else {
+                remaining.append((expected, continuation))
+            }
+        }
+        stopNowObservers = remaining
     }
 }
 
