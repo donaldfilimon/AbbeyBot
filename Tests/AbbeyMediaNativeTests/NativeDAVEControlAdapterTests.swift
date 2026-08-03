@@ -213,6 +213,87 @@ struct NativeDAVEControlAdapterTests {
         #expect(await active.isMediaReady)
     }
 
+    @Test("a retransmitted active Commit preserves the ready candidate until Execute")
+    func retransmittedActiveCommitIsIdempotent() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(initiallyReady: true, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 755, selfUserID: 756)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        let active = try #require(factory.session(at: 0))
+
+        let commit = try commitFrame(transitionID: 24)
+        let applied = try await adapter.handle(
+            commit,
+            event: .requiresMLSProcessing(24)
+        )
+        let duplicate = try await adapter.handle(
+            commit,
+            event: .requiresMLSProcessing(24)
+        )
+
+        #expect(applied == duplicate)
+        #expect(applied == [
+            .transitionReady(VoiceGatewayDAVETransitionReady(transitionID: 24))
+        ])
+        #expect(await active.commitCallCount == 1)
+        #expect(await active.commitActivationCallCount == 0)
+
+        _ = try await adapter.handle(
+            executeFrame(transitionID: 24),
+            event: .transitionExecuted(24)
+        )
+        #expect(await active.commitCallCount == 1)
+        #expect(await active.commitActivationCallCount == 1)
+    }
+
+    @Test("a retransmitted replacement Commit preserves the ready candidate until Execute")
+    func retransmittedReplacementCommitIsIdempotent() async throws {
+        let factory = NativeDAVEControlSessionFactoryDouble(specifications: [
+            .init(initiallyReady: true, processing: .succeed),
+            .init(initiallyReady: false, processing: .succeed),
+        ])
+        let adapter = NativeDAVEControlAdapter(sessionFactory: factory.makeSession)
+        let context = try VoiceGatewayDAVEConnectionContext(groupID: 757, selfUserID: 758)
+        _ = try await adapter.beginSession(context: context, protocolVersion: 1)
+        _ = try await adapter.handle(
+            prepareEpochFrame(transitionID: 25, epoch: 2),
+            event: .epochAnnounced(.init(
+                protocolVersion: 1,
+                transitionID: 25,
+                epoch: 2
+            ))
+        )
+        let replacement = try #require(factory.session(at: 1))
+
+        let commit = try commitFrame(transitionID: 25)
+        let applied = try await adapter.handle(
+            commit,
+            event: .requiresMLSProcessing(25)
+        )
+        let duplicate = try await adapter.handle(
+            commit,
+            event: .requiresMLSProcessing(25)
+        )
+
+        #expect(applied == duplicate)
+        #expect(applied == [
+            .transitionReady(VoiceGatewayDAVETransitionReady(transitionID: 25))
+        ])
+        #expect(await replacement.commitCallCount == 1)
+        #expect(await replacement.commitActivationCallCount == 0)
+        #expect(await replacement.isMediaReady == false)
+
+        _ = try await adapter.handle(
+            executeFrame(transitionID: 25),
+            event: .transitionExecuted(25)
+        )
+        #expect(await replacement.commitCallCount == 1)
+        #expect(await replacement.commitActivationCallCount == 1)
+        #expect(await replacement.isMediaReady)
+    }
+
     @Test("discarding an active Commit candidate never activates its ratchets")
     func discardedActiveCommitCandidateDoesNotActivate() async throws {
         let factory = NativeDAVEControlSessionFactoryDouble(specifications: [

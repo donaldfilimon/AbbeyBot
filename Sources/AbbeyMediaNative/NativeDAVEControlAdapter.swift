@@ -349,6 +349,21 @@ public actor NativeDAVEControlAdapter: CustomStringConvertible,
             guard transitionID == commit.transitionID else {
                 throw NativeDAVEControlAdapterError.transitionEventMismatch
             }
+            if let pendingTransition,
+               pendingTransition.transitionID == transitionID,
+               pendingTransition.isReadyToExecute,
+               !pendingTransition.isExecuting,
+               pendingTransition.requiresCommitActivation
+            {
+                // Discord may retransmit a Commit when Transition Ready was
+                // lost. The native session has already staged this Commit's
+                // roster and ratchets, so processing it again could clear or
+                // replace that candidate. Re-acknowledge the same transition
+                // and leave the staged state intact for Execute Transition.
+                return [.transitionReady(
+                    VoiceGatewayDAVETransitionReady(transitionID: transitionID)
+                )]
+            }
             let pending = try commitSession(for: transitionID)
             let isActiveSessionCommit = pendingTransition?.generation == pending.generation
                 && pendingTransition?.origin == .activeSessionCommit
