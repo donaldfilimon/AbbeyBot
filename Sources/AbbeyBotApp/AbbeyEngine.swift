@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 import Observation
 import AbbeyCore
+import AbbeyMediaMacOS
 
 /// SwiftUI façade over SwiftData + AbbeyCore actors.
 @Observable
@@ -36,7 +37,8 @@ final class AbbeyEngine {
     private(set) var discordVoiceGuildId: String?
     private(set) var liveIngestCount: Int = 0
 
-    let discordBridge = DiscordBridge()
+    let discordBridge: DiscordBridge
+    let mediaSession: MediaSessionModel
     let twitchBridge = TwitchBridge()
     let moderationClient = ModerationClient()
     private var eventListenerTask: Task<Void, Never>?
@@ -63,6 +65,9 @@ final class AbbeyEngine {
         self.saveModelContext = saveModelContext
         self.scheduleRememberPush = scheduleRememberPush
         self.scheduleForgetPush = scheduleForgetPush
+
+        let discordBridge = DiscordBridge()
+        self.discordBridge = discordBridge
 
         let bus = EventBus()
         self.eventBus = bus
@@ -105,6 +110,7 @@ final class AbbeyEngine {
             currentMode: { config.inferenceMode },
             remoteEndpoint: { config.remoteEndpoint }
         )
+        self.mediaSession = MediaSessionModel(discordBridge: discordBridge)
 
         if storeDegraded {
             metrics.markStoreDegraded()
@@ -531,6 +537,7 @@ final class AbbeyEngine {
     }
 
     func disconnectDiscord() async {
+        await mediaSession.disconnect()
         await discordBridge.disconnect()
         await refreshDiscordStatus()
     }
@@ -540,7 +547,9 @@ final class AbbeyEngine {
         eventListenerTask?.cancel()
         eventListenerTask = nil
         await scheduler.stop()
-        await disconnectDiscord()
+        await mediaSession.shutdown()
+        await discordBridge.disconnect()
+        await refreshDiscordStatus()
     }
 
     func refreshDiscordStatus() async {
@@ -554,18 +563,31 @@ final class AbbeyEngine {
     /// Gateway voice presence only (muted/deafened; no Opus/UDP audio).
     @discardableResult
     func joinVoice(guildId: String, channelId: String) async -> String {
-        let message = await performVoice(.join(channelId: channelId), guildId: guildId)
+        await mediaSession.joinSignaling(guildID: guildId, channelID: channelId)
         await refreshDiscordStatus()
-        return message
+        return mediaSession.operatorError ?? "Voice signaling ended without starting Discord media."
     }
 
     /// Leave tracked (or given) guild voice presence.
     @discardableResult
     func leaveVoice(guildId: String? = nil) async -> String {
-        let gid = guildId ?? discordVoiceGuildId ?? ""
-        let message = await performVoice(.leave, guildId: gid)
+        await mediaSession.leave()
         await refreshDiscordStatus()
-        return message
+        return "Left voice signaling and stopped all local media."
+    }
+
+    @discardableResult
+    func disconnectVoiceTransport() async -> String {
+        await mediaSession.disconnect()
+        await refreshDiscordStatus()
+        return "Disconnected voice signaling and stopped all local media."
+    }
+
+    @discardableResult
+    func stopAllVoiceMedia() async -> String {
+        await mediaSession.stopAllMedia()
+        await refreshDiscordStatus()
+        return "Stopped all local media and left voice signaling."
     }
 
     func registerSlashCommands() async throws {

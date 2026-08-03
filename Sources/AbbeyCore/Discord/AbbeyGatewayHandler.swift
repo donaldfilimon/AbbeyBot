@@ -2,11 +2,11 @@ import DiscordBM
 
 extension AbbeyGatewayHandler {
     func onVoiceStateUpdate(_ payload: VoiceState) async {
-        await bridge.handleVoiceStateUpdate(payload)
+        await bridge.handleVoiceStateUpdate(payload, generation: generation)
     }
 
     func onVoiceServerUpdate(_ payload: Gateway.VoiceServerUpdate) async {
-        await bridge.handleVoiceServerUpdate(payload)
+        await bridge.handleVoiceServerUpdate(payload, generation: generation)
     }
 }
 import Logging
@@ -15,6 +15,7 @@ struct AbbeyGatewayHandler: GatewayEventHandler {
     let event: Gateway.Event
     let hooks: DiscordEventHooks
     let bridge: DiscordBridge
+    let generation: DiscordGatewayLifecycle.Generation
     let logger = Logger(label: "AbbeyBot.Gateway")
 
     func onReady(_ payload: Gateway.Ready) async throws {

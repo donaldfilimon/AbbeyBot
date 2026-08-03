@@ -56,7 +56,7 @@ struct VoiceGatewayV8ModelsTests {
 
     @Test("decoder validates all modeled inbound events")
     func inboundDecoding() throws {
-        let hello = try VoiceGatewayV8Decoder.decode(Data(#"{"op":8,"d":{"heartbeat_interval":5000},"s":1}"#.utf8))
+        let hello = try VoiceGatewayV8Decoder.decode(Data(#"{"op":8,"d":{"heartbeat_interval":5000},"seq":1}"#.utf8))
         guard case .hello(let helloPayload) = hello.payload else {
             Issue.record("Expected Hello")
             return
@@ -64,13 +64,35 @@ struct VoiceGatewayV8ModelsTests {
         #expect(hello.sequence == 1)
         #expect(helloPayload.heartbeatInterval == 5_000)
 
-        let ready = try VoiceGatewayV8Decoder.decode(Data(#"{"op":2,"d":{"ssrc":7,"ip":"203.0.113.4","port":50000,"modes":["aead_xchacha20_poly1305_rtpsize"]},"s":2}"#.utf8))
+        let ready = try VoiceGatewayV8Decoder.decode(Data(#"{"op":2,"d":{"ssrc":7,"ip":"203.0.113.4","port":50000,"modes":["aead_xchacha20_poly1305_rtpsize"]},"seq":2}"#.utf8))
         guard case .ready(let readyPayload) = ready.payload else {
             Issue.record("Expected Ready")
             return
         }
         #expect(readyPayload.ssrc == 7)
         #expect(readyPayload.port == 50_000)
+
+        let speaking = try VoiceGatewayV8Decoder.decode(Data(#"{"op":5,"d":{"speaking":1,"delay":0,"ssrc":9,"user_id":"member-a"},"seq":3}"#.utf8))
+        guard case .speaking(let speakingPayload) = speaking.payload else {
+            Issue.record("Expected Speaking")
+            return
+        }
+        #expect(speakingPayload.userID == "member-a")
+        #expect(speakingPayload.ssrc == 9)
+
+        let connected = try VoiceGatewayV8Decoder.decode(Data(#"{"op":11,"d":{"user_ids":["member-a","member-b"]},"seq":4}"#.utf8))
+        guard case .clientsConnect(let connectedPayload) = connected.payload else {
+            Issue.record("Expected Clients Connect")
+            return
+        }
+        #expect(connectedPayload.userIDs == ["member-a", "member-b"])
+
+        let disconnected = try VoiceGatewayV8Decoder.decode(Data(#"{"op":13,"d":{"user_id":"member-b"},"seq":5}"#.utf8))
+        guard case .clientDisconnect(let disconnectedPayload) = disconnected.payload else {
+            Issue.record("Expected Client Disconnect")
+            return
+        }
+        #expect(disconnectedPayload.userID == "member-b")
     }
 
     @Test("decoder rejects malformed and oversized payloads")
@@ -100,12 +122,12 @@ struct VoiceGatewayV8ModelsTests {
         let identify = try VoiceGatewayV8Identify(
             serverID: "guild",
             userID: "bot",
-            sessionID: "session",
+            sessionID: "never-print-session",
             token: "never-print-token"
         )
         let resume = try VoiceGatewayV8Resume(
             serverID: "guild",
-            sessionID: "session",
+            sessionID: "never-print-session",
             token: "never-print-token",
             sequenceAcknowledgement: 10
         )
@@ -116,26 +138,64 @@ struct VoiceGatewayV8ModelsTests {
         )
         let inbound = VoiceGatewayV8Inbound(sequence: 2, payload: .sessionDescription(session))
 
+        var identifyDump = ""
+        dump(identify, to: &identifyDump)
+        var resumeDump = ""
+        dump(resume, to: &resumeDump)
+        var sessionDump = ""
+        dump(session, to: &sessionDump)
+        let mirrorValues = [identify, resume].flatMap { value in
+            Mirror(reflecting: value).children.map { String(describing: $0.value) }
+        }
+
         for rendered in [
             String(describing: identify), String(reflecting: identify),
             String(describing: VoiceGatewayV8Outbound.identify(identify)),
             String(reflecting: VoiceGatewayV8Outbound.resume(resume)),
             String(describing: session), String(reflecting: session),
             String(describing: inbound), String(reflecting: inbound),
+            identifyDump, resumeDump, sessionDump,
+            mirrorValues.joined(separator: " "),
         ] {
             #expect(!rendered.contains("never-print-token"))
+            #expect(!rendered.contains("never-print-session"))
             #expect(!rendered.contains("171, 171"))
             #expect(rendered.contains("redacted") || !rendered.contains("token"))
         }
     }
 
-    @Test("does not accept a nonzero DAVE protocol without libdave")
-    func daveBoundary() {
-        #expect(throws: VoiceGatewayV8Error.unsupportedDAVEVersion(1)) {
+    @Test("bounds DAVE protocol versions while allowing native negotiation values")
+    func daveBoundary() throws {
+        let identify = try VoiceGatewayV8Identify(
+            serverID: "guild",
+            userID: "bot",
+            sessionID: "session",
+            token: "ephemeral-token",
+            maxDAVEProtocolVersion: 1
+        )
+        #expect(identify.maxDAVEProtocolVersion == 1)
+
+        let description = try VoiceGatewayV8SessionDescription(
+            mode: "aead_xchacha20_poly1305_rtpsize",
+            secretKey: Array(repeating: 0, count: 32),
+            daveProtocolVersion: 1
+        )
+        #expect(description.daveProtocolVersion == 1)
+
+        #expect(throws: VoiceGatewayV8Error.unsupportedDAVEVersion(-1)) {
+            _ = try VoiceGatewayV8Identify(
+                serverID: "guild",
+                userID: "bot",
+                sessionID: "session",
+                token: "ephemeral-token",
+                maxDAVEProtocolVersion: -1
+            )
+        }
+        #expect(throws: VoiceGatewayV8Error.unsupportedDAVEVersion(65_536)) {
             _ = try VoiceGatewayV8SessionDescription(
                 mode: "aead_xchacha20_poly1305_rtpsize",
                 secretKey: Array(repeating: 0, count: 32),
-                daveProtocolVersion: 1
+                daveProtocolVersion: 65_536
             )
         }
     }

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>AbbeyBot</string>
+	<key>CFBundleExecutable</key>
+	<string>AbbeyBot</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.donaldfilimon.AbbeyBot</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>AbbeyBot</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>27.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AbbeyBot requests microphone access only when you explicitly run its permission test. Live microphone capture is not yet shipped.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>AbbeyBot requests camera access only when you explicitly run its permission test. Live camera capture is not yet shipped.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>AbbeyBot requests screen recording only when you explicitly run its permission test. Live screen sharing is not yet shipped.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>AbbeyBot requests system audio access only when you explicitly run its permission test. Live system-audio capture is not yet shipped.</string>
+</dict>
+</plist>

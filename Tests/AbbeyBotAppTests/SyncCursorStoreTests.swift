@@ -150,19 +150,19 @@ struct SyncCursorStoreTests {
         ))
     }
 
-    @Test func transientDictionaryFixtureSurvivesDesktopStoreUpgrade() {
+    @Test func retiredTransientDictionaryFixtureDegradesToFullBootstrapPull() {
+        // The dev-only `values` representation is no longer decoded. A store holding one
+        // degrades to an empty cursor set — a full bootstrap pull, never a bogus cursor.
         let defaults = makeDefaults()
         defaults.set(
             Data(#"{"values":["users",{"changedAt":123,"stableID":"g:u"}]}"#.utf8),
             forKey: SyncCursorStore.cursorSetKey
         )
 
-        let cursors = SyncCursorStore(defaults: defaults).pullCursors
+        let store = SyncCursorStore(defaults: defaults)
 
-        #expect(cursors[.users] == SyncPullCursor(
-            changedAt: Date(timeIntervalSinceReferenceDate: 123),
-            stableID: "g:u"
-        ))
+        #expect(store.pullCursors == SyncPullCursorSet())
+        #expect(store.lastPullSuccessAt == nil)
     }
 
     @Test func failedCompoundPullPreservesPreviousSet() {

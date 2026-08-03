@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 unset TOOLCHAINS || true
+unset ABBEY_NATIVE_MEDIA ABBEY_NATIVE_PREFIX ABBEY_NATIVE_CACHE || true
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.server.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 COMPOSE=(docker compose)

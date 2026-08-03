@@ -7,8 +7,18 @@ import Foundation
 /// A completed credential set is emitted once per server allocation; the active
 /// generation remains until leave so duplicate and failover events stay scoped.
 public struct VoiceGatewayHandshake: Sendable {
-    public struct Generation: Hashable, Sendable {
+    /// Producer-issued join identity. The numeric value is deliberately hidden
+    /// from diagnostics; consumers may compare it but cannot manufacture it.
+    public struct Generation: Hashable, Sendable, CustomStringConvertible,
+        CustomDebugStringConvertible, CustomReflectable
+    {
         fileprivate let value: UInt64
+
+        public var description: String { "VoiceGatewayAttemptID(<opaque>)" }
+        public var debugDescription: String { description }
+        public var customMirror: Mirror {
+            Mirror(self, children: ["identity": "<opaque>"], displayStyle: .struct)
+        }
     }
 
     public struct VoiceStateEvent: Sendable {
@@ -202,6 +212,35 @@ public struct VoiceGatewayHandshake: Sendable {
 
     public func generation(for guildID: String) -> Generation? {
         pendingByGuild[guildID]?.generation
+    }
+
+    /// The generation currently waiting for Discord to acknowledge a
+    /// `channel_id: null` voice-state update.
+    public func leavingGeneration(for guildID: String) -> Generation? {
+        leavingByGuild[guildID]?.generation
+    }
+
+    /// AbbeyBot serializes voice membership, so this is the one guild whose
+    /// pending or leaving generation still needs cleanup.
+    public var activeGuildID: String? {
+        pendingByGuild.keys.first ?? leavingByGuild.keys.first
+    }
+
+    /// Releases a stalled join or leave barrier only when it still belongs to
+    /// the generation that scheduled the deadline. Discord does not attach a
+    /// client nonce to these Gateway events, so callers must never expire a
+    /// newer generation with an older timer.
+    @discardableResult
+    public mutating func expire(guildID: String, generation: Generation) -> Bool {
+        if pendingByGuild[guildID]?.generation == generation {
+            pendingByGuild[guildID] = nil
+            return true
+        }
+        if leavingByGuild[guildID]?.generation == generation {
+            leavingByGuild[guildID] = nil
+            return true
+        }
+        return false
     }
 
     /// Drops all capability-bearing state while preserving the monotonic

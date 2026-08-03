@@ -211,38 +211,24 @@ public struct ServerSyncClient: Sendable {
     }
 
     /// Internal request boundary so tests can prove rejected transports never receive
-    /// an Authorization header or a sync body.
+    /// an Authorization header or a sync body. Delegates to the shared
+    /// `SyncTransportPolicy.makeRequest` so the transport rules cannot drift per client.
     func makeRequest(
         path: String,
         method: String,
         queryItems: [URLQueryItem] = []
     ) throws -> URLRequest {
-        let validatedBaseURL: URL
         do {
-            validatedBaseURL = try SyncTransportPolicy.validate(baseURL: baseURL)
+            return try SyncTransportPolicy.makeRequest(
+                baseURL: baseURL,
+                path: path,
+                method: method,
+                queryItems: queryItems,
+                bearerToken: apiToken
+            )
         } catch {
             throw ClientError.invalidURL(path)
         }
-
-        let validatedBase = validatedBaseURL.absoluteString
-        let base = validatedBase.hasSuffix("/") ? String(validatedBase.dropLast()) : validatedBase
-        let suffix = path.hasPrefix("/") ? path : "/\(path)"
-        guard var components = URLComponents(string: base + suffix) else {
-            throw ClientError.invalidURL(path)
-        }
-        if !queryItems.isEmpty {
-            components.queryItems = queryItems
-        }
-        guard let url = components.url else {
-            throw ClientError.invalidURL(path)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        if let apiToken {
-            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        }
-        return request
     }
 }
 

@@ -8,7 +8,7 @@ struct VoiceGatewayClientTests {
         let script = VoiceGatewayTestScript(
             messages: [
                 #"{"op":8,"d":{"heartbeat_interval":1000}}"#,
-                #"{"op":2,"s":12,"d":{"ssrc":44,"ip":"203.0.113.8","port":50000,"modes":["aead_xchacha20_poly1305_rtpsize"]}}"#,
+                #"{"op":2,"seq":12,"d":{"ssrc":44,"ip":"203.0.113.8","port":50000,"modes":["aead_xchacha20_poly1305_rtpsize"]}}"#,
                 sessionDescription(mode: "aead_xchacha20_poly1305_rtpsize"),
             ],
             close: VoiceGatewayClientClose(code: 1000, reason: "done")
@@ -39,14 +39,15 @@ struct VoiceGatewayClientTests {
             VoiceGatewayTestScript(
                 messages: [
                     #"{"op":8,"d":{"heartbeat_interval":1000}}"#,
-                    #"{"op":2,"s":22,"d":{"ssrc":7,"ip":"203.0.113.7","port":50001,"modes":["mode"]}}"#,
+                    #"{"op":2,"seq":22,"d":{"ssrc":7,"ip":"203.0.113.7","port":50001,"modes":["mode"]}}"#,
+                    sessionDescription(mode: "mode", sequence: 23),
                 ],
                 close: VoiceGatewayClientClose(code: 4015, reason: "recoverable")
             ),
             VoiceGatewayTestScript(
                 messages: [
                     #"{"op":8,"d":{"heartbeat_interval":1000}}"#,
-                    #"{"op":9,"s":23,"d":{}}"#,
+                    #"{"op":9,"seq":24,"d":{}}"#,
                 ],
                 close: VoiceGatewayClientClose(code: 1000, reason: "done")
             ),
@@ -62,7 +63,7 @@ struct VoiceGatewayClientTests {
         #expect(try await client.connect() == .terminalClose(1000))
         #expect(await harness.sentOpcodes(attempt: 0).first == 0)
         #expect(await harness.sentOpcodes(attempt: 1).first == 7)
-        #expect(await harness.sentInteger(attempt: 1, opcode: 7, key: "seq_ack") == 22)
+        #expect(await harness.sentInteger(attempt: 1, opcode: 7, key: "seq_ack") == 23)
         #expect(await harness.attemptCount() == 2)
     }
 
@@ -104,7 +105,8 @@ struct VoiceGatewayClientTests {
         let client = try makeClient(transport: harness.transport)
         let connection = Task { try await client.connect() }
 
-        try await eventually { await harness.sentOpcodes(attempt: 0) == [0] }
+        try await eventually { await harness.attemptCount() == 1 }
+        #expect(await harness.sentOpcodes(attempt: 0).isEmpty)
         await client.disconnect()
 
         #expect(try await connection.value == .disconnected)
@@ -155,6 +157,171 @@ struct VoiceGatewayClientTests {
         #expect(String(describing: close).contains("<redacted>"))
     }
 
+    @Test func remoteCloseCompletesWhileUDPHandoffIsSuspended() async throws {
+        let handoffStarted = VoiceGatewayAsyncSignal()
+        let transport = VoiceGatewayClientTransport { _, maximumBytes, operation in
+            let inbox = VoiceGatewayClientInboundBuffer(maximumMessages: 8, maximumBytes: maximumBytes)
+            let session = VoiceGatewayClientSession(
+                receive: { try await inbox.next() },
+                send: { _ in },
+                close: { _, _ in await inbox.finish() }
+            )
+            try await VoiceGatewayClientTaskCoordinator.run(
+                operation: { try await operation(session) },
+                inbound: {
+                    try await inbox.yield(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+                    try await inbox.yield(#"{"op":2,"seq":12,"d":{"ssrc":44,"ip":"203.0.113.8","port":50000,"modes":["mode"]}}"#)
+                    await handoffStarted.wait()
+                    await inbox.finish()
+                },
+                operationCompleted: { await inbox.finish() },
+                cancelled: { await inbox.finish(throwing: CancellationError()) }
+            )
+            return VoiceGatewayClientClose(code: 4015, reason: "remote close")
+        }
+        let client = try makeClient(
+            transport: transport,
+            udpHandoff: VoiceGatewayUDPHandoff { _ in
+                await handoffStarted.signal()
+                try await Task.sleep(for: .seconds(60))
+                return VoiceGatewayUDPSelection(address: "127.0.0.1", port: 50_000, mode: "mode")
+            },
+            configuration: .init(maximumReconnectAttempts: 0)
+        )
+
+        #expect(try await client.connect() == .reconnectLimitReached)
+    }
+
+    @Test func coordinatorAwaitsCancelledChildrenBeforeReturning() async throws {
+        let recorder = VoiceGatewayCoordinatorCancellationRecorder()
+        let coordinator = Task {
+            try await VoiceGatewayClientTaskCoordinator.run(
+                operation: {
+                    await recorder.started("operation")
+                    do {
+                        try await Task.sleep(for: .seconds(60))
+                    } catch {
+                        await recorder.finished("operation")
+                        throw error
+                    }
+                },
+                inbound: {
+                    await recorder.started("inbound")
+                    do {
+                        try await Task.sleep(for: .seconds(60))
+                    } catch {
+                        await recorder.finished("inbound")
+                        throw error
+                    }
+                },
+                operationCompleted: {},
+                cancelled: { await recorder.cleanedUp() }
+            )
+        }
+
+        try await eventually { await recorder.startedCount() == 2 }
+        coordinator.cancel()
+        await #expect(throws: CancellationError.self) { try await coordinator.value }
+        #expect(await recorder.finishedValues().sorted() == ["inbound", "operation"])
+        #expect(await recorder.cleanupCount() == 1)
+    }
+
+    @Test func stalledConsumerCannotGrowInboundQueueWithoutBound() async throws {
+        let countBounded = VoiceGatewayClientInboundBuffer(maximumMessages: 2, maximumBytes: 100)
+        try await countBounded.yield("first")
+        try await countBounded.yield("second")
+        await #expect(throws: VoiceGatewayClientTransportError.self) {
+            try await countBounded.yield("third")
+        }
+        await #expect(throws: VoiceGatewayClientTransportError.self) {
+            _ = try await countBounded.next()
+        }
+
+        let byteBounded = VoiceGatewayClientInboundBuffer(maximumMessages: 10, maximumBytes: 5)
+        try await byteBounded.yield("1234")
+        await #expect(throws: VoiceGatewayClientTransportError.self) {
+            try await byteBounded.yield("56")
+        }
+        #expect(VoiceGatewayClientInboundBuffer.overflowCloseCode == 1009)
+    }
+
+    @Test func transportFramesPreserveBinaryWithoutRenderingPayloads() async throws {
+        let bytes = Data([222, 173, 190, 239])
+        let frame = VoiceGatewayClientFrame.binary(bytes)
+        let frameBuffer = VoiceGatewayClientInboundBuffer(
+            maximumMessages: 2,
+            maximumBytes: 32
+        )
+        try await frameBuffer.yield(frame)
+        #expect(try await frameBuffer.nextFrame() == frame)
+
+        var rendered = ""
+        dump(frame, to: &rendered)
+        rendered += String(describing: frame)
+        rendered += String(reflecting: frame)
+        #expect(rendered.contains("<redacted>"))
+        #expect(!rendered.contains("222"))
+        #expect(!rendered.lowercased().contains("deadbeef"))
+
+        let textCompatibility = VoiceGatewayClientInboundBuffer(
+            maximumMessages: 2,
+            maximumBytes: 32
+        )
+        try await textCompatibility.yield(frame)
+        await #expect(throws: VoiceGatewayClientTransportError.binaryMessageRejected) {
+            _ = try await textCompatibility.next()
+        }
+    }
+
+    @Test func reconnectBackoffIsCappedExponentialWithInjectedJitter() async throws {
+        let recorder = VoiceGatewayBackoffRecorder()
+        let backoff = VoiceGatewayReconnectBackoff(
+            baseMilliseconds: 100,
+            maximumMilliseconds: 250,
+            jitter: { $0 },
+            sleep: { milliseconds in await recorder.record(milliseconds) }
+        )
+        let harness = VoiceGatewayTestTransport(scripts: [
+            VoiceGatewayTestScript(messages: [], close: VoiceGatewayClientClose(code: 1006, reason: nil)),
+            VoiceGatewayTestScript(messages: [], close: VoiceGatewayClientClose(code: 1006, reason: nil)),
+            VoiceGatewayTestScript(messages: [], close: VoiceGatewayClientClose(code: 1000, reason: nil)),
+        ])
+        let client = try makeClient(
+            transport: harness.transport,
+            reconnectBackoff: backoff,
+            configuration: .init(maximumReconnectAttempts: 2)
+        )
+
+        #expect(try await client.connect() == .terminalClose(1000))
+        #expect(await recorder.values() == [125, 250])
+        #expect(backoff.delayMilliseconds(attempt: 10) == 250)
+    }
+
+    @Test func explicitDisconnectCancelsPendingReconnectDelay() async throws {
+        let gate = VoiceGatewayBackoffGate()
+        let backoff = VoiceGatewayReconnectBackoff(
+            baseMilliseconds: 100,
+            maximumMilliseconds: 100,
+            jitter: { _ in 0 },
+            sleep: { milliseconds in try await gate.sleep(milliseconds: milliseconds) }
+        )
+        let harness = VoiceGatewayTestTransport(scripts: [
+            VoiceGatewayTestScript(messages: [], close: VoiceGatewayClientClose(code: 1006, reason: nil))
+        ])
+        let client = try makeClient(
+            transport: harness.transport,
+            reconnectBackoff: backoff,
+            configuration: .init(maximumReconnectAttempts: 3)
+        )
+        let connection = Task { try await client.connect() }
+
+        try await eventually { await gate.values() == [100] }
+        await client.disconnect()
+
+        #expect(try await connection.value == .disconnected)
+        #expect(await harness.attemptCount() == 1)
+    }
+
     private func makeClient(
         token: String = "voice-token",
         transport: VoiceGatewayClientTransport,
@@ -162,6 +329,10 @@ struct VoiceGatewayClientTests {
         clock: VoiceGatewayClientClock = .init(
             now: { 0 },
             sleep: { _ in try await Task.sleep(for: .seconds(60)) }
+        ),
+        reconnectBackoff: VoiceGatewayReconnectBackoff = .init(
+            jitter: { _ in 0 },
+            sleep: { _ in }
         ),
         configuration: VoiceGatewayClient.Configuration = .init()
     ) throws -> VoiceGatewayClient {
@@ -176,13 +347,14 @@ struct VoiceGatewayClientTests {
             transport: transport,
             udpHandoff: udpHandoff,
             clock: clock,
+            reconnectBackoff: reconnectBackoff,
             configuration: configuration
         )
     }
 
-    private func sessionDescription(mode: String) -> String {
+    private func sessionDescription(mode: String, sequence: Int = 13) -> String {
         let key = Array(repeating: "1", count: 32).joined(separator: ",")
-        return #"{"op":4,"s":13,"d":{"mode":"\#(mode)","secret_key":[\#(key)],"dave_protocol_version":0}}"#
+        return #"{"op":4,"seq":\#(sequence),"d":{"mode":"\#(mode)","secret_key":[\#(key)],"dave_protocol_version":0}}"#
     }
 
     private func eventually(
@@ -340,5 +512,62 @@ private actor VoiceGatewayManualClock {
         while self.milliseconds < target {
             try await Task.sleep(for: .milliseconds(1))
         }
+    }
+}
+
+private actor VoiceGatewayAsyncSignal {
+    private var signaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        signaled = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+
+    func wait() async {
+        if signaled { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+private actor VoiceGatewayBackoffRecorder {
+    private var recorded: [UInt64] = []
+    func record(_ value: UInt64) { recorded.append(value) }
+    func values() -> [UInt64] { recorded }
+}
+
+private actor VoiceGatewayCoordinatorCancellationRecorder {
+    private var startedValues: [String] = []
+    private var completedValues: [String] = []
+    private var cleanups = 0
+
+    func started(_ value: String) { startedValues.append(value) }
+    func finished(_ value: String) { completedValues.append(value) }
+    func cleanedUp() { cleanups += 1 }
+    func startedCount() -> Int { startedValues.count }
+    func finishedValues() -> [String] { completedValues }
+    func cleanupCount() -> Int { cleanups }
+}
+
+private actor VoiceGatewayBackoffGate {
+    private var recorded: [UInt64] = []
+    private var waiter: CheckedContinuation<Void, any Error>?
+
+    func sleep(milliseconds: UInt64) async throws {
+        recorded.append(milliseconds)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { waiter = $0 }
+        } onCancel: {
+            Task { await self.cancel() }
+        }
+    }
+
+    func values() -> [UInt64] { recorded }
+
+    private func cancel() {
+        waiter?.resume(throwing: CancellationError())
+        waiter = nil
     }
 }

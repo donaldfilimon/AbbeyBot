@@ -555,19 +555,20 @@ struct SyncCursorFileStoreTests {
         ))
     }
 
-    @Test func transientDictionaryFixtureSurvivesCLICursorStoreUpgrade() throws {
+    @Test func retiredTransientDictionaryFixtureDegradesCLIStoreToFullBootstrapPull() throws {
+        // The dev-only `values` representation is no longer decoded. A file holding one
+        // degrades to an empty cursor set (full bootstrap pull) — it is not misread as a
+        // legacy epoch cursor either.
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("abbey-cursor-transient-v2-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: url) }
         try Data(#"{"values":["channels",{"changedAt":123,"stableID":"g:c"}]}"#.utf8)
             .write(to: url, options: .atomic)
 
-        let cursors = SyncCursorFileStore(fileURL: url).loadPullCursors()
+        let store = SyncCursorFileStore(fileURL: url)
 
-        #expect(cursors[.channels] == SyncPullCursor(
-            changedAt: Date(timeIntervalSinceReferenceDate: 123),
-            stableID: "g:c"
-        ))
+        #expect(store.loadPullCursors() == SyncPullCursorSet())
+        #expect(store.loadLastPullSuccess() == nil)
     }
 
     @Test func endpointNamespacesProduceStableIndependentFiles() {

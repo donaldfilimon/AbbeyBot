@@ -326,7 +326,8 @@ struct AbbeyServerClient: Sendable {
         return Date(timeIntervalSince1970: epoch)
     }
 
-    /// Shared base URL + optional Bearer token for POST and GET.
+    /// Shared base URL + optional Bearer token for POST and GET. Delegates to the shared
+    /// `SyncTransportPolicy.makeRequest` so the transport rules cannot drift per client.
     func makeRequest(
         path: String,
         method: String,
@@ -336,32 +337,17 @@ struct AbbeyServerClient: Sendable {
         guard !rawBase.isEmpty else {
             throw SyncClientError.notConfigured
         }
-        let validatedBaseURL: URL
         do {
-            validatedBaseURL = try SyncTransportPolicy.validate(baseURL: rawBase)
+            return try SyncTransportPolicy.makeRequest(
+                baseURL: rawBase,
+                path: path,
+                method: method,
+                queryItems: queryItems,
+                bearerToken: syncAPIToken()
+            )
         } catch {
             throw SyncClientError.invalidURL(path)
         }
-        let validatedBase = validatedBaseURL.absoluteString
-        let base = validatedBase.hasSuffix("/") ? String(validatedBase.dropLast()) : validatedBase
-        let suffix = path.hasPrefix("/") ? path : "/\(path)"
-        guard var components = URLComponents(string: base + suffix) else {
-            throw SyncClientError.invalidURL(path)
-        }
-        if !queryItems.isEmpty {
-            components.queryItems = queryItems
-        }
-        guard let url = components.url else {
-            throw SyncClientError.invalidURL(path)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        let token = syncAPIToken()
-        if !token.isEmpty {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        return request
     }
 
     private func recordSuccess(path: String) async {

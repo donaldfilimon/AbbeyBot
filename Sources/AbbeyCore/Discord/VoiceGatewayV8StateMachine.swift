@@ -103,34 +103,51 @@ public struct VoiceGatewayV8StateMachine: Sendable {
         case .ready(let ready):
             guard phase == .awaitingReady else { throw VoiceGatewayV8Error.unexpectedEvent }
             readyPayload = ready
-            resumeEligible = true
             phase = .awaitingProtocolSelection
 
         case .sessionDescription(let description):
-            guard phase == .awaitingSessionDescription,
-                  description.mode == selectedMode,
-                  description.daveProtocolVersion == 0
-            else {
-                throw description.daveProtocolVersion == 0
-                    ? VoiceGatewayV8Error.invalidEncryptionMode
-                    : VoiceGatewayV8Error.unsupportedDAVEVersion(description.daveProtocolVersion)
+            guard phase == .awaitingSessionDescription else {
+                throw VoiceGatewayV8Error.unexpectedEvent
+            }
+            guard description.mode == selectedMode else {
+                throw VoiceGatewayV8Error.invalidEncryptionMode
+            }
+            guard description.daveProtocolVersion <= identity.maxDAVEProtocolVersion else {
+                throw VoiceGatewayV8Error.unsupportedDAVEVersion(description.daveProtocolVersion)
             }
             phase = .established
             resumeEligible = true
 
         case .resumed:
-            guard phase == .resuming else { throw VoiceGatewayV8Error.unexpectedEvent }
+            guard phase == .resuming,
+                  resumeEligible,
+                  readyPayload != nil,
+                  selectedMode != nil
+            else { throw VoiceGatewayV8Error.unexpectedEvent }
             phase = .established
-            resumeEligible = true
+
+        case .speaking, .clientsConnect, .clientDisconnect:
+            guard phase == .awaitingProtocolSelection
+                    || phase == .awaitingSessionDescription
+                    || phase == .established
+                    || phase == .resuming
+            else { throw VoiceGatewayV8Error.unexpectedEvent }
         }
 
-        // An invalid event must never advance the resume boundary.
+        // Voice Gateway v8 promises numbered messages in order. Retaining the
+        // latest validated value, instead of comparing integer magnitude,
+        // correctly acknowledges the gateway's fixed-width sequence wrap.
         if let sequence = event.sequence {
-            if lastReceivedSequence == nil || sequence > lastReceivedSequence! {
-                lastReceivedSequence = sequence
-            }
+            lastReceivedSequence = sequence
         }
         return outbound
+    }
+
+    /// Commits a sequence from a separately decoded server control frame, such
+    /// as a binary DAVE message, after that frame has passed protocol validation.
+    public mutating func commitServerSequence(_ sequence: Int) throws {
+        guard sequence >= 0 else { throw VoiceGatewayV8Error.invalidSequence }
+        lastReceivedSequence = sequence
     }
 
     /// Produces a heartbeat when due and fails the connection when the prior ACK timed out.

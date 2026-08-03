@@ -142,6 +142,7 @@ private enum VoiceGatewayV8Bounds {
     static let address = 255
     static let mode = 128
     static let maximumModes = 32
+    static let maximumDAVEProtocolVersion = Int(UInt16.max)
 
     static func require(_ value: String, field: String, maximum: Int) throws {
         guard !value.isEmpty else { throw VoiceGatewayV8Error.emptyField(field) }
@@ -153,26 +154,36 @@ private enum VoiceGatewayV8Bounds {
 }
 
 public struct VoiceGatewayV8Identify: Codable, Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public static let opcode = 0
     public let serverID: String
     public let userID: String
     public let sessionID: String
     public let token: String
-    /// Fixed at zero until a real libdave integration exists.
+    /// Highest DAVE protocol version the active media runtime can complete.
+    /// Portable callers default to zero and therefore remain fail-closed.
     public let maxDAVEProtocolVersion: Int
 
-    public init(serverID: String, userID: String, sessionID: String, token: String) throws {
+    public init(
+        serverID: String,
+        userID: String,
+        sessionID: String,
+        token: String,
+        maxDAVEProtocolVersion: Int = 0
+    ) throws {
         try VoiceGatewayV8Bounds.require(serverID, field: "server_id", maximum: VoiceGatewayV8Bounds.identifier)
         try VoiceGatewayV8Bounds.require(userID, field: "user_id", maximum: VoiceGatewayV8Bounds.identifier)
         try VoiceGatewayV8Bounds.require(sessionID, field: "session_id", maximum: VoiceGatewayV8Bounds.sessionID)
         try VoiceGatewayV8Bounds.require(token, field: "token", maximum: VoiceGatewayV8Bounds.token)
+        guard (0...VoiceGatewayV8Bounds.maximumDAVEProtocolVersion).contains(maxDAVEProtocolVersion) else {
+            throw VoiceGatewayV8Error.unsupportedDAVEVersion(maxDAVEProtocolVersion)
+        }
         self.serverID = serverID
         self.userID = userID
         self.sessionID = sessionID
         self.token = token
-        self.maxDAVEProtocolVersion = 0
+        self.maxDAVEProtocolVersion = maxDAVEProtocolVersion
     }
 
     enum CodingKeys: String, CodingKey {
@@ -184,9 +195,18 @@ public struct VoiceGatewayV8Identify: Codable, Equatable, Sendable,
     }
 
     public var description: String {
-        "VoiceGatewayV8Identify(serverID: \(serverID), userID: \(userID), sessionID: \(sessionID), token: <redacted>, maxDAVEProtocolVersion: 0)"
+        "VoiceGatewayV8Identify(serverID: \(serverID), userID: \(userID), sessionID: <redacted>, token: <redacted>, maxDAVEProtocolVersion: \(maxDAVEProtocolVersion))"
     }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "serverID": serverID,
+            "userID": userID,
+            "sessionID": "<redacted>",
+            "token": "<redacted>",
+            "maxDAVEProtocolVersion": maxDAVEProtocolVersion,
+        ], displayStyle: .struct)
+    }
 }
 
 public struct VoiceGatewayV8Hello: Codable, Equatable, Sendable {
@@ -275,7 +295,7 @@ public struct VoiceGatewayV8SelectProtocol: Codable, Equatable, Sendable {
 }
 
 public struct VoiceGatewayV8SessionDescription: Codable, Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public static let opcode = 4
     public let mode: String
@@ -285,7 +305,7 @@ public struct VoiceGatewayV8SessionDescription: Codable, Equatable, Sendable,
     public init(mode: String, secretKey: [UInt8], daveProtocolVersion: Int) throws {
         try VoiceGatewayV8Bounds.require(mode, field: "mode", maximum: VoiceGatewayV8Bounds.mode)
         guard secretKey.count == 32 else { throw VoiceGatewayV8Error.invalidSecretKeyLength }
-        guard daveProtocolVersion == 0 else {
+        guard (0...VoiceGatewayV8Bounds.maximumDAVEProtocolVersion).contains(daveProtocolVersion) else {
             throw VoiceGatewayV8Error.unsupportedDAVEVersion(daveProtocolVersion)
         }
         self.mode = mode
@@ -307,6 +327,13 @@ public struct VoiceGatewayV8SessionDescription: Codable, Equatable, Sendable,
         "VoiceGatewayV8SessionDescription(mode: \(mode), secretKey: <redacted>, daveProtocolVersion: \(daveProtocolVersion))"
     }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "mode": mode,
+            "secretKey": "<redacted>",
+            "daveProtocolVersion": daveProtocolVersion,
+        ], displayStyle: .struct)
+    }
 }
 
 public struct VoiceGatewayV8Speaking: Codable, Equatable, Sendable {
@@ -314,19 +341,76 @@ public struct VoiceGatewayV8Speaking: Codable, Equatable, Sendable {
     public let speaking: Int
     public let delay: Int
     public let ssrc: UInt32
+    public let userID: String?
 
-    public init(speaking: Int, delay: Int = 0, ssrc: UInt32) throws {
+    public init(speaking: Int, delay: Int = 0, ssrc: UInt32, userID: String? = nil) throws {
         guard speaking >= 0, speaking <= 7, delay >= 0, delay <= 60_000 else {
             throw VoiceGatewayV8Error.malformedPayload
+        }
+        if let userID {
+            try VoiceGatewayV8Bounds.require(
+                userID,
+                field: "user_id",
+                maximum: VoiceGatewayV8Bounds.identifier
+            )
         }
         self.speaking = speaking
         self.delay = delay
         self.ssrc = ssrc
+        self.userID = userID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case speaking, delay, ssrc
+        case userID = "user_id"
+    }
+
+    fileprivate func validated() throws -> Self {
+        try Self(speaking: speaking, delay: delay, ssrc: ssrc, userID: userID)
     }
 }
 
+public struct VoiceGatewayV8ClientsConnect: Codable, Equatable, Sendable {
+    public static let opcode = 11
+    public let userIDs: [String]
+
+    public init(userIDs: [String]) throws {
+        guard userIDs.count <= 10_000 else { throw VoiceGatewayV8Error.malformedPayload }
+        for userID in userIDs {
+            try VoiceGatewayV8Bounds.require(
+                userID,
+                field: "user_id",
+                maximum: VoiceGatewayV8Bounds.identifier
+            )
+        }
+        self.userIDs = userIDs
+    }
+
+    enum CodingKeys: String, CodingKey { case userIDs = "user_ids" }
+
+    fileprivate func validated() throws -> Self { try Self(userIDs: userIDs) }
+}
+
+public struct VoiceGatewayV8ClientDisconnect: Codable, Equatable, Sendable {
+    public static let opcode = 13
+    public let userID: String
+
+    public init(userID: String) throws {
+        try VoiceGatewayV8Bounds.require(
+            userID,
+            field: "user_id",
+            maximum: VoiceGatewayV8Bounds.identifier
+        )
+        self.userID = userID
+    }
+
+    enum CodingKeys: String, CodingKey { case userID = "user_id" }
+
+    fileprivate func validated() throws -> Self { try Self(userID: userID) }
+}
+
 public struct VoiceGatewayV8Resume: Codable, Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
 {
     public static let opcode = 7
     public let serverID: String
@@ -353,9 +437,17 @@ public struct VoiceGatewayV8Resume: Codable, Equatable, Sendable,
     }
 
     public var description: String {
-        "VoiceGatewayV8Resume(serverID: \(serverID), sessionID: \(sessionID), token: <redacted>, seqAck: \(sequenceAcknowledgement))"
+        "VoiceGatewayV8Resume(serverID: \(serverID), sessionID: <redacted>, token: <redacted>, seqAck: \(sequenceAcknowledgement))"
     }
     public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "serverID": serverID,
+            "sessionID": "<redacted>",
+            "token": "<redacted>",
+            "sequenceAcknowledgement": sequenceAcknowledgement,
+        ], displayStyle: .struct)
+    }
 }
 
 public struct VoiceGatewayV8Resumed: Codable, Equatable, Sendable {
@@ -411,7 +503,10 @@ public struct VoiceGatewayV8Inbound: Sendable, CustomStringConvertible, CustomDe
         case heartbeatACK(VoiceGatewayV8HeartbeatACK)
         case ready(VoiceGatewayV8Ready)
         case sessionDescription(VoiceGatewayV8SessionDescription)
+        case speaking(VoiceGatewayV8Speaking)
         case resumed(VoiceGatewayV8Resumed)
+        case clientsConnect(VoiceGatewayV8ClientsConnect)
+        case clientDisconnect(VoiceGatewayV8ClientDisconnect)
     }
 
     public let sequence: Int?
@@ -423,7 +518,10 @@ public struct VoiceGatewayV8Inbound: Sendable, CustomStringConvertible, CustomDe
         case .heartbeatACK: "heartbeatACK"
         case .ready: "ready"
         case .sessionDescription: "sessionDescription(<redacted>)"
+        case .speaking: "speaking"
         case .resumed: "resumed"
+        case .clientsConnect: "clientsConnect"
+        case .clientDisconnect: "clientDisconnect"
         }
         return "VoiceGatewayV8Inbound(sequence: \(sequence.map(String.init) ?? "nil"), payload: \(name))"
     }
@@ -436,12 +534,12 @@ public enum VoiceGatewayV8Decoder {
     private struct Envelope<Payload: Decodable>: Decodable {
         let op: Int
         let d: Payload
-        let s: Int?
+        let seq: Int?
     }
 
     public static func decode(_ data: Data) throws -> VoiceGatewayV8Inbound {
         guard data.count <= maximumPayloadBytes else { throw VoiceGatewayV8Error.payloadTooLarge }
-        struct Header: Decodable { let op: Int; let s: Int? }
+        struct Header: Decodable { let op: Int; let seq: Int? }
         let decoder = JSONDecoder()
         let header: Header
         do {
@@ -449,24 +547,33 @@ public enum VoiceGatewayV8Decoder {
         } catch {
             throw VoiceGatewayV8Error.malformedPayload
         }
-        if let sequence = header.s, sequence < 0 { throw VoiceGatewayV8Error.invalidSequence }
+        if let sequence = header.seq, sequence < 0 { throw VoiceGatewayV8Error.invalidSequence }
 
         do {
             switch header.op {
             case VoiceGatewayV8Hello.opcode:
                 let envelope = try decoder.decode(Envelope<VoiceGatewayV8Hello>.self, from: data)
-                return VoiceGatewayV8Inbound(sequence: envelope.s, payload: .hello(try envelope.d.validated()))
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .hello(try envelope.d.validated()))
             case VoiceGatewayV8HeartbeatACK.opcode:
                 let envelope = try decoder.decode(Envelope<VoiceGatewayV8HeartbeatACK>.self, from: data)
-                return VoiceGatewayV8Inbound(sequence: envelope.s, payload: .heartbeatACK(envelope.d))
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .heartbeatACK(envelope.d))
             case VoiceGatewayV8Ready.opcode:
                 let envelope = try decoder.decode(Envelope<VoiceGatewayV8Ready>.self, from: data)
-                return VoiceGatewayV8Inbound(sequence: envelope.s, payload: .ready(try envelope.d.validated()))
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .ready(try envelope.d.validated()))
             case VoiceGatewayV8SessionDescription.opcode:
                 let envelope = try decoder.decode(Envelope<VoiceGatewayV8SessionDescription>.self, from: data)
-                return VoiceGatewayV8Inbound(sequence: envelope.s, payload: .sessionDescription(try envelope.d.validated()))
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .sessionDescription(try envelope.d.validated()))
+            case VoiceGatewayV8Speaking.opcode:
+                let envelope = try decoder.decode(Envelope<VoiceGatewayV8Speaking>.self, from: data)
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .speaking(try envelope.d.validated()))
             case VoiceGatewayV8Resumed.opcode:
-                return VoiceGatewayV8Inbound(sequence: header.s, payload: .resumed(VoiceGatewayV8Resumed()))
+                return VoiceGatewayV8Inbound(sequence: header.seq, payload: .resumed(VoiceGatewayV8Resumed()))
+            case VoiceGatewayV8ClientsConnect.opcode:
+                let envelope = try decoder.decode(Envelope<VoiceGatewayV8ClientsConnect>.self, from: data)
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .clientsConnect(try envelope.d.validated()))
+            case VoiceGatewayV8ClientDisconnect.opcode:
+                let envelope = try decoder.decode(Envelope<VoiceGatewayV8ClientDisconnect>.self, from: data)
+                return VoiceGatewayV8Inbound(sequence: envelope.seq, payload: .clientDisconnect(try envelope.d.validated()))
             default:
                 throw VoiceGatewayV8Error.unsupportedOpcode(header.op)
             }

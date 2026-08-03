@@ -156,19 +156,18 @@ struct IncrementalSyncCursorTests {
         #expect(set[.channels] == nil)
     }
 
-    @Test func cursorSetDecodesTransientSynthesizedDictionaryFixture() throws {
+    @Test func cursorSetIgnoresRetiredTransientDictionaryFixture() throws {
+        // The dev-only synthesized `values` representation was never released; its decode
+        // branch is gone. The payload still decodes (unknown keys are ignored) into an
+        // empty set, which callers treat as "no cursor" — a safe full bootstrap pull.
         let data = Data(#"{"values":["users",{"changedAt":123,"stableID":"g:u"},"messages",{"changedAt":456,"stableID":"m-0500"}]}"#.utf8)
 
         let set = try JSONDecoder().decode(SyncPullCursorSet.self, from: data)
 
-        #expect(set[.users] == SyncPullCursor(
-            changedAt: Date(timeIntervalSinceReferenceDate: 123),
-            stableID: "g:u"
-        ))
-        #expect(set[.messages] == SyncPullCursor(
-            changedAt: Date(timeIntervalSinceReferenceDate: 456),
-            stableID: "m-0500"
-        ))
+        for entity in SyncPullEntity.allCases {
+            #expect(set[entity] == nil)
+        }
+        #expect(set.earliestChangedAt == nil)
     }
 
     @Test func drainConsumesSaturatedPageAndFinalShortPage() async throws {

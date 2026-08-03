@@ -19,6 +19,16 @@ status: in_progress
 - Completion evidence must include protocol fixtures, local WebSocket/UDP and loss/reorder fault
   tests, Opus loopback, Apple audio-device/permission tests, the full repository gate, and a live
   join/speak/hear/reconnect/leave run using a rotated bot token in an authorized test guild.
+- **Audit 2026-08-01 (read-only, against `2a423e1`):** 4 of 12 checklist items are genuinely
+  shipped with tests (handshake accumulator, Voice Gateway v8 state machine, UDP discovery +
+  protocol selection, RTPSIZE transport encryption — green inside the 234-test AbbeyCoreTests
+  run). The rest are PARTIAL: well-built parts (pinned real-MLS libdave binding, libopus codec,
+  RTP pieces, AVAudioEngine adapter, a fully-tested but *dead-code* reconnect client) that no
+  production path composes — `nextAudioFrame()`, `sendProtectedPacket`, and transport encryption
+  have no production callers, and nothing advertises nonzero DAVE (honestly). CI never sets
+  `ABBEY_NATIVE_MEDIA=1` and has no macOS job, so none of the native/media suites run there.
+  Live evidence (item 12) stays missing and is operator-blocked, not code-blocked. Full detail
+  in `tasks/todo.md` → "Voice audit snapshot".
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -34,6 +44,13 @@ status: in_progress
   tests, packet loss/reorder/congestion simulations, camera and screen-device interruption, bounded
   CPU/memory/thermal behavior, the full repository gate, and live send/receive evidence for both a
   camera stream and a Go Live screen stream.
+- **Audit 2026-08-01 (read-only, against `2a423e1`):** no checklist item is closeable. The one
+  real asset is the capture engine — genuine AVFoundation/ScreenCaptureKit `VideoCaptureAdapter`
+  with 17 hermetic tests — but it has no preview and no app code path can start it. Video
+  signaling, video RTP/codec negotiation, DAVE video callers/tests, and render/start-stop UI are
+  absent (inbound video opcode 12 is an explicit error). 9 of the 11 required fault/perf scenarios
+  are structurally unreachable until a video transport exists. Written docs and UI copy remain
+  claim-honest. Full detail in `tasks/todo.md` → "Video audit snapshot".
 
 ## Release and SwiftData hardening
 status: done
@@ -152,7 +169,26 @@ status: done
   a warning against piping build output through `tail` (masks the exit code).
 
 ## Apply strict code-quality findings from PR #53's merged diff
-status: todo
+status: done
+- Both findings applied (2026-08-01). **#1** `SyncTransportPolicy.makeRequest(baseURL:path:method:queryItems:bearerToken:)`
+  is now the single request-building boundary in AbbeyCore (validate → strip slash → join
+  path/query → attach Bearer; nil/empty token omits the header); `ServerSyncClient.makeRequest`
+  and `AbbeyServerClient.makeRequest` both delegate, keeping only their own error mapping. Three
+  new AbbeyCore tests cover join/token attach, nil-vs-empty token omission, and
+  rejected-transport throw. **#2** The dead `transientValuesKey` decode branch is deleted from
+  `SyncPullCursorSet.init(from:)`; all three fixture tests that asserted the dev-only format
+  decoded (core, desktop store, CLI file store — the third surfaced by the full-bundle run after
+  the first grep missed it) were repurposed to assert the safe degradation: empty set → full
+  bootstrap pull, never a bogus cursor and never misread as a legacy epoch.
+- Verified in a tree carrying concurrent in-flight voice work: server-role
+  `AbbeyServerTests` 21 + `AbbeyCoreTests` 234 + `AbbeyCLITests` 30 green in one run, then
+  `AbbeyServerKitTests` 117 green after the third-fixture fix (in-log `EXIT:0`, not the wrapper
+  code); desktop `SyncCursorStoreTests` + `AbbeyServerClientTransportTests` 17 green with the
+  full desktop build (including the in-flight voice/media targets) completing. Committed on
+  `cursor/complete-discord-voice` (`1e5b6e6`/`2a423e1`) and landing through PR #55 — the original
+  intent to land on a separate scoped branch was overtaken when a concurrent session swept the
+  working tree into its own commit; recorded here so the ledger matches the branch's real contents
+  (corrected 2026-08-01 after PR #55 code review flagged the stale claim).
 - A strict code-quality review of `aa1fb60...b585947` (the diff that merged as PR #53, ~1500 lines
   / 41 files) surfaced two confirmed structural findings, not yet applied:
   1. **Duplicated transport-request builder.** `ServerSyncClient.makeRequest`

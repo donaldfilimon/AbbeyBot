@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Transport boundary for Abbey sync traffic.
 ///
@@ -50,6 +53,38 @@ public enum SyncTransportPolicy: Sendable {
         }
 
         return url
+    }
+
+    /// Build a sync request against a validated base URL: validate the transport, strip a
+    /// trailing slash, join path + query, and attach an optional Bearer token. The single
+    /// request-building boundary for every sync client, so the validate-before-credentials
+    /// guarantee cannot drift between call sites.
+    public static func makeRequest(
+        baseURL: String,
+        path: String,
+        method: String,
+        queryItems: [URLQueryItem] = [],
+        bearerToken: String? = nil
+    ) throws -> URLRequest {
+        let validatedBase = try validate(baseURL: baseURL).absoluteString
+        let base = validatedBase.hasSuffix("/") ? String(validatedBase.dropLast()) : validatedBase
+        let suffix = path.hasPrefix("/") ? path : "/\(path)"
+        guard var components = URLComponents(string: base + suffix) else {
+            throw PolicyError.invalidURL
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw PolicyError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        if let bearerToken, !bearerToken.isEmpty {
+            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     private static let exactLoopbackHosts: Set<String> = [

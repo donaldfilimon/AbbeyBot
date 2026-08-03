@@ -2,31 +2,60 @@
 
 Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
-## Apply strict code-quality findings from PR #53's merged diff — not started
+## Apply strict code-quality findings from PR #53's merged diff — done
 
-- [ ] Dedupe `ServerSyncClient.makeRequest` / `AbbeyServerClient.makeRequest` behind a shared
-      AbbeyCore helper (e.g. on `SyncTransportPolicy`) instead of two independent copies of
-      validate→strip-slash→join-path/query→attach-Bearer-token.
-- [ ] Delete the `transientValuesKey` decode branch in `SyncPullCursorSet.init(from:)` — dead
-      compat for a dev-only format `SyncCursorStore.pullCursors`'s `try?` already degrades safely
-      without it.
+- [x] Dedupe `ServerSyncClient.makeRequest` / `AbbeyServerClient.makeRequest` behind a shared
+      AbbeyCore helper — added `SyncTransportPolicy.makeRequest(baseURL:path:method:queryItems:bearerToken:)`
+      (validate→strip-slash→join-path/query→attach-Bearer-token, empty/nil token omits the
+      header); both clients now delegate and keep only their own error mapping
+      (`ClientError.invalidURL` / `SyncClientError.notConfigured`+`invalidURL`). Three new
+      AbbeyCore tests cover join/token-attach, nil-vs-empty token omission, and
+      rejected-transport throw-before-request.
+- [x] Delete the `transientValuesKey` decode branch in `SyncPullCursorSet.init(from:)` — dead
+      compat for a dev-only format removed along with its doc-comment claims. The two fixture
+      tests that asserted the transient format decoded were repurposed to assert the safe
+      degradation instead: the payload now decodes to an empty set (core) and the desktop store
+      degrades to a full bootstrap pull, never a bogus cursor.
+- [x] Third fixture caught by the full-bundle run: `transientDictionaryFixtureSurvivesCLICursorStoreUpgrade`
+      in `Tests/AbbeyServerKitTests/ServerSyncApplyTests.swift` (missed by the initial grep) —
+      repurposed like the other two to assert the CLI file store degrades to a full bootstrap
+      pull and does not misread the payload as a legacy epoch.
+- [x] Verified (this tree, concurrent voice work in flight): targeted server-role suites 20 green;
+      desktop `SyncCursorStoreTests|AbbeyServerClientTransportTests` 17 green (full desktop build
+      completed including in-flight voice/media targets); full non-desktop bundles green —
+      `AbbeyServerTests` 21 + `AbbeyCoreTests` 234 + `AbbeyCLITests` 30, then
+      `AbbeyServerKitTests` 117 after the third-fixture fix (in-log `EXIT:0`).
 
 ## Discord application + real voice audio — in progress
 
 - [ ] Harden the DiscordBM main-gateway lifecycle: READY remains the connected authority, explicit
       disconnect closes the pinned manager, failures become observable, and voice presence is not
       reported as joined before Discord confirms the bot's own `VOICE_STATE_UPDATE`.
-- [ ] Pair the unordered self `VOICE_STATE_UPDATE` and `VOICE_SERVER_UPDATE` events in a
+- [x] Pair the unordered self `VOICE_STATE_UPDATE` and `VOICE_SERVER_UPDATE` events in a
       generation-scoped handshake accumulator; cover both event orders, wrong guild/user/channel,
       nil endpoint, stale partials, cancellation, timeout, and single-emission behavior.
-- [ ] Implement the separate Discord Voice Gateway v8 state machine: endpoint normalization,
+      *(Audited 2026-08-01: `VoiceGatewayHandshake.swift` + `VoiceGatewayHandshakeTests` cover
+      every listed sub-requirement; green in the 234-test AbbeyCoreTests run. Bridge-side
+      consumption of the accumulator remains untested — tracked under item 1.)*
+- [x] Implement the separate Discord Voice Gateway v8 state machine: endpoint normalization,
       Identify, Hello, heartbeat/ACK with `seq_ack`, Ready, Session Description, Speaking, binary
       payload decoding, close-code policy, and bounded parsing.
-- [ ] Implement UDP/IP discovery and protocol selection, including exact discovery packet fixtures,
+      *(Audited 2026-08-01: `VoiceGatewayV8StateMachine/Models` + three suites incl. seq wrap,
+      ACK mismatch, resume poisoning, close-code policy. Caveat: `speaking(flags:)` is modeled
+      and tested but not yet sent by the production session — media pipeline item still open.)*
+- [x] Implement UDP/IP discovery and protocol selection, including exact discovery packet fixtures,
       NAT-visible address/port handling, datagram receive, and a real local UDP echo test.
-- [ ] Implement transport encryption with required `aead_xchacha20_poly1305_rtpsize` support and
+      *(Audited 2026-08-01: exact 74-byte fixtures, one retained socket preserving the NAT
+      mapping, Select Protocol actually sent, and real `DatagramBootstrap` loopback tests on
+      `127.0.0.1:0` across three suites.)*
+- [x] Implement transport encryption with required `aead_xchacha20_poly1305_rtpsize` support and
       advertised AES-256-GCM preference; prove nonce uniqueness, authentication failure, tamper,
       replay, counter-wrap, and known-answer behavior.
+      *(Audited 2026-08-01: both RTPSIZE modes, AES-preferred negotiation, nonce reserved before
+      suspension, per-SSRC replay bitmap, counter exhaustion → nil. Caveats: RFC known-answer
+      vectors live in `NativeAEADTests` which only builds under `ABBEY_NATIVE_MEDIA=1` (CI never
+      sets it), and `DiscordVoiceTransportEncryption` is not yet constructed by production code —
+      composition tracked under the RTP-pipeline and voice-gate items.)*
 - [ ] Integrate a pinned, reproducible build of Discord's official `libdave` C API and implement the
       DAVE/MLS voice opcodes, protocol transitions, roster/key-ratchet management, and Opus-frame
       encryption/decryption. Do not advertise a nonzero DAVE version until this path is real.
@@ -52,6 +81,34 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       and capture live current-protocol evidence for join, DAVE negotiation, speak, hear, network
       reconnect/resume, channel move, and leave without logging credentials or raw audio.
 
+### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
+
+Open items above, graded against the committed tree at `2a423e1`:
+- **Item 1 (gateway lifecycle) PARTIAL** — implementation hardened (generation-scoped READY
+  authority, presence only from confirmed self `VOICE_STATE_UPDATE`, real `disconnect()`), but
+  `DiscordBridge.handleVoiceStateUpdate`/`handleVoiceServerUpdate` have zero bridge-level tests.
+- **libdave/DAVE PARTIAL** — pinned libdave 1.1.1 binding (`NativeDAVESession`) is real MLS, never
+  enables passthrough, and nothing advertises nonzero DAVE (honest default 0). Missing piece is the
+  control-handler bridge: production factory passes `.portableUnavailable`. A concurrent session
+  has the bridge (`NativeDAVEControlAdapter`) in flight, untracked at audit time — once it lands,
+  re-audit the "do not advertise nonzero until real" constraint.
+- **Opus/RTP PARTIAL** — real libopus binding + RTP header/clock/replay pieces exist, but no
+  jitter/reorder buffer, no PLC integration, no mixing, no silence frames, no loopback golden test,
+  and nothing composes the parts: `nextAudioFrame()`/`sendProtectedPacket`/transport encryption are
+  never called from production sources.
+- **AVAudioEngine PARTIAL** — real engine adapter, permissions, device catalog, 20 ms framing,
+  mute/deafen, interruption events, hermetic tests; missing PTT/VAD, output volume, speaker levels;
+  device removal is stop-without-restart. macOS media tests never run in CI (no macOS job).
+- **Reconnect/resume PARTIAL** — `VoiceGatewayClient` implements resume/backoff/close-code
+  dispositioning with 14 tests but is dead code: the production factory builds
+  `DiscordVoiceGatewaySession`, which has no reconnect; "buffered" resume exists nowhere.
+- **`/voice` + UI PARTIAL** — honest presence-only copy, kill switch, device pickers, disclaimed
+  meters; missing mute/deafen/PTT/VAD/volume controls and stage state.
+- **Voice gate PARTIAL** — real UDP loopback yes; scripted local Voice WebSocket server no (all
+  gateway tests use in-process fake transports); `ABBEY_NATIVE_MEDIA=1` suites are outside CI.
+- **Item 12 (live evidence) MISSING** — no rotation record, no live-run artifact; blocked on a
+  real guild + operator, not on code in this environment.
+
 ## Discord video + Go Live — in progress
 
 - [ ] Implement Voice Gateway video source/sink and stream signaling, including SSRC allocation,
@@ -76,6 +133,27 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       camera send/receive and Go Live screen send/receive, reconnect/resume, source switching, and
       clean stop in an isolated guild using a rotated token. Local fixtures alone cannot close this
       item.
+
+### Video audit snapshot (2026-08-01, read-only)
+
+Nothing checkable; graded against `2a423e1`:
+- **Signaling MISSING** — no video opcodes exist; inbound opcode 12 is an explicit
+  `unsupportedOpcode` error; no video SSRC allocation, no source announce/sink wants.
+- **Capture PARTIAL (the real work so far)** — `VideoCaptureAdapter` is genuine
+  AVFoundation/ScreenCaptureKit with permission gating, source enumeration/selection, screen-lock
+  kill, bounded queues, and 17 hermetic tests. But there is no preview surface, and nothing in the
+  app can call `startCapture()` — `MediaSessionPlatform` exposes only `stopAllCapture()`.
+- **Video RTP/codec MISSING** — `DiscordVoiceRTPMediaKind.video` is a label only; no pacer,
+  keyframes, RTX/feedback, reassembly, or negotiation fields on Select Protocol.
+- **DAVE video PARTIAL** — `NativeDAVESession` accepts `.video` + five codecs but has zero video
+  callers and zero video tests; only audio protect/unprotect is exercised.
+- **Render/UI MISSING** — read-only "Camera capture: Stopped" labels; no preview, tiles, or
+  start/stop controls; `daveLabel`/`captureLabel` hardcoded to unavailable copy.
+- **Fault/perf tests** — 2 of 11 scenarios exist (screen lock, device removal); the other 9 are
+  structurally unreachable until a video transport exists.
+- Claim-honesty: video-shaped vocabulary (`videoQueue`, `.video` media kinds, capture status UI)
+  greps like a video feature but has no wire path; written docs (`discord-voice-architecture.md`,
+  UI disclaimers) remain honest.
 
 ## Release and SwiftData hardening — closed
 
