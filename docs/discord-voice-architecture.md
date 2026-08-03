@@ -15,6 +15,14 @@ Discord voice is a separate real-time subsystem from the bot gateway:
 
 The voice server token, session ID, endpoint, transport secret, and DAVE epoch keys are ephemeral secrets. They must remain in actor-owned memory, must not be encoded into SwiftData/Fluent/WDBX/checkpoints, and must not appear in logs, errors, metrics, or UI.
 
+The implemented negotiated-media bootstrap follows that boundary directly. After validating Ready,
+Select Protocol, Session Description, and DAVE state, the Voice Gateway constructs a one-shot
+capability containing its generation, audio SSRC, typed AEAD mode, 32-byte transport key, and
+effective DAVE version. It installs that capability into a session-owned media plane and resolves
+only secret-free readiness booleans to the controller. The raw Session Description is not retained.
+Reset preserves a generation high-water mark, preventing late tasks from reinstalling retired key
+material. This is bootstrap proof, not a packet pump or shipped-audio claim.
+
 ## State model
 
 The operator-facing state must distinguish these phases:
@@ -41,6 +49,7 @@ An outbound join request is never equivalent to `readyMuted` or `readySpeaking`.
 | UDP/RTP transport | IP discovery, sequence/timestamp/SSRC, AEAD nonce rules, replay window | `AbbeyCore` |
 | Opus adapter | 48 kHz encode/decode, frame duration, PLC/FEC controls | C interop module used by `AbbeyCore` |
 | DAVE adapter | MLS session, transition IDs, frame encrypt/decrypt, key ratchets | C++/C interop around Discord `libdave` |
+| Negotiated media plane | Consume the one-shot key capability; own AEAD, Opus, current-DAVE authority, and retained UDP transport | `AbbeyMediaNative` |
 | Audio device adapter | Capture/playback, route changes, permissions, mute/deafen | `AbbeyBotApp` on macOS |
 | Headless audio adapter | Explicit no-device/file/test sources and sinks | server/CLI-safe module |
 | Voice controller | Own one active generation, cancellation, retry budget, redacted state publication | `AbbeyCore` |
@@ -55,6 +64,7 @@ An outbound join request is never equivalent to `readyMuted` or `readySpeaking`.
 - Use bounded queues and backpressure between capture, codec, crypto, and UDP. Audio may be dropped to preserve real-time behavior; memory may not grow without bound.
 - Authenticate before decoding untrusted media. Enforce RTP size limits, SSRC mapping, sequence/replay windows, and safe integer arithmetic.
 - Redact Discord tokens, voice credentials, transport keys, DAVE key material, and raw microphone data from diagnostics.
+- Tear down in the order media-plane reset, Voice WebSocket close, retained UDP socket close; reset must remain idempotent and generation-scoped.
 - A reconnect policy must distinguish resumable Voice Gateway failures from a required full main-gateway rejoin, and explicit leave must cancel all retries.
 - Audio capture permission denial and missing devices are normal operator-visible states, not crashes.
 

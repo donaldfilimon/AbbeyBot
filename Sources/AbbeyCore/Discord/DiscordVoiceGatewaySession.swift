@@ -123,7 +123,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private nonisolated let safeDescription = "DiscordVoiceGatewaySession(endpoint: <redacted>, credentials: <redacted>)"
     private let transport: VoiceGatewayClientTransport
     private let clock: VoiceGatewayClientClock
-    private let mediaAttestation: DiscordVoiceMediaCapabilityAttestation
+    private let mediaPlane: any DiscordVoiceMediaPlane
     private let daveControlHandler: VoiceGatewayDAVEControlHandler
     private let configuration: DiscordVoiceGatewaySessionConfiguration
 
@@ -135,26 +135,27 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private var daveHandlingTask: Task<[VoiceGatewayDAVEClientMessage], any Error>?
     private var daveMembershipTask: Task<Void, Never>?
     private var readySignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceGatewayTransportReady>?
-    private var descriptionSignal: DiscordVoiceGatewaySessionSignal<VoiceGatewayV8SessionDescription>?
+    private var descriptionSignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceMediaCapabilities>?
     private var selectedMode: DiscordVoiceTransportMode?
-    private var sessionDescription: VoiceGatewayV8SessionDescription?
     private var negotiatedDAVEProtocolVersion: Int?
     private var daveTransitionState: VoiceGatewayDAVETransitionStateMachine
     private var daveConnectionContext: VoiceGatewayDAVEConnectionContext?
     private var recognizedDAVEUserIDs: Set<UInt64> = []
     private var lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
+    private var mediaLifecycleRevision: UInt64 = 0
     private var disconnectRequested = false
 
     public init(
         transport: VoiceGatewayClientTransport = .live(),
         clock: VoiceGatewayClientClock = .continuous,
         mediaAttestation: DiscordVoiceMediaCapabilityAttestation = .portableUnavailable,
+        mediaPlane: (any DiscordVoiceMediaPlane)? = nil,
         daveControlHandler: VoiceGatewayDAVEControlHandler = .unavailable,
         configuration: DiscordVoiceGatewaySessionConfiguration = .init()
     ) {
         self.transport = transport
         self.clock = clock
-        self.mediaAttestation = mediaAttestation
+        self.mediaPlane = mediaPlane ?? DiscordVoiceAttestedMediaPlane(attestation: mediaAttestation)
         self.daveControlHandler = daveControlHandler
         self.configuration = configuration
         self.daveTransitionState = VoiceGatewayDAVETransitionStateMachine(
@@ -211,6 +212,8 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         let connectionGeneration = generation
         disconnectRequested = false
         phase = .connecting
+        mediaLifecycleRevision &+= 1
+        await mediaPlane.reset()
         await daveControlHandler.reset()
         daveConnectionContext = pendingDAVEContext
         recognizedDAVEUserIDs = pendingDAVEContext.map { [$0.selfUserID] } ?? []
@@ -234,12 +237,11 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         }
 
         let readySignal = DiscordVoiceGatewaySessionSignal<DiscordVoiceGatewayTransportReady>()
-        let descriptionSignal = DiscordVoiceGatewaySessionSignal<VoiceGatewayV8SessionDescription>()
+        let descriptionSignal = DiscordVoiceGatewaySessionSignal<DiscordVoiceMediaCapabilities>()
         self.readySignal = readySignal
         self.descriptionSignal = descriptionSignal
         machine = VoiceGatewayV8StateMachine(identity: identity)
         selectedMode = nil
-        sessionDescription = nil
         negotiatedDAVEProtocolVersion = nil
         daveTransitionState.reset()
         lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
@@ -297,7 +299,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
 
         let mode = try DiscordVoiceTransportMode.negotiate(
             advertisedModes: ready.modes,
-            aes256GCMAvailable: mediaAttestation.aes256GCMAvailable
+            aes256GCMAvailable: mediaPlane.aes256GCMAvailable
         )
         let outbound = try machine.selectProtocol(
             address: endpoint.address,
@@ -321,7 +323,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             }
             phase = .failed
             await descriptionSignal?.resolve(.failure(safeFailure(from: error)))
-            await activeSession.close(code: 1011, reason: "protocol selection failed")
+            await resetMediaAndClose(
+                activeSession,
+                code: 1011,
+                reason: "protocol selection failed",
+                generation: connectionGeneration
+            )
             transportTask?.cancel()
             throw error
         }
@@ -337,9 +344,9 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         else { throw DiscordVoiceGatewaySessionError.sessionDescriptionUnavailable }
 
         let connectionGeneration = generation
-        let description: VoiceGatewayV8SessionDescription
+        let capabilities: DiscordVoiceMediaCapabilities
         do {
-            description = try await withTaskCancellationHandler {
+            capabilities = try await withTaskCancellationHandler {
                 try await descriptionSignal.value()
             } onCancel: {
                 Task { await self.disconnect() }
@@ -350,31 +357,13 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         }
         guard generation == connectionGeneration,
               !disconnectRequested,
-              phase == .established,
-              let selectedMode
-        else { throw DiscordVoiceGatewaySessionError.staleConnection }
-
-        let effectiveDAVEProtocolVersion = Int(daveTransitionState.effectiveProtocolVersion)
-        let attested = try await mediaAttestation.attest(
-            transportMode: selectedMode,
-            daveProtocolVersion: effectiveDAVEProtocolVersion
-        )
-        guard generation == connectionGeneration,
-              !disconnectRequested,
               phase == .established
         else { throw DiscordVoiceGatewaySessionError.staleConnection }
-
-        // Never let adapter availability be mistaken for an E2EE-active
-        // connection when Discord selected protocol zero.
-        let capabilities = DiscordVoiceMediaCapabilities(
-            dave: attested.dave
-                && effectiveDAVEProtocolVersion > 0
-                && daveControlHandler.isAvailable,
-            aead: attested.aead && description.mode == selectedMode.rawValue,
-            opus: attested.opus
-        )
-        lastCapabilities = capabilities
-        return capabilities
+        // The install signal proves that the raw Session Description was
+        // consumed. DAVE epoch transitions may subsequently change only the
+        // secret-free readiness booleans.
+        _ = capabilities
+        return lastCapabilities
     }
 
     public func disconnect() async {
@@ -382,9 +371,11 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             generation &+= 1
             disconnectRequested = true
             phase = .disconnecting
+            mediaLifecycleRevision &+= 1
             let failure = DiscordVoiceGatewaySessionError.disconnected
             await readySignal?.resolve(.failure(failure))
             await descriptionSignal?.resolve(.failure(failure))
+            await mediaPlane.reset()
             await cancelDAVEHandling()
             clearEphemeralState(finalPhase: .disconnected)
             return
@@ -400,10 +391,17 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         let task = transportTask
         daveHandlingTask?.cancel()
         task?.cancel()
-        await cancelDAVEHandling()
         if let activeSession {
-            await activeSession.close(code: 1000, reason: "operator disconnect")
+            await resetMediaAndClose(
+                activeSession,
+                code: 1000,
+                reason: "operator disconnect",
+                generation: generation
+            )
+        } else {
+            await mediaPlane.reset()
         }
+        await cancelDAVEHandling()
         if let task { await task.value }
         clearEphemeralState(finalPhase: .disconnected)
     }
@@ -447,7 +445,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 throw VoiceGatewayClientTransportError.connectionClosed
             }
             guard frame.byteCount <= configuration.maximumMessageBytes else {
-                await session.close(code: 1009, reason: "message too large")
+                await resetMediaAndClose(
+                    session,
+                    code: 1009,
+                    reason: "message too large",
+                    generation: connectionGeneration
+                )
                 throw VoiceGatewayClientTransportError.messageTooLarge
             }
             switch frame {
@@ -463,7 +466,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                     if Task.isCancelled || disconnectRequested {
                         throw CancellationError()
                     }
-                    await session.close(code: 1002, reason: "DAVE control failed")
+                    await resetMediaAndClose(
+                        session,
+                        code: 1002,
+                        reason: "DAVE control failed",
+                        generation: connectionGeneration
+                    )
                     throw error
                 }
                 continue
@@ -482,7 +490,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                         if Task.isCancelled || disconnectRequested {
                             throw CancellationError()
                         }
-                        await session.close(code: 1002, reason: "DAVE control failed")
+                        await resetMediaAndClose(
+                            session,
+                            code: 1002,
+                            reason: "DAVE control failed",
+                            generation: connectionGeneration
+                        )
                         throw error
                     }
                     continue
@@ -536,7 +549,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 guard description.daveProtocolVersion <= configuration.maximumDAVEProtocolVersion,
                       description.daveProtocolVersion == 0 || daveControlHandler.isAvailable
                 else {
-                    await session.close(code: 1002, reason: "DAVE protocol unavailable")
+                    await resetMediaAndClose(
+                        session,
+                        code: 1002,
+                        reason: "DAVE protocol unavailable",
+                        generation: connectionGeneration
+                    )
                     throw VoiceGatewayDAVEError.controlProtocolUnavailable
                 }
                 if description.daveProtocolVersion > 0 {
@@ -572,15 +590,64 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                         )
                     } catch {
                         if !Task.isCancelled && !disconnectRequested {
-                            await session.close(code: 1002, reason: "DAVE bootstrap failed")
+                            await resetMediaAndClose(
+                                session,
+                                code: 1002,
+                                reason: "DAVE bootstrap failed",
+                                generation: connectionGeneration
+                            )
                         }
                         throw error
                     }
                 }
-                sessionDescription = description
+                let daveProtocolVersion = daveTransitionState.effectiveProtocolVersion
+                let installationRevision = mediaLifecycleRevision
+                let attested: DiscordVoiceMediaCapabilities
+                do {
+                    guard let ready = machine.readyPayload,
+                          let selectedMode,
+                          description.mode == selectedMode.rawValue
+                    else {
+                        throw DiscordVoiceGatewaySessionError.sessionDescriptionUnavailable
+                    }
+                    let capability = try DiscordVoiceNegotiatedMediaCapability(
+                        generation: connectionGeneration,
+                        ssrc: ready.ssrc,
+                        transportMode: selectedMode,
+                        transportKey: description.secretKey,
+                        daveProtocolVersion: daveProtocolVersion
+                    )
+                    attested = try await mediaPlane.install(capability)
+                } catch {
+                    if !Task.isCancelled && !disconnectRequested {
+                        await resetMediaAndClose(
+                            session,
+                            code: 1002,
+                            reason: "media bootstrap failed",
+                            generation: connectionGeneration
+                        )
+                    }
+                    throw error
+                }
+                guard generation == connectionGeneration,
+                      !disconnectRequested,
+                      phase == .awaitingSessionDescription,
+                      mediaLifecycleRevision == installationRevision
+                else {
+                    await mediaPlane.reset()
+                    throw DiscordVoiceGatewaySessionError.staleConnection
+                }
+                let capabilities = DiscordVoiceMediaCapabilities(
+                    dave: attested.dave
+                        && daveProtocolVersion > 0
+                        && daveControlHandler.isAvailable,
+                    aead: attested.aead,
+                    opus: attested.opus
+                )
                 negotiatedDAVEProtocolVersion = description.daveProtocolVersion
+                lastCapabilities = capabilities
                 phase = .established
-                await descriptionSignal?.resolve(.success(description))
+                await descriptionSignal?.resolve(.success(capabilities))
 
             case .clientsConnect(let payload):
                 if daveControlHandler.isAvailable {
@@ -677,14 +744,33 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         if !isPreDescriptionExternalSender {
             negotiatedDAVEProtocolVersion = Int(transitionState.effectiveProtocolVersion)
         }
-        if previousEffectiveProtocolVersion > 0,
-           transitionState.effectiveProtocolVersion == 0
-        {
-            lastCapabilities = DiscordVoiceMediaCapabilities(
-                dave: false,
-                aead: false,
-                opus: false
+        if previousEffectiveProtocolVersion != transitionState.effectiveProtocolVersion {
+            let version = transitionState.effectiveProtocolVersion
+            let lifecycleRevision = mediaLifecycleRevision
+            let updated = try await mediaPlane.updateDAVEProtocolVersion(
+                version,
+                generation: connectionGeneration
             )
+            guard generation == connectionGeneration,
+                  !disconnectRequested,
+                  phase == .established,
+                  lifecycleRevision == mediaLifecycleRevision
+            else {
+                throw DiscordVoiceGatewaySessionError.staleConnection
+            }
+            lastCapabilities = DiscordVoiceMediaCapabilities(
+                dave: updated.dave
+                    && version > 0
+                    && daveControlHandler.isAvailable,
+                aead: updated.aead,
+                opus: updated.opus
+            )
+            if previousEffectiveProtocolVersion > 0, version == 0 {
+                // Current Discord calls require DAVE. Destroy the media runtime
+                // above and fail the signaling session so a future packet pump
+                // cannot continue with transport-only protection.
+                throw VoiceGatewayDAVEError.controlProtocolUnavailable
+            }
         }
 
         // Binary DAVE frames carry the same server sequence used by heartbeat
@@ -911,7 +997,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 }
             } catch VoiceGatewayV8Error.missedHeartbeatAcknowledgement {
                 self.machine = machine
-                await session.close(code: 1001, reason: "heartbeat ACK timeout")
+                await resetMediaAndClose(
+                    session,
+                    code: 1001,
+                    reason: "heartbeat ACK timeout",
+                    generation: connectionGeneration
+                )
                 throw VoiceGatewayV8Error.missedHeartbeatAcknowledgement
             }
 
@@ -961,6 +1052,8 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     ) async {
         guard generation == connectionGeneration else { return }
         activeSession = nil
+        mediaLifecycleRevision &+= 1
+        await mediaPlane.reset()
 
         if disconnectRequested || error is CancellationError {
             let failure = DiscordVoiceGatewaySessionError.disconnected
@@ -995,7 +1088,6 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         // signal retain only their resolved result long enough to observe the
         // failure; a later phase cannot reuse stale session evidence.
         machine = nil
-        sessionDescription = nil
         readySignal = nil
         descriptionSignal = nil
         selectedMode = nil
@@ -1008,6 +1100,23 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         await daveControlHandler.reset()
         guard generation == connectionGeneration else { return }
         transportTask = nil
+    }
+
+    /// Every locally initiated Voice WebSocket close passes this boundary so
+    /// transport key state is discarded before the close frame is emitted.
+    /// An obsolete socket may still be closed, but it cannot reset a newer
+    /// generation's media plane.
+    private func resetMediaAndClose(
+        _ session: VoiceGatewayClientSession,
+        code: Int,
+        reason: String,
+        generation connectionGeneration: UInt64
+    ) async {
+        if generation == connectionGeneration {
+            mediaLifecycleRevision &+= 1
+            await mediaPlane.reset()
+        }
+        await session.close(code: code, reason: reason)
     }
 
     private func safeFailure(from error: any Error) -> any Error {
@@ -1025,7 +1134,6 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         readySignal = nil
         descriptionSignal = nil
         selectedMode = nil
-        sessionDescription = nil
         negotiatedDAVEProtocolVersion = nil
         daveTransitionState.reset()
         daveConnectionContext = nil

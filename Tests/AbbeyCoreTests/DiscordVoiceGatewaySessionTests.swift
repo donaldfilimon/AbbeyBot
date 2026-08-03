@@ -4,6 +4,55 @@ import Testing
 
 @Suite("Production Discord Voice Gateway session")
 struct DiscordVoiceGatewaySessionTests {
+    @Test("Gateway installs one redacted negotiated-media capability before exposing readiness")
+    func negotiatedMediaHandoffAndResetOrdering() async throws {
+        let operations = DiscordVoiceGatewayOperationRecorder()
+        let harness = DiscordVoiceGatewaySessionHarness(operationRecorder: operations)
+        let plane = DiscordVoiceGatewayMediaPlaneRecorder(operationRecorder: operations)
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            mediaPlane: plane,
+            daveControlHandler: VoiceGatewayDAVEControlHandler(
+                beginSession: { _, _ in [.keyPackage(try .init(Data([0xAB])))] },
+                handle: { _, _ in [] }
+            ),
+            configuration: .init(maximumDAVEProtocolVersion: 1)
+        )
+        let connection = Task { try await gateway.connect(using: pair()) }
+        try await eventually { await harness.attemptCount() == 1 }
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+        await harness.send(readyJSON(modes: [
+            DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue,
+        ]))
+        _ = try await connection.value
+        try await gateway.selectTransport(
+            .init(address: "198.51.100.77", port: 62_077)
+        )
+        await harness.send(sessionDescriptionJSON(
+            mode: DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue,
+            daveProtocolVersion: 1,
+            keyByte: 197
+        ))
+
+        let capabilities = try await gateway.negotiateDAVEAndMedia()
+        #expect(capabilities.isProductionReady)
+        #expect(try await gateway.negotiateDAVEAndMedia() == capabilities)
+        let record = try #require(await plane.installation())
+        #expect(record.installCount == 1)
+        #expect(record.generation == 1)
+        #expect(record.ssrc == 44)
+        #expect(record.mode == .aeadXChaCha20Poly1305RTPSIZE)
+        #expect(record.daveProtocolVersion == 1)
+        #expect(record.transportKeyMatched)
+
+        let rendered = "\(gateway)\n\(String(reflecting: gateway))\n\(await gateway.snapshot())"
+        #expect(!rendered.contains("197, 197"))
+        await operations.clear()
+        await gateway.disconnect()
+        #expect(await operations.values() == ["media-reset", "websocket-close"])
+    }
+
     @Test("external handshake phases share one live socket and portable media stays unavailable")
     func externallyDrivenHandshake() async throws {
         let harness = DiscordVoiceGatewaySessionHarness()
@@ -491,8 +540,8 @@ struct DiscordVoiceGatewaySessionTests {
         #expect(await harness.sentDAVEClientMessages().count == 2)
     }
 
-    @Test("downgrade Execute clears previously attested production readiness")
-    func downgradeClearsCapabilities() async throws {
+    @Test("downgrade Execute destroys media readiness and closes the DAVE-required session")
+    func downgradeFailsSessionClosed() async throws {
         let harness = DiscordVoiceGatewaySessionHarness()
         let handler = DiscordVoiceGatewayDAVEHandlerRecorder()
         let attestation = DiscordVoiceMediaCapabilityAttestation(
@@ -516,11 +565,55 @@ struct DiscordVoiceGatewaySessionTests {
         await harness.send(
             #"{"op":22,"d":{"transition_id":50},"seq":31}"#
         )
-        try await eventually { await handler.receivedOpcodes().count == 2 }
+        try await eventually { await harness.closeCodes().contains(1002) }
+        try await eventually { await gateway.snapshot().phase == .failed }
 
         #expect(!(await gateway.snapshot().mediaProductionReady))
-        #expect(!(try await gateway.negotiateDAVEAndMedia().dave))
-        await gateway.disconnect()
+        await #expect(throws: DiscordVoiceGatewaySessionError.self) {
+            _ = try await gateway.negotiateDAVEAndMedia()
+        }
+    }
+
+    @Test("same-generation heartbeat close cannot publish a suspended DAVE update")
+    func heartbeatCloseInvalidatesSuspendedDAVEUpdate() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let manualClock = DiscordVoiceGatewaySessionManualClock()
+        let plane = DiscordVoiceGatewaySuspendedDAVEUpdatePlane()
+        let handler = DiscordVoiceGatewayDAVEHandlerRecorder()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: VoiceGatewayClientClock(
+                now: { await manualClock.now() },
+                sleep: { milliseconds in try await manualClock.sleep(milliseconds: milliseconds) }
+            ),
+            mediaPlane: plane,
+            daveControlHandler: handler.handler,
+            configuration: .init(
+                heartbeatPollMilliseconds: 1,
+                maximumDAVEProtocolVersion: 1
+            )
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 1)
+        #expect(try await gateway.negotiateDAVEAndMedia().isProductionReady)
+
+        await harness.send(
+            #"{"op":21,"d":{"protocol_version":0,"transition_id":51},"seq":32}"#
+        )
+        try await eventually { await harness.sentDAVEClientMessages().count == 2 }
+        await harness.send(
+            #"{"op":22,"d":{"transition_id":51},"seq":33}"#
+        )
+        await plane.waitUntilUpdateStarted()
+
+        await manualClock.advance(to: 1_000)
+        try await eventually { await harness.sentOpcodes().contains(3) }
+        await manualClock.advance(to: 2_000)
+        try await eventually { await harness.closeCodes().contains(1001) }
+        await plane.releaseUpdate()
+
+        try await eventually { await gateway.snapshot().phase == .failed }
+        #expect(!(await gateway.snapshot().mediaProductionReady))
+        #expect(await plane.updateCount() == 1)
     }
 
     @Test("unexpected DAVE transition fails closed before native dispatch")
@@ -781,6 +874,49 @@ struct DiscordVoiceGatewaySessionTests {
             _ = try await connection.value
         }
         #expect(await gateway.snapshot().phase == .failed)
+    }
+
+    @Test("same-generation heartbeat close cannot publish a suspended media installation")
+    func heartbeatCloseInvalidatesSuspendedMediaInstall() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let manualClock = DiscordVoiceGatewaySessionManualClock()
+        let plane = DiscordVoiceGatewaySuspendedMediaPlane()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: VoiceGatewayClientClock(
+                now: { await manualClock.now() },
+                sleep: { milliseconds in try await manualClock.sleep(milliseconds: milliseconds) }
+            ),
+            mediaPlane: plane,
+            configuration: .init(heartbeatPollMilliseconds: 1)
+        )
+        let connection = Task { try await gateway.connect(using: pair()) }
+        try await eventually { await harness.attemptCount() == 1 }
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":100},"seq":1}"#)
+        await harness.send(readyJSON(modes: [
+            DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue,
+        ]))
+        _ = try await connection.value
+        try await gateway.selectTransport(.init(address: "198.51.100.78", port: 62_078))
+        let negotiation = Task { try await gateway.negotiateDAVEAndMedia() }
+        await harness.send(sessionDescriptionJSON(
+            mode: DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue,
+            keyByte: 211
+        ))
+        await plane.waitUntilInstallStarted()
+
+        await manualClock.advance(to: 100)
+        try await eventually { await harness.sentOpcodes().contains(3) }
+        await manualClock.advance(to: 200)
+        try await eventually { await harness.closeCodes().contains(1001) }
+        await plane.releaseInstall()
+
+        await #expect(throws: (any Error).self) {
+            _ = try await negotiation.value
+        }
+        try await eventually { await gateway.snapshot().phase == .failed }
+        #expect(!(await gateway.snapshot().mediaProductionReady))
+        #expect(await plane.installCount() == 1)
     }
 
     @Test("matching heartbeat ACK permits the next heartbeat without closing")
@@ -1070,8 +1206,12 @@ struct DiscordVoiceGatewaySessionTests {
         return #"{"op":2,"seq":2,"d":{"ssrc":44,"ip":"203.0.113.8","port":50000,"modes":[\#(modesJSON)]}}"#
     }
 
-    private func sessionDescriptionJSON(mode: String, daveProtocolVersion: Int = 0) -> String {
-        let key = Array(repeating: "1", count: 32).joined(separator: ",")
+    private func sessionDescriptionJSON(
+        mode: String,
+        daveProtocolVersion: Int = 0,
+        keyByte: UInt8 = 1
+    ) -> String {
+        let key = Array(repeating: String(keyByte), count: 32).joined(separator: ",")
         return #"{"op":4,"seq":4,"d":{"mode":"\#(mode)","secret_key":[\#(key)],"dave_protocol_version":\#(daveProtocolVersion)}}"#
     }
 
@@ -1121,10 +1261,15 @@ private actor DiscordVoiceGatewaySessionHarness {
     private var finished = false
     private var remoteClose: VoiceGatewayClientClose?
 
-    init(autoResponseOnSelect: String? = nil, suspendSelectSend: Bool = false) {
+    init(
+        autoResponseOnSelect: String? = nil,
+        suspendSelectSend: Bool = false,
+        operationRecorder: DiscordVoiceGatewayOperationRecorder? = nil
+    ) {
         socket = DiscordVoiceGatewaySessionSocket(
             autoResponseOnSelect: autoResponseOnSelect,
-            suspendSelectSend: suspendSelectSend
+            suspendSelectSend: suspendSelectSend,
+            operationRecorder: operationRecorder
         )
     }
 
@@ -1193,10 +1338,16 @@ private actor DiscordVoiceGatewaySessionSocket {
     private var isFinished = false
     private let autoResponseOnSelect: String?
     private let selectSendGate: DiscordVoiceGatewaySelectSendGate?
+    private let operationRecorder: DiscordVoiceGatewayOperationRecorder?
 
-    init(autoResponseOnSelect: String?, suspendSelectSend: Bool) {
+    init(
+        autoResponseOnSelect: String?,
+        suspendSelectSend: Bool,
+        operationRecorder: DiscordVoiceGatewayOperationRecorder?
+    ) {
         self.autoResponseOnSelect = autoResponseOnSelect
         self.selectSendGate = suspendSelectSend ? DiscordVoiceGatewaySelectSendGate() : nil
+        self.operationRecorder = operationRecorder
     }
 
     nonisolated var session: VoiceGatewayClientSession {
@@ -1251,7 +1402,8 @@ private actor DiscordVoiceGatewaySessionSocket {
         }
     }
 
-    func recordClose(_ code: Int) {
+    func recordClose(_ code: Int) async {
+        await operationRecorder?.record("websocket-close")
         closes.append(code)
         finish()
     }
@@ -1328,6 +1480,159 @@ private actor DiscordVoiceGatewaySessionSocket {
     private func object(from text: String) -> [String: Any]? {
         guard let data = text.data(using: .utf8) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+}
+
+private struct DiscordVoiceGatewayMediaInstallation: Sendable {
+    let installCount: Int
+    let generation: UInt64
+    let ssrc: UInt32
+    let mode: DiscordVoiceTransportMode
+    let daveProtocolVersion: UInt16
+    let transportKeyMatched: Bool
+}
+
+private actor DiscordVoiceGatewayOperationRecorder {
+    private var operations: [String] = []
+
+    func record(_ operation: String) { operations.append(operation) }
+    func clear() { operations.removeAll(keepingCapacity: true) }
+    func values() -> [String] { operations }
+}
+
+private actor DiscordVoiceGatewayMediaPlaneRecorder: DiscordVoiceMediaPlane {
+    nonisolated let aes256GCMAvailable = false
+
+    private let operationRecorder: DiscordVoiceGatewayOperationRecorder
+    private var installCount = 0
+    private var installed: DiscordVoiceGatewayMediaInstallation?
+
+    init(operationRecorder: DiscordVoiceGatewayOperationRecorder) {
+        self.operationRecorder = operationRecorder
+    }
+
+    func install(
+        _ capability: DiscordVoiceNegotiatedMediaCapability
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        installCount += 1
+        let keyRecorder = DiscordVoiceGatewayKeyRecorder()
+        let primitive = DiscordVoiceGatewayKeyCheckingAEAD(
+            mode: capability.transportMode,
+            expectedKey: Array(repeating: 197, count: 32),
+            recorder: keyRecorder
+        )
+        let encryption = try capability.makeTransportEncryption(primitive: primitive)
+        let header = try DiscordVoiceRTPHeader(
+            sequence: 1,
+            timestamp: 960,
+            ssrc: capability.ssrc
+        )
+        let packet = try DiscordVoiceRTPCodec().encode(header) + [0xF8, 0xFF, 0xFE]
+        _ = try await encryption.seal(packet)
+        installed = DiscordVoiceGatewayMediaInstallation(
+            installCount: installCount,
+            generation: capability.generation,
+            ssrc: capability.ssrc,
+            mode: capability.transportMode,
+            daveProtocolVersion: capability.daveProtocolVersion,
+            transportKeyMatched: await keyRecorder.didMatch()
+        )
+        return DiscordVoiceMediaCapabilities(dave: true, aead: true, opus: true)
+    }
+
+    func updateDAVEProtocolVersion(
+        _ version: UInt16,
+        generation: UInt64
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        DiscordVoiceMediaCapabilities(dave: version > 0, aead: true, opus: true)
+    }
+
+    func reset() async {
+        installed = nil
+        await operationRecorder.record("media-reset")
+    }
+
+    func installation() -> DiscordVoiceGatewayMediaInstallation? { installed }
+}
+
+private actor DiscordVoiceGatewaySuspendedMediaPlane: DiscordVoiceMediaPlane {
+    nonisolated let aes256GCMAvailable = false
+
+    private let gate = DiscordVoiceGatewaySelectSendGate()
+    private var installs = 0
+
+    func install(
+        _ capability: DiscordVoiceNegotiatedMediaCapability
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        installs += 1
+        await gate.suspend()
+        return DiscordVoiceMediaCapabilities(dave: true, aead: true, opus: true)
+    }
+
+    func reset() async {}
+    func waitUntilInstallStarted() async { await gate.waitUntilStarted() }
+    func releaseInstall() async { await gate.release() }
+    func installCount() -> Int { installs }
+}
+
+private actor DiscordVoiceGatewaySuspendedDAVEUpdatePlane: DiscordVoiceMediaPlane {
+    nonisolated let aes256GCMAvailable = false
+
+    private let gate = DiscordVoiceGatewaySelectSendGate()
+    private var updates = 0
+
+    func install(
+        _ capability: DiscordVoiceNegotiatedMediaCapability
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        DiscordVoiceMediaCapabilities(dave: true, aead: true, opus: true)
+    }
+
+    func updateDAVEProtocolVersion(
+        _ version: UInt16,
+        generation: UInt64
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        updates += 1
+        await gate.suspend()
+        return DiscordVoiceMediaCapabilities(dave: version > 0, aead: true, opus: true)
+    }
+
+    func reset() async {}
+    func waitUntilUpdateStarted() async { await gate.waitUntilStarted() }
+    func releaseUpdate() async { await gate.release() }
+    func updateCount() -> Int { updates }
+}
+
+private actor DiscordVoiceGatewayKeyRecorder {
+    private var matched = false
+
+    func record(_ value: Bool) { matched = value }
+    func didMatch() -> Bool { matched }
+}
+
+private struct DiscordVoiceGatewayKeyCheckingAEAD: DiscordVoiceAEADPrimitive {
+    let mode: DiscordVoiceTransportMode
+    let authenticationTagLength = DiscordVoiceTransportEncryption.authenticationTagLength
+    let expectedKey: [UInt8]
+    let recorder: DiscordVoiceGatewayKeyRecorder
+
+    func seal(
+        plaintext: [UInt8],
+        key: [UInt8],
+        nonce: [UInt8],
+        authenticating associatedData: [UInt8]
+    ) async throws -> [UInt8] {
+        await recorder.record(key == expectedKey)
+        return plaintext + Array(repeating: 0, count: authenticationTagLength)
+    }
+
+    func open(
+        ciphertextAndTag: [UInt8],
+        key: [UInt8],
+        nonce: [UInt8],
+        authenticating associatedData: [UInt8]
+    ) async throws -> [UInt8] {
+        await recorder.record(key == expectedKey)
+        return Array(ciphertextAndTag.dropLast(authenticationTagLength))
     }
 }
 
