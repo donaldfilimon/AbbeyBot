@@ -1,6 +1,7 @@
 import AbbeyCore
 import AbbeyServer
 import AbbeyServerKit
+import Fluent
 import Foundation
 import Testing
 import Vapor
@@ -390,6 +391,133 @@ struct AbbeyServerAuthTests {
                 #expect(ack.duplicate == false)
                 #expect(ack.outcome == "notification")
             }
+        }
+    }
+
+    /// Closes the tasks/goals.md coverage gap: "no test exercises both dedupe layers together."
+    /// Drives a retried `channel.chat.message` delivery through the full stack — HTTP route →
+    /// `TwitchEventSubReplayGuard` (layer 1, durable claim by delivery id) →
+    /// `BotRuntime.handleTwitchChat` ingest-key dedupe (layer 2, `discordMessageId` =
+    /// `twitch-eventsub-<delivery id>`) — and proves the layers compose on the retry shapes
+    /// each one exists for, with neither double-processing:
+    ///
+    /// 1. Fresh delivery: layer 1 claims, chat ingests (`.inserted`), ack `notification-ingested`,
+    ///    and the claim row is *retained* for the replay window (successful deliveries keep it).
+    /// 2. Same delivery id retried: layer 1 rejects before any dispatch — ack `duplicate`, no new
+    ///    message row, no new audit row. Layer 2 is never even reached.
+    /// 3. Same delivery id retried *after the claim is gone* — the route's own failure path
+    ///    releases the claim so Twitch may retry (`TwitchEventSubRoutes.apply` error branch), and
+    ///    a claim also ages out of the window naturally. Layer 1 then claims afresh and the
+    ///    delivery is reprocessed; layer 2 catches it because the ingest key is derived from the
+    ///    delivery id, so ingest returns `.duplicate` → ack `duplicate`, still exactly one
+    ///    message row and one audit row. This is the durable backstop layer 1 cannot provide.
+    ///
+    /// Deliberately pinned non-goal: a delivery with a NEW message id and identical chat content
+    /// is not a retry in Twitch's model (retries always reuse the id) — the ingest key follows the
+    /// delivery id (`BotRuntime.twitchIngestKey`), so it ingests as a distinct message. Step 4
+    /// asserts that, so nobody "fixes" content-based dedupe in by accident.
+    @Test func twitchEventSubChatRetryIsCaughtByBothDedupeLayersInSequence() async throws {
+        try await withApp(token: nil, allowUnsignedEventSubForTesting: true) { app in
+            let messageId = "msg-chat-dedupe-1"
+            let ingestKey = "twitch-eventsub-\(messageId)"
+            let chatBody = #"""
+            {"subscription":{"type":"channel.chat.message","status":"enabled"},
+             "event":{"chatter_user_login":"someviewer",
+                      "broadcaster_user_login":"somechannel",
+                      "message":{"text":"hello abbey"}}}
+            """#
+
+            func persistedMessageRows() async throws -> Int {
+                try await GuildMessage.query(on: app.db)
+                    .filter(\.$discordMessageId == ingestKey)
+                    .count()
+            }
+            func ingestAuditRows() async throws -> Int {
+                try await InteractionLog.query(on: app.db)
+                    .filter(\.$commandName == "ingestMessage")
+                    .count()
+            }
+            func claimRows() async throws -> Int {
+                try await TwitchEventSubDelivery.query(on: app.db)
+                    .filter(\.$messageId == messageId)
+                    .count()
+            }
+
+            // Delivery 1 — fresh: claimed by layer 1, ingested and audited exactly once.
+            try await app.testing().test(
+                .POST, "/api/twitch/eventsub",
+                headers: notificationHeaders(messageId: messageId),
+                body: jsonBody(chatBody)
+            ) { res in
+                #expect(res.status == .ok)
+                let ack = try JSONDecoder().decode(AckProbe.self, from: Data(res.body.readableBytesView))
+                #expect(ack.ok == true)
+                #expect(ack.handled == true)
+                #expect(ack.duplicate == false)
+                #expect(ack.outcome == "notification-ingested")
+            }
+            #expect(try await persistedMessageRows() == 1)
+            #expect(try await ingestAuditRows() == 1)
+            // Success retains the claim for the replay window — release is failure-path only.
+            #expect(try await claimRows() == 1)
+
+            // Delivery 2 — identical retry: the durable guard acks duplicate before dispatch.
+            try await app.testing().test(
+                .POST, "/api/twitch/eventsub",
+                headers: notificationHeaders(messageId: messageId),
+                body: jsonBody(chatBody)
+            ) { res in
+                #expect(res.status == .ok)
+                let ack = try JSONDecoder().decode(AckProbe.self, from: Data(res.body.readableBytesView))
+                #expect(ack.handled == false)
+                #expect(ack.duplicate == true)
+                #expect(ack.outcome == "duplicate")
+            }
+            #expect(try await persistedMessageRows() == 1)
+            #expect(try await ingestAuditRows() == 1)
+
+            // Delivery 3 — retry after the claim is released (route failure path / window expiry
+            // equivalent). Layer 1 lets it through by design; the ingest-key layer must stop the
+            // reprocessing. `TwitchEventSubReplayGuard` is stateless over the shared table, so a
+            // fresh instance releases the exact claim the route's guard took.
+            try await TwitchEventSubReplayGuard().release(messageId, on: app.db)
+            #expect(try await claimRows() == 0)
+            try await app.testing().test(
+                .POST, "/api/twitch/eventsub",
+                headers: notificationHeaders(messageId: messageId),
+                body: jsonBody(chatBody)
+            ) { res in
+                #expect(res.status == .ok)
+                let ack = try JSONDecoder().decode(AckProbe.self, from: Data(res.body.readableBytesView))
+                #expect(ack.handled == false)
+                #expect(ack.duplicate == true)
+                #expect(ack.outcome == "duplicate")
+            }
+            #expect(try await persistedMessageRows() == 1)
+            #expect(try await ingestAuditRows() == 1)
+            // Reprocessing re-claimed the id, so layer 1 guards the next retry again.
+            #expect(try await claimRows() == 1)
+
+            // Delivery 4 — NEW message id, identical content: not a retry shape. Neither layer
+            // dedupes on content, so this ingests as a distinct message (correct: retries reuse
+            // the delivery id; identical text from chat is legitimately a new message).
+            try await app.testing().test(
+                .POST, "/api/twitch/eventsub",
+                headers: notificationHeaders(messageId: "msg-chat-dedupe-2"),
+                body: jsonBody(chatBody)
+            ) { res in
+                #expect(res.status == .ok)
+                let ack = try JSONDecoder().decode(AckProbe.self, from: Data(res.body.readableBytesView))
+                #expect(ack.handled == true)
+                #expect(ack.duplicate == false)
+                #expect(ack.outcome == "notification-ingested")
+            }
+            #expect(try await persistedMessageRows() == 1) // original key untouched
+            let secondKeyRows = try await GuildMessage.query(on: app.db)
+                .filter(\.$discordMessageId == "twitch-eventsub-msg-chat-dedupe-2")
+                .count()
+            #expect(secondKeyRows == 1)
+            #expect(try await ingestAuditRows() == 2)
         }
     }
 
