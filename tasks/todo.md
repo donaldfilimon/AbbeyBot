@@ -106,12 +106,15 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       bundle did **not** contain `com.apple.security.cs.disable-library-validation`, passed signing,
       and completed the media-disabled launch probe. The exception is therefore scoped to an
       ad-hoc bundle that actually embeds native code.
-- [ ] The additional full `Scripts/run-smoke.sh` attempt is **not green**: isolated debug and
+- [x] The original additional `Scripts/run-smoke.sh` attempt was **not green**: isolated debug and
       release builds completed, then `swift test` emitted passing tests but never terminated its
-      `AbbeyBotAppTests` helper. A process sample found the helper idle in the main `CFRunLoop`
-      with an audio-toolbox refresher thread; the run was stopped with exit 130 before stages 4/5.
-      The targeted native and non-native packaging/launch results above are separate evidence and
-      do not upgrade that interrupted full gate.
+      `AbbeyBotAppTests` helper. The integration follow-up traced the hang to a test-owned suspended
+      join continuation: the test awaited disconnect before releasing the request lease that
+      teardown intentionally awaits. The test now proves generation preemption first, releases the
+      fake request, and then awaits teardown. `MediaSessionModelTests` passes 18/18 in isolation,
+      and a fresh final `Scripts/verify-all.sh` completed through all five desktop stages plus web,
+      server, and CLI with `VERIFY-ALL GREEN`. This closes the local gate regression only; it is not
+      live Discord evidence.
 - [x] `Scripts/check-static-security.sh` emitted `STATIC_SECURITY_GREEN`; `bash -n` and
       `git diff --check` passed. HawkScan was not run because neither its runtime/tool nor
       `HAWK_API_KEY` is available in this environment; `shellcheck` is also unavailable.
@@ -134,6 +137,22 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       audible speak/hear, mute/deafen, reconnect/resume, and channel move remain blocked by the
       production media composition and UI gaps listed above. A successful transport probe must not
       be upgraded into a DAVE-audio claim.
+
+### Post-PR #55 native DAVE integration slice (2026-08-03)
+
+- [x] Hardened the active-session and replacement-session DAVE state machines around
+      Proposals → Commit → Execute: Commit ratchets and roster state remain staged until Execute,
+      Welcome cannot activate an active Commit candidate, stale membership work fails closed, and
+      same-context External Sender recovery remains generation-scoped.
+- [x] Made same-ID Commit retransmission idempotent after Transition Ready. A duplicate re-emits
+      Ready without re-entering libdave or clearing the staged roster; active and replacement
+      tests prove `processCommit` runs once and Execute activates exactly once.
+- [x] Fresh isolated `Scripts/run-native-media-smoke.sh` bootstrapped pinned libdave 1.1.1,
+      Opus 1.6.1, and libsodium 1.0.22; debug and release each passed 46 tests in 6 suites,
+      runtime-output secrecy passed in both configurations, static security passed, and
+      `NATIVE_MEDIA_SMOKE_GREEN` was emitted.
+- [ ] This does **not** close the DAVE/audio checklist item: production RTP/Opus send/receive,
+      capture/playback composition, reconnect/resume, and a live DAVE-enabled call remain open.
 
 ### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
 
@@ -199,6 +218,22 @@ Open items above, graded against the committed tree at `2a423e1`:
       those engineering items land, the remaining manual slice is to select camera and screen
       sources in the isolated guild and independently verify remote receive, reconnect/resume,
       source switching, and clean stop for each track.
+
+### Post-PR #55 video signaling and local-preview slice (2026-08-03)
+
+- [x] Added bounded Voice Gateway v8 video signaling models and fixtures for Ready stream
+      allocation, Opcode 12 source announcements/clearing, Opcode 15 Media Sink Wants, and
+      participant audio/video/RTX ownership. Outbound Opcode 12 validation rejects server-owned
+      `user_id`, missing or mismatched active RTX, and ambiguous clearing shapes while preserving
+      Discord's more flexible inbound event decoding. The integrated VoiceGatewayV8 suites pass
+      44/44.
+- [x] Added a generation-scoped, bounded local capture event stream and SwiftUI camera preview.
+      Terminal states and view disappearance stop capture and clear pixels; delayed frames from an
+      older generation cannot reappear after restart; the immediate kill switch remains available.
+- [ ] This is a bounded Phase 11/12 slice, not shipped camera or Go Live. Automatic first-source
+      capture is not full camera/display/window selection, and there is still no negotiated video
+      codec/RTP send/receive, remote rendering, DAVE video-frame wire path, congestion recovery, or
+      live camera/screen evidence.
 
 ### Video audit snapshot (2026-08-01, read-only)
 

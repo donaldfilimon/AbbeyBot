@@ -48,6 +48,14 @@ status: in_progress
   strict signature verification, linked `@rpath/libdave.dylib`, and remained running for the
   launch probe. This closes an app-packaging prerequisite only. No Discord credentials were
   available and no live signaling, DAVE, audio, reconnect, or channel-move evidence was produced.
+- **Post-PR #55 integration follow-up 2026-08-03:** active and replacement DAVE Commit candidates
+  now remain staged until Execute, same-ID Commit retransmissions preserve and re-acknowledge the
+  ready candidate, and generation-scoped stale membership/external-sender work fails closed. A
+  fresh native gate bootstrapped the three pinned libraries and passed 46 tests in 6 suites in both
+  debug and release, including output-secrecy probes; the full non-native repository gate also
+  emitted `VERIFY-ALL GREEN`. These results advance the local DAVE component boundary but do not
+  compose or prove production RTP/Opus send/receive, Apple capture/playback, reconnect/resume, or a
+  live DAVE-enabled call, so this goal remains `in_progress`.
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -76,6 +84,14 @@ status: in_progress
   DAVE-protected video wire path. Those are engineering blockers, not manual Discord steps. The
   later app-signing repair makes the permission-preflight UI launchable but adds none of those
   missing media paths. The goal remains `in_progress` and no camera/Go Live evidence is claimed.
+- **Post-PR #55 integration follow-up 2026-08-03:** bounded Voice Gateway v8 video source/sink
+  models now cover stream/SSRC allocation, Opcode 12 announcements and clearing, Opcode 15 sink
+  wants, participant audio/video/RTX ownership, and outbound-only wire validation; the focused
+  gateway suites pass 44/44. A generation-scoped bounded local capture stream and SwiftUI camera
+  preview now clear terminal/stale pixels and stop on view disappearance or the kill switch.
+  This is signaling and local-preview proof only: source selection UX, negotiated codec/RTP,
+  remote rendering, DAVE video-frame transport, fault/performance coverage, and live camera plus
+  Go Live evidence remain open, so this goal remains `in_progress`.
 
 ## Release and SwiftData hardening
 status: done
