@@ -91,22 +91,45 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       release, the debug/release output-secrecy probes passed, and `STATIC_SECURITY_GREEN` /
       `NATIVE_MEDIA_SMOKE_GREEN` were emitted.
 - [x] The gate began from a clean `433eb17` checkout. Three concurrent uncommitted native
-      source/test edits appeared afterward; they are outside this validation slice and are not
-      staged. A native app packaging attempt was stopped before completion rather than launching
-      a mixed-source artifact. Treat the green above as the exact observed run, not as proof of
-      those later uncommitted edits.
+      source/test edits appeared afterward; they remain outside this validation slice and are not
+      staged. Treat the green above as the exact observed run, not as proof of those later edits.
+- [x] Packaged a separate app from an isolated `origin/main` worktree at `655ef0f`. The first
+      bundle passed `codesign --verify --deep --strict` but exited before app startup: dyld rejected
+      ad-hoc `libdave.dylib` under Hardened Runtime because ad-hoc code has no matching Team ID.
+      Fixed the packaging script so `com.apple.security.cs.disable-library-validation` is added
+      only for ad-hoc builds that actually embed native code; named identities keep validation.
+      The rebuilt app passed deep strict signature verification, retained microphone and camera
+      entitlements, linked `@rpath/libdave.dylib`, and remained alive through the 16-second launch
+      probe. Executable SHA-256:
+      `90aad977c361b594363f4a81a004a31165e33803a9700dfa43752ef76fb595f4`.
+- [x] Verified the opposite packaging branch from a completed non-native debug build: the ad-hoc
+      bundle did **not** contain `com.apple.security.cs.disable-library-validation`, passed signing,
+      and completed the media-disabled launch probe. The exception is therefore scoped to an
+      ad-hoc bundle that actually embeds native code.
+- [ ] The additional full `Scripts/run-smoke.sh` attempt is **not green**: isolated debug and
+      release builds completed, then `swift test` emitted passing tests but never terminated its
+      `AbbeyBotAppTests` helper. A process sample found the helper idle in the main `CFRunLoop`
+      with an audio-toolbox refresher thread; the run was stopped with exit 130 before stages 4/5.
+      The targeted native and non-native packaging/launch results above are separate evidence and
+      do not upgrade that interrupted full gate.
+- [x] `Scripts/check-static-security.sh` emitted `STATIC_SECURITY_GREEN`; `bash -n` and
+      `git diff --check` passed. HawkScan was not run because neither its runtime/tool nor
+      `HAWK_API_KEY` is available in this environment; `shellcheck` is also unavailable.
 - [ ] **Live signaling/UDP probe not run.** Preflight found no `.env` / `.env.local`, no
       `DISCORD_BOT_TOKEN` or `DISCORD_DEV_GUILD_ID` in the process or launch environment, and no
       item in Keychain service `com.donaldfilimon.AbbeyBot`. Do not infer a failed Discord path:
-      authentication inputs were absent, so no Discord connection was attempted.
+      authentication inputs were absent, so no Discord connection was attempted. The verified
+      app artifact remains available for the operator to reopen at
+      `/var/folders/42/07tmt0n56jq4261xb9gz5jwm0000gn/T/AbbeyBot.PR55.fix.build/AbbeyBot.app`;
+      this is an ephemeral local artifact and its successful launch is not a connection.
 - [ ] **Manual operator slice, once a rotated token and isolated guild/channel are ready:** open
       the packaged AbbeyBot app; enter the token (Keychain-backed), dev guild ID, and voice channel
       ID; connect; optionally request microphone/camera/screen permissions one at a time; click
       **Probe transport**; confirm the bot briefly appears in the intended voice channel; and
       capture the app's redacted signaling/transport labels plus Discord's observed join/leave.
-      Expected honest result on `433eb17`: main-gateway credentials, Voice Gateway v8, UDP
-      discovery, transport selection, then automatic leave with DAVE/media unavailable. No audio,
-      camera, screen, credential, or raw-media recording belongs in the evidence.
+      Expected honest result from the PR #55 product path: main-gateway credentials, Voice Gateway
+      v8, UDP discovery, transport selection, then automatic leave with DAVE/media unavailable.
+      No audio, camera, screen, credential, or raw-media recording belongs in the evidence.
 - [ ] **Not manual-actionable on this revision:** DAVE audio negotiation/media send and receive,
       audible speak/hear, mute/deafen, reconnect/resume, and channel move remain blocked by the
       production media composition and UI gaps listed above. A successful transport probe must not
@@ -170,10 +193,12 @@ Open items above, graded against the committed tree at `2a423e1`:
 - [ ] **No live camera or Go Live run is possible from merged `433eb17`.** The permission buttons
       are real preflight only: the app has no camera/screen start action or preview, and the product
       has no video source/sink signaling, negotiated codec/RTP pipeline, render path, or connected
-      DAVE video-frame path. Do not ask the operator to click around Discord as a substitute for
-      these missing product paths. After those engineering items land, the remaining manual slice
-      is to select camera and screen sources in the isolated guild and independently verify remote
-      receive, reconnect/resume, source switching, and clean stop for each track.
+      DAVE video-frame path. The later signing fix proves the entitlement-bearing app can launch;
+      it does not make either permission preflight into a camera or Go Live wire path. Do not ask
+      the operator to click around Discord as a substitute for these missing product paths. After
+      those engineering items land, the remaining manual slice is to select camera and screen
+      sources in the isolated guild and independently verify remote receive, reconnect/resume,
+      source switching, and clean stop for each track.
 
 ### Video audit snapshot (2026-08-01, read-only)
 

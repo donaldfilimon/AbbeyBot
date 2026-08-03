@@ -40,6 +40,14 @@ status: in_progress
   importantly, merged PR #55 intentionally exposes only a signaling/UDP probe that
   auto-leaves with "DAVE unavailable" and sends no media. The goal remains `in_progress`; exact
   operator steps and engineering residuals are recorded in `tasks/todo.md`.
+- **PR #55 app-launch follow-up 2026-08-03:** an app packaged from isolated `origin/main` at
+  `655ef0f` initially passed `codesign --verify` but failed before startup because Hardened Runtime
+  rejected the ad-hoc-signed embedded `libdave.dylib`. `Scripts/build-macos-app.sh` now adds
+  `com.apple.security.cs.disable-library-validation` only when an ad-hoc build actually embeds
+  native code; named signing identities retain library validation. The rebuilt bundle passed deep
+  strict signature verification, linked `@rpath/libdave.dylib`, and remained running for the
+  launch probe. This closes an app-packaging prerequisite only. No Discord credentials were
+  available and no live signaling, DAVE, audio, reconnect, or channel-move evidence was produced.
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -66,7 +74,8 @@ status: in_progress
   validated from this revision. The app can explicitly request camera/screen permissions, but it
   has no camera or screen start controls, preview, video signaling, negotiated codec/RTP path, or
   DAVE-protected video wire path. Those are engineering blockers, not manual Discord steps. The
-  goal remains `in_progress` and no camera/Go Live evidence is claimed.
+  later app-signing repair makes the permission-preflight UI launchable but adds none of those
+  missing media paths. The goal remains `in_progress` and no camera/Go Live evidence is claimed.
 
 ## Release and SwiftData hardening
 status: done
