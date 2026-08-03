@@ -74,6 +74,53 @@ struct VoiceGatewayV8VideoModelsTests {
         #expect((payload["streams"] as? [Any])?.isEmpty == true)
     }
 
+    @Test("outbound Video encoding rejects inbound-only and incomplete shapes")
+    func videoOutboundDirectionValidation() throws {
+        let stream = try VoiceGatewayV8Stream(
+            type: "video",
+            rid: "100",
+            quality: 100,
+            active: true,
+            ssrc: 13_960,
+            rtxSSRC: 13_961
+        )
+
+        // `user_id` is server-owned. Even an otherwise complete payload must
+        // not be serialized as an AbbeyBot announcement when it is present.
+        let inboundOnly = try VoiceGatewayV8Video(
+            audioSSRC: 13_959,
+            videoSSRC: 13_960,
+            rtxSSRC: 13_961,
+            streams: [stream],
+            userID: "852892297661906993"
+        )
+        #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            _ = try JSONEncoder().encode(VoiceGatewayV8Outbound.video(inboundOnly))
+        }
+
+        // Discord may omit top-level RTX on receive, but sending an active
+        // announcement without the matching nonzero pair is ambiguous.
+        let missingTopLevelRTX = try VoiceGatewayV8Video(
+            audioSSRC: 13_959,
+            videoSSRC: 13_960,
+            streams: [stream]
+        )
+        #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            _ = try JSONEncoder().encode(VoiceGatewayV8Outbound.video(missingTopLevelRTX))
+        }
+
+        // A clearing announcement uses an explicit zero RTX, not an omitted
+        // value, so the outbound state transition is unambiguous on the wire.
+        let incompleteClearing = try VoiceGatewayV8Video(
+            audioSSRC: 13_959,
+            videoSSRC: 0,
+            streams: []
+        )
+        #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            _ = try JSONEncoder().encode(VoiceGatewayV8Outbound.video(incompleteClearing))
+        }
+    }
+
     @Test("decodes the documented server-sent Video fixture")
     func videoReceiveFixture() throws {
         // Verbatim example from the reference (docs.discord.food): server

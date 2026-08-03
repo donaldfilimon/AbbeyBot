@@ -528,6 +528,7 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
             try container.encode(VoiceGatewayV8Resume.opcode, forKey: .op)
             try container.encode(payload, forKey: .d)
         case .video(let payload):
+            try payload.validateForOutboundEncoding()
             try container.encode(VoiceGatewayV8Video.opcode, forKey: .op)
             try container.encode(payload, forKey: .d)
         case .mediaSinkWants(let payload):
@@ -548,6 +549,31 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
         }
     }
     public var debugDescription: String { description }
+}
+
+private extension VoiceGatewayV8Video {
+    /// Opcode 12 is direction-asymmetric. Discord's inbound event adds
+    /// `user_id` and may omit the top-level RTX SSRC, while AbbeyBot's outbound
+    /// announcement must never impersonate a server event and must identify the
+    /// exact primary/RTX pair it will send. Keep this validation at the encoder
+    /// boundary so valid inbound fixtures remain decodable.
+    func validateForOutboundEncoding() throws {
+        guard userID == nil else { throw VoiceGatewayV8Error.malformedPayload }
+
+        if streams.isEmpty {
+            guard videoSSRC == 0, rtxSSRC == 0 else {
+                throw VoiceGatewayV8Error.malformedPayload
+            }
+            return
+        }
+
+        guard videoSSRC != 0,
+              let outboundRTXSSRC = rtxSSRC,
+              outboundRTXSSRC != 0,
+              let selected = streams.first(where: { $0.ssrc == videoSSRC }),
+              selected.derivedRTXSSRC == outboundRTXSSRC
+        else { throw VoiceGatewayV8Error.malformedPayload }
+    }
 }
 
 public struct VoiceGatewayV8Inbound: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
