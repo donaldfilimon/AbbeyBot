@@ -43,6 +43,7 @@ public struct VoiceGatewayV8StateMachine: Sendable {
     public private(set) var nextHeartbeatAt: UInt64?
     public private(set) var heartbeatACKDeadline: UInt64?
     public private(set) var resumeEligible = false
+    public private(set) var videoParticipants = VoiceGatewayV8VideoParticipantMap()
 
     private let identity: VoiceGatewayV8Identify
     private var heartbeatInterval: UInt64?
@@ -60,6 +61,10 @@ public struct VoiceGatewayV8StateMachine: Sendable {
         }
         if resuming {
             _ = try resumePayload()
+        } else {
+            // A fresh Identify starts a new SSRC namespace. Buffered Resume is
+            // the only connection path allowed to retain participant mappings.
+            videoParticipants.removeAll()
         }
         openingAsResume = resuming
         phase = .awaitingHello
@@ -126,7 +131,23 @@ public struct VoiceGatewayV8StateMachine: Sendable {
             else { throw VoiceGatewayV8Error.unexpectedEvent }
             phase = .established
 
-        case .speaking, .clientsConnect, .clientDisconnect:
+        case .video(let video):
+            guard phase == .awaitingProtocolSelection
+                    || phase == .awaitingSessionDescription
+                    || phase == .established
+                    || phase == .resuming
+            else { throw VoiceGatewayV8Error.unexpectedEvent }
+            try videoParticipants.apply(video)
+
+        case .clientDisconnect(let disconnect):
+            guard phase == .awaitingProtocolSelection
+                    || phase == .awaitingSessionDescription
+                    || phase == .established
+                    || phase == .resuming
+            else { throw VoiceGatewayV8Error.unexpectedEvent }
+            videoParticipants.removeParticipant(userID: disconnect.userID)
+
+        case .speaking, .clientsConnect, .mediaSinkWants:
             guard phase == .awaitingProtocolSelection
                     || phase == .awaitingSessionDescription
                     || phase == .established
@@ -223,9 +244,11 @@ public struct VoiceGatewayV8StateMachine: Sendable {
             lastReceivedSequence = nil
             readyPayload = nil
             selectedMode = nil
+            videoParticipants.removeAll()
         case .terminal:
             phase = .terminated
             resumeEligible = false
+            videoParticipants.removeAll()
         }
         return disposition
     }
