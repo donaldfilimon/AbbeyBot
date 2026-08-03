@@ -81,6 +81,37 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       and capture live current-protocol evidence for join, DAVE negotiation, speak, hear, network
       reconnect/resume, channel move, and leave without logging credentials or raw audio.
 
+### PR #55 smallest credible live-validation attempt (2026-08-03)
+
+- [x] Fast-forwarded the clean local `main` to GitHub's merged PR #55 commit `433eb17` and
+      re-established the proof boundary from the current source rather than the pre-merge audit.
+- [x] Host/toolchain preflight: macOS 27.0 (26A5388g), Apple Swift 6.4 via Xcode's default
+      toolchain. `Scripts/run-native-media-smoke.sh` exited 0 after a fresh isolated bootstrap of
+      libdave 1.1.1, Opus 1.6.1, and libsodium 1.0.22; 37 tests in 6 suites passed in debug and
+      release, the debug/release output-secrecy probes passed, and `STATIC_SECURITY_GREEN` /
+      `NATIVE_MEDIA_SMOKE_GREEN` were emitted.
+- [x] The gate began from a clean `433eb17` checkout. Three concurrent uncommitted native
+      source/test edits appeared afterward; they are outside this validation slice and are not
+      staged. A native app packaging attempt was stopped before completion rather than launching
+      a mixed-source artifact. Treat the green above as the exact observed run, not as proof of
+      those later uncommitted edits.
+- [ ] **Live signaling/UDP probe not run.** Preflight found no `.env` / `.env.local`, no
+      `DISCORD_BOT_TOKEN` or `DISCORD_DEV_GUILD_ID` in the process or launch environment, and no
+      item in Keychain service `com.donaldfilimon.AbbeyBot`. Do not infer a failed Discord path:
+      authentication inputs were absent, so no Discord connection was attempted.
+- [ ] **Manual operator slice, once a rotated token and isolated guild/channel are ready:** open
+      the packaged AbbeyBot app; enter the token (Keychain-backed), dev guild ID, and voice channel
+      ID; connect; optionally request microphone/camera/screen permissions one at a time; click
+      **Probe transport**; confirm the bot briefly appears in the intended voice channel; and
+      capture the app's redacted signaling/transport labels plus Discord's observed join/leave.
+      Expected honest result on `433eb17`: main-gateway credentials, Voice Gateway v8, UDP
+      discovery, transport selection, then automatic leave with DAVE/media unavailable. No audio,
+      camera, screen, credential, or raw-media recording belongs in the evidence.
+- [ ] **Not manual-actionable on this revision:** DAVE audio negotiation/media send and receive,
+      audible speak/hear, mute/deafen, reconnect/resume, and channel move remain blocked by the
+      production media composition and UI gaps listed above. A successful transport probe must not
+      be upgraded into a DAVE-audio claim.
+
 ### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
 
 Open items above, graded against the committed tree at `2a423e1`:
@@ -133,6 +164,16 @@ Open items above, graded against the committed tree at `2a423e1`:
       camera send/receive and Go Live screen send/receive, reconnect/resume, source switching, and
       clean stop in an isolated guild using a rotated token. Local fixtures alone cannot close this
       item.
+
+### PR #55 camera / Go Live validation result (2026-08-03)
+
+- [ ] **No live camera or Go Live run is possible from merged `433eb17`.** The permission buttons
+      are real preflight only: the app has no camera/screen start action or preview, and the product
+      has no video source/sink signaling, negotiated codec/RTP pipeline, render path, or connected
+      DAVE video-frame path. Do not ask the operator to click around Discord as a substitute for
+      these missing product paths. After those engineering items land, the remaining manual slice
+      is to select camera and screen sources in the isolated guild and independently verify remote
+      receive, reconnect/resume, source switching, and clean stop for each track.
 
 ### Video audit snapshot (2026-08-01, read-only)
 

@@ -29,6 +29,17 @@ status: in_progress
   `ABBEY_NATIVE_MEDIA=1` and has no macOS job, so none of the native/media suites run there.
   Live evidence (item 12) stays missing and is operator-blocked, not code-blocked. Full detail
   in `tasks/todo.md` → "Voice audit snapshot".
+- **PR #55 validation 2026-08-03:** the isolated native gate was launched from a clean merged
+  `433eb17` checkout and is green
+  with pinned libdave 1.1.1, Opus 1.6.1, and libsodium 1.0.22: 37 tests in 6 suites passed in
+  debug and again in release, both runtime-secrecy probes passed, and static/security passed.
+  This is local component proof only. No live Discord probe ran because no bot token or dev-guild
+  ID was available in the process, launch environment, repository env files, or AbbeyBot Keychain
+  service. Concurrent uncommitted native edits appeared later, so this green is retained as the
+  exact run result rather than claimed as an immutable byte-for-byte post-run checkout. More
+  importantly, merged PR #55 intentionally exposes only a signaling/UDP probe that
+  auto-leaves with "DAVE unavailable" and sends no media. The goal remains `in_progress`; exact
+  operator steps and engineering residuals are recorded in `tasks/todo.md`.
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -51,6 +62,11 @@ status: in_progress
   absent (inbound video opcode 12 is an explicit error). 9 of the 11 required fault/perf scenarios
   are structurally unreachable until a video transport exists. Written docs and UI copy remain
   claim-honest. Full detail in `tasks/todo.md` → "Video audit snapshot".
+- **PR #55 validation 2026-08-03 (against merged `433eb17`):** camera and Go Live cannot be live
+  validated from this revision. The app can explicitly request camera/screen permissions, but it
+  has no camera or screen start controls, preview, video signaling, negotiated codec/RTP path, or
+  DAVE-protected video wire path. Those are engineering blockers, not manual Discord steps. The
+  goal remains `in_progress` and no camera/Go Live evidence is claimed.
 
 ## Release and SwiftData hardening
 status: done
