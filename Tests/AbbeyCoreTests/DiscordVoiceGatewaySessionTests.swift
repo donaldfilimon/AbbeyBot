@@ -399,6 +399,98 @@ struct DiscordVoiceGatewaySessionTests {
         await gateway.disconnect()
     }
 
+    @Test("ignored Commit sends nothing and a later retry can complete the transition")
+    func ignoredCommitRemainsPendingForRetry() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let handler = DiscordVoiceGatewayIgnoredCommitHandler()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            daveControlHandler: handler.handler,
+            configuration: .init(maximumDAVEProtocolVersion: 1)
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 1)
+
+        await harness.send(
+            #"{"op":24,"d":{"protocol_version":1,"transition_id":61,"epoch":2},"seq":40}"#
+        )
+        try await eventually {
+            await harness.sentDAVEClientMessages().map(\.opcode) == [.keyPackage, .keyPackage]
+        }
+
+        await harness.sendBinary(Data([
+            0x00, 0x29,
+            VoiceGatewayDAVEOpcode.announceCommitTransition.rawValue,
+            0x00, 0x3D,
+            0xC0,
+        ]))
+        try await eventually { await handler.commitCallCount() == 1 }
+        #expect(await harness.sentDAVEClientMessages().count == 2)
+        #expect(await harness.closeCodes().isEmpty)
+
+        await harness.sendBinary(Data([
+            0x00, 0x2A,
+            VoiceGatewayDAVEOpcode.announceCommitTransition.rawValue,
+            0x00, 0x3D,
+            0xC0,
+        ]))
+        try await eventually {
+            await harness.sentDAVEClientMessages().map(\.opcode) == [
+                .keyPackage,
+                .keyPackage,
+                .transitionReady,
+            ]
+        }
+        #expect(await handler.commitCallCount() == 2)
+        #expect(await harness.closeCodes().isEmpty)
+        await gateway.disconnect()
+    }
+
+    @Test("empty Welcome response fails closed and closes the connection")
+    func emptyWelcomeResponseFailsClosed() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let handler = VoiceGatewayDAVEControlHandler(
+            beginSession: { _, _ in
+                [.keyPackage(try .init(Data([0xBA, 0x5E])))]
+            },
+            handle: { frame, _ in
+                switch frame.message {
+                case .prepareEpoch:
+                    [.keyPackage(try .init(Data([0xC0, 0xDE])))]
+                case .welcome:
+                    []
+                default:
+                    []
+                }
+            }
+        )
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            daveControlHandler: handler,
+            configuration: .init(maximumDAVEProtocolVersion: 1)
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 1)
+
+        await harness.send(
+            #"{"op":24,"d":{"protocol_version":1,"transition_id":62,"epoch":2},"seq":43}"#
+        )
+        try await eventually {
+            await harness.sentDAVEClientMessages().map(\.opcode) == [.keyPackage, .keyPackage]
+        }
+
+        await harness.sendBinary(Data([
+            0x00, 0x2C,
+            VoiceGatewayDAVEOpcode.welcome.rawValue,
+            0x00, 0x3E,
+            0xC0,
+        ]))
+
+        try await eventually { await harness.closeCodes().contains(1002) }
+        try await eventually { await gateway.snapshot().phase == .failed }
+        #expect(await harness.sentDAVEClientMessages().count == 2)
+    }
+
     @Test("downgrade Execute clears previously attested production readiness")
     func downgradeClearsCapabilities() async throws {
         let harness = DiscordVoiceGatewaySessionHarness()
@@ -1342,6 +1434,38 @@ private actor DiscordVoiceGatewayDAVEHandlerRecorder {
         resets += 1
         opcodes.removeAll(keepingCapacity: false)
         recognizedUserIDSnapshots.removeAll(keepingCapacity: false)
+    }
+}
+
+private actor DiscordVoiceGatewayIgnoredCommitHandler {
+    private var commits = 0
+
+    nonisolated var handler: VoiceGatewayDAVEControlHandler {
+        VoiceGatewayDAVEControlHandler(
+            beginSession: { _, _ in
+                [.keyPackage(try .init(Data([0xBA, 0x5E])))]
+            },
+            handle: { [self] frame, _ in
+                try await handle(frame)
+            }
+        )
+    }
+
+    func commitCallCount() -> Int { commits }
+
+    private func handle(
+        _ frame: VoiceGatewayDAVEInboundFrame
+    ) throws -> [VoiceGatewayDAVEClientMessage] {
+        switch frame.message {
+        case .prepareEpoch:
+            return [.keyPackage(try .init(Data([0xC0, 0xDE])))]
+        case .announceCommitTransition(let payload):
+            commits += 1
+            guard commits > 1 else { return [] }
+            return [.transitionReady(.init(transitionID: payload.transitionID))]
+        default:
+            return []
+        }
     }
 }
 

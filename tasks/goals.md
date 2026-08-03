@@ -184,8 +184,11 @@ status: done
   `AbbeyServerTests` 21 + `AbbeyCoreTests` 234 + `AbbeyCLITests` 30 green in one run, then
   `AbbeyServerKitTests` 117 green after the third-fixture fix (in-log `EXIT:0`, not the wrapper
   code); desktop `SyncCursorStoreTests` + `AbbeyServerClientTransportTests` 17 green with the
-  full desktop build (including the in-flight voice/media targets) completing. Not committed —
-  land via a scoped branch/PR per repo workflow, not on `cursor/complete-discord-voice`'s scope.
+  full desktop build (including the in-flight voice/media targets) completing. Committed on
+  `cursor/complete-discord-voice` (`1e5b6e6`/`2a423e1`) and landing through PR #55 — the original
+  intent to land on a separate scoped branch was overtaken when a concurrent session swept the
+  working tree into its own commit; recorded here so the ledger matches the branch's real contents
+  (corrected 2026-08-01 after PR #55 code review flagged the stale claim).
 - A strict code-quality review of `aa1fb60...b585947` (the diff that merged as PR #53, ~1500 lines
   / 41 files) surfaced two confirmed structural findings, not yet applied:
   1. **Duplicated transport-request builder.** `ServerSyncClient.makeRequest`

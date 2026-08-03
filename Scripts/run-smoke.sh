@@ -7,6 +7,8 @@ cd "$ROOT"
 unset TOOLCHAINS || true
 # Full package graph (SwiftUI/SwiftData) — never build desktop under server-only role.
 unset ABBEY_PACKAGE_ROLE || true
+# Native media is opt-in and has a separate gate.
+unset ABBEY_NATIVE_MEDIA ABBEY_NATIVE_PREFIX ABBEY_NATIVE_CACHE || true
 # Build off Desktop to avoid iCloud/Finder xattrs breaking ad-hoc codesign.
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)

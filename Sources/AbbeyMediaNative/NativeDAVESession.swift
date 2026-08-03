@@ -40,18 +40,18 @@ public enum NativeDAVECommitOutcome: Equatable, Sendable {
 
 private final class NativeDAVEFailureLatch: @unchecked Sendable {
     private let lock = NSLock()
-    private var generation: UInt64 = 0
+    private var failed = false
 
     func recordFailure() {
         lock.lock()
-        generation &+= 1
+        failed = true
         lock.unlock()
     }
 
-    func snapshot() -> UInt64 {
+    func hasFailed() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return generation
+        return failed
     }
 }
 
@@ -187,7 +187,6 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         }
 
         let failureLatch = NativeDAVEFailureLatch()
-        let creationGeneration = failureLatch.snapshot()
         let failureContext = Unmanaged.passUnretained(failureLatch).toOpaque()
         let session: OpaquePointer? = if let authenticationSessionID {
             authenticationSessionID.withCString {
@@ -209,7 +208,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         guard let session else {
             throw NativeMediaError.initializationFailed(component: "libdaveSession")
         }
-        guard failureLatch.snapshot() == creationGeneration else {
+        guard !failureLatch.hasFailed() else {
             daveSessionDestroy(session)
             throw NativeMediaError.daveMLSFailure(operation: "create-session")
         }
@@ -218,11 +217,10 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
             throw NativeMediaError.initializationFailed(component: "libdaveEncryptor")
         }
 
-        let initializationGeneration = failureLatch.snapshot()
         trimmedUserID.withCString {
             daveSessionInit(session, protocolVersion, groupID, $0)
         }
-        guard failureLatch.snapshot() == initializationGeneration,
+        guard !failureLatch.hasFailed(),
               daveSessionGetProtocolVersion(session) == protocolVersion
         else {
             daveEncryptorDestroy(encryptor)
@@ -246,10 +244,14 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     }
 
     public var isMediaReady: Bool {
-        storage.selfRatchet != nil && activeRoster.contains(selfNumericUserID)
+        !storage.failureLatch.hasFailed()
+            && storage.selfRatchet != nil
+            && activeRoster.contains(selfNumericUserID)
     }
 
-    public var rosterMemberIDs: [UInt64] { activeRoster }
+    public var rosterMemberIDs: [UInt64] {
+        storage.failureLatch.hasFailed() ? [] : activeRoster
+    }
 
     public func marshalledKeyPackage() throws -> Data {
         try withMLSFailureCheck(operation: "create-key-package") {
@@ -260,6 +262,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     }
 
     public func setExternalSender(_ bytes: Data) throws {
+        try requireMLSHealthy(operation: "set-external-sender")
         try validateControlPayload(bytes)
         try withMLSFailureCheck(operation: "set-external-sender") {
             bytes.withUnsafeBytes { raw in
@@ -276,6 +279,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         _ proposals: Data,
         recognizedUserIDs: [String]
     ) throws -> Data {
+        try requireMLSHealthy(operation: "process-proposals")
         try validateControlPayload(proposals)
         return try withMLSFailureCheck(operation: "process-proposals") {
             try withValidatedUserIDs(recognizedUserIDs) { pointers in
@@ -299,6 +303,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
     }
 
     public func processCommit(_ commit: Data) throws -> NativeDAVECommitOutcome {
+        try requireMLSHealthy(operation: "process-commit")
         try validateControlPayload(commit)
         return try withMLSFailureCheck(operation: "process-commit") {
             let rawResult = commit.withUnsafeBytes { raw in
@@ -325,7 +330,10 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
                 var changes: [UInt64: Bool] = [:]
                 changes.reserveCapacity(changedMemberIDs.count)
                 for memberID in changedMemberIDs {
-                    let signature = try takeAllocatedBytes(
+                    // ReplaceState exposes only changed members. A nonempty
+                    // signature means add/change; an empty signature means the
+                    // member was removed. Retain only that presence bit.
+                    let isPresent = try !takeAllocatedBytes(
                         maximum: Self.maximumControlPayloadBytes
                     ) { bytes, length in
                         daveCommitResultGetRosterMemberSignature(
@@ -334,10 +342,10 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
                             bytes,
                             length
                         )
-                    }
-                    changes[memberID] = !signature.isEmpty
+                    }.isEmpty
+                    changes[memberID] = isPresent
                 }
-                let roster = Self.mergedRoster(
+                let roster = Self.rosterAfterCommit(
                     current: activeRoster,
                     changes: changes
                 )
@@ -354,6 +362,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         _ welcome: Data,
         recognizedUserIDs: [String]
     ) throws -> [UInt64] {
+        try requireMLSHealthy(operation: "process-welcome")
         try validateControlPayload(welcome)
         return try withMLSFailureCheck(operation: "process-welcome") {
             try withValidatedUserIDs(recognizedUserIDs) { pointers in
@@ -477,6 +486,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         codec: NativeDAVECodec,
         ssrc: UInt32
     ) throws -> Data {
+        try requireMLSHealthy(operation: "protect")
         guard isMediaReady else {
             throw NativeMediaError.daveParticipantUnavailable
         }
@@ -510,8 +520,10 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
             }
         }
         guard result == DAVE_ENCRYPTOR_RESULT_CODE_SUCCESS, written <= capacity else {
+            try requireMLSHealthy(operation: "protect")
             throw NativeMediaError.daveFailure(operation: "protect", code: result.rawValue)
         }
+        try requireMLSHealthy(operation: "protect")
         output.removeSubrange(written..<output.count)
         return output
     }
@@ -521,6 +533,7 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         mediaType: NativeDAVEMediaType,
         senderID: UInt64
     ) throws -> Data {
+        try requireMLSHealthy(operation: "unprotect")
         guard let participant = storage.participants[senderID] else {
             throw NativeMediaError.daveParticipantUnavailable
         }
@@ -557,8 +570,10 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
             }
         }
         guard result == DAVE_DECRYPTOR_RESULT_CODE_SUCCESS, written <= capacity else {
+            try requireMLSHealthy(operation: "unprotect")
             throw NativeMediaError.daveFailure(operation: "unprotect", code: result.rawValue)
         }
+        try requireMLSHealthy(operation: "unprotect")
         output.removeSubrange(written..<output.count)
         return output
     }
@@ -576,25 +591,28 @@ public actor NativeDAVESession: CustomStringConvertible, CustomDebugStringConver
         operation: String,
         _ body: () throws -> Result
     ) throws -> Result {
-        let generation = storage.failureLatch.snapshot()
+        try requireMLSHealthy(operation: operation)
         let result: Result
         do {
             result = try body()
         } catch {
-            guard storage.failureLatch.snapshot() == generation else {
-                invalidateMediaReadiness()
-                throw NativeMediaError.daveMLSFailure(operation: operation)
+            if storage.failureLatch.hasFailed() {
+                try requireMLSHealthy(operation: operation)
             }
             throw error
         }
-        guard storage.failureLatch.snapshot() == generation else {
-            invalidateMediaReadiness()
-            throw NativeMediaError.daveMLSFailure(operation: operation)
-        }
+        try requireMLSHealthy(operation: operation)
         return result
     }
 
-    static func mergedRoster(
+    private func requireMLSHealthy(operation: String) throws {
+        guard !storage.failureLatch.hasFailed() else {
+            invalidateMediaReadiness()
+            throw NativeMediaError.daveMLSFailure(operation: operation)
+        }
+    }
+
+    static func rosterAfterCommit(
         current: [UInt64],
         changes: [UInt64: Bool]
     ) -> [UInt64] {

@@ -81,7 +81,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
-for command in curl make tar unzip; do
+REQUIRED_COMMANDS=(cc curl make pkg-config tar unzip)
+if [[ "$OS" == "Darwin" ]]; then
+    REQUIRED_COMMANDS+=(codesign install_name_tool)
+fi
+for command in "${REQUIRED_COMMANDS[@]}"; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "required command not found: $command" >&2
         exit 69
@@ -147,14 +151,6 @@ cp -R "$WORK_DIR/libdave/licenses/." "$PREFIX/share/licenses/libdave-${LIBDAVE_V
 # SwiftPM's macOS test helper sanitizes DYLD_LIBRARY_PATH. Give the verified copy an
 # absolute install name for this explicit prefix, then restore its ad-hoc signature.
 if [[ "$OS" == "Darwin" ]]; then
-    command -v install_name_tool >/dev/null 2>&1 || {
-        echo "required command not found: install_name_tool" >&2
-        exit 69
-    }
-    command -v codesign >/dev/null 2>&1 || {
-        echo "required command not found: codesign" >&2
-        exit 69
-    }
     install_name_tool -id "$PREFIX/lib/libdave.dylib" "$PREFIX/lib/libdave.dylib"
     codesign --force --sign - "$PREFIX/lib/libdave.dylib"
 fi

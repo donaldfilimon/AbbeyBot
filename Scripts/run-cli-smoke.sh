@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 unset TOOLCHAINS || true
+unset ABBEY_NATIVE_MEDIA ABBEY_NATIVE_PREFIX ABBEY_NATIVE_CACHE || true
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.cli.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-cli-smoke.XXXXXX")"

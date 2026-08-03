@@ -659,7 +659,11 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         guard generation == connectionGeneration, !disconnectRequested else {
             throw DiscordVoiceGatewaySessionError.staleConnection
         }
-        try validateDAVEOutboundSet(outbound, event: event)
+        try validateDAVEOutboundSet(
+            outbound,
+            event: event,
+            inboundOpcode: frame.message.opcode
+        )
         for message in outbound {
             try validateDAVEOutbound(message, event: event, state: &transitionState)
         }
@@ -745,7 +749,8 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
 
     private func validateDAVEOutboundSet(
         _ messages: [VoiceGatewayDAVEClientMessage],
-        event: VoiceGatewayDAVETransitionStateMachine.Event
+        event: VoiceGatewayDAVETransitionStateMachine.Event,
+        inboundOpcode: VoiceGatewayDAVEOpcode
     ) throws {
         let opcodes = messages.map(\.opcode)
         let valid: Bool
@@ -753,7 +758,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         case .transitionPrepared:
             valid = opcodes == [.transitionReady]
         case .requiresMLSProcessing:
-            valid = opcodes == [.transitionReady]
+            // libdave may explicitly ignore a duplicate/out-of-window Commit.
+            // An empty response preserves the awaiting-MLS state so Discord can
+            // retry. Welcome has no ignored outcome and must fail closed when
+            // its native handler produces no response.
+            valid = (opcodes.isEmpty && inboundOpcode == .announceCommitTransition)
+                || opcodes == [.transitionReady]
                 || opcodes == [.invalidCommitWelcome, .keyPackage]
         case .epochAnnounced:
             valid = opcodes == [.keyPackage]
