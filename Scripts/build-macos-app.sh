@@ -228,6 +228,23 @@ else
   SIGN_TIMESTAMP=(--timestamp=none)
 fi
 SIGN_BASE=(--force --sign "$IDENTITY" --options runtime "${SIGN_TIMESTAMP[@]}")
+SIGN_ENTITLEMENTS="$ENTITLEMENTS"
+AD_HOC_LIBRARY_VALIDATION_EXCEPTION=0
+
+# Hardened Runtime library validation requires the host executable and every
+# embedded library to share a Team ID. Ad-hoc signatures do not carry one, so
+# the default local-development signature cannot load an ad-hoc libdave unless
+# library validation is disabled for that app signature. Keep the exception
+# scoped to ad-hoc builds; named identities retain normal library validation.
+if [[ "$IDENTITY" == "-" ]] && [[ "${#native_entries[@]}" -gt 0 ]]; then
+  AD_HOC_LIBRARY_VALIDATION_EXCEPTION=1
+  SIGN_ENTITLEMENTS="$STAGE_ROOT/ad-hoc-entitlements.plist"
+  /bin/cp -p "$ENTITLEMENTS" "$SIGN_ENTITLEMENTS"
+  /usr/libexec/PlistBuddy \
+    -c 'Add :com.apple.security.cs.disable-library-validation bool true' \
+    "$SIGN_ENTITLEMENTS"
+  /usr/bin/plutil -lint "$SIGN_ENTITLEMENTS"
+fi
 
 # Sign nested code before its enclosing framework and application.
 while IFS= read -r -d '' dylib; do
@@ -239,7 +256,7 @@ while IFS= read -r framework; do
 done < <(/usr/bin/find "$FRAMEWORKS_DIR" -type d -name '*.framework' -print | /usr/bin/sort -r)
 
 /usr/bin/codesign "${SIGN_BASE[@]}" \
-  --entitlements "$ENTITLEMENTS" \
+  --entitlements "$SIGN_ENTITLEMENTS" \
   "$STAGE_APP"
 
 /usr/bin/plutil -lint "$STAGE_APP/Contents/Info.plist"
@@ -255,6 +272,18 @@ for entitlement in com.apple.security.device.audio-input com.apple.security.devi
     exit 1
   fi
 done
+if [[ "$AD_HOC_LIBRARY_VALIDATION_EXCEPTION" == "1" ]]; then
+  value="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$SIGNED_ENTITLEMENTS")"
+  if [[ "$value" != "true" ]]; then
+    echo "error: ad-hoc signed bundle must disable library validation for embedded native libraries" >&2
+    exit 1
+  fi
+elif /usr/libexec/PlistBuddy \
+  -c 'Print :com.apple.security.cs.disable-library-validation' \
+  "$SIGNED_ENTITLEMENTS" >/dev/null 2>&1; then
+  echo "error: named-identity bundle must retain Hardened Runtime library validation" >&2
+  exit 1
+fi
 for forbidden_entitlement in com.apple.security.app-sandbox com.apple.security.device.screen-capture; do
   if /usr/libexec/PlistBuddy -c "Print :$forbidden_entitlement" "$SIGNED_ENTITLEMENTS" >/dev/null 2>&1; then
     echo "error: signed bundle contains forbidden entitlement: $forbidden_entitlement" >&2
