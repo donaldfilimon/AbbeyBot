@@ -512,12 +512,6 @@ public actor DiscordVoiceController {
         guard generation == localGeneration else { return makeSnapshot() }
         transition(to: .negotiatingDAVE)
 
-        // The portable production boundary is deliberately fail-closed. Until a
-        // concrete adapter attests that DAVE, AEAD, and Opus are all wired, this
-        // actor remains at negotiation and reports mediaUnavailable.
-        guard factory.mediaAdapterAvailability == .fullyWired else {
-            return await fail(.mediaUnavailable, ifCurrent: localGeneration)
-        }
         let capabilities: DiscordVoiceMediaCapabilities
         do {
             capabilities = try await gateway.negotiateDAVEAndMedia()
@@ -525,7 +519,12 @@ public actor DiscordVoiceController {
             return await fail(.mediaUnavailable, ifCurrent: localGeneration)
         }
         guard generation == localGeneration else { return makeSnapshot() }
-        guard capabilities.isProductionReady else {
+        // Always complete the secure Gateway-to-media-plane bootstrap first,
+        // then apply the product claim gate. This lets an unavailable factory
+        // prove Phase 4 without presenting audio as shipped before Phase 5.
+        guard factory.mediaAdapterAvailability == .fullyWired,
+              capabilities.isProductionReady
+        else {
             return await fail(.mediaUnavailable, ifCurrent: localGeneration)
         }
 
@@ -613,8 +612,11 @@ public actor DiscordVoiceController {
         nextTeardownID &+= 1
         let teardownID = nextTeardownID
         teardownTasks[teardownID] = Task {
-            await session.udp?.disconnect()
+            // Gateway teardown resets the session-owned media plane and its
+            // key-bearing state before the retained discovery/media socket is
+            // allowed to close.
             await session.gateway?.disconnect()
+            await session.udp?.disconnect()
             if let requestLease = session.requestLease,
                await requestLease.wasAccepted()
             {

@@ -86,6 +86,10 @@ private actor FakeDiscordGatewayDriver: DiscordGatewayDriver {
     func hasNullVoiceUpdate(count: Int) -> Bool {
         voiceUpdates.count == count && voiceUpdates.last?.channelID == nil
     }
+
+    var nullVoiceUpdateCount: Int {
+        voiceUpdates.count(where: { $0.channelID == nil })
+    }
 }
 
 private actor FakeDiscordGatewayDriverFactory {
@@ -143,6 +147,78 @@ private actor ConnectionOperationRecorder {
     func releaseConnect() async {
         await connectRelease.resolve()
     }
+}
+
+private actor ControlledVoiceSleeper {
+    private var nextID: UInt64 = 0
+    private var waiters: [(id: UInt64, barrier: DiscordGatewayEventBarrier)] = []
+    private(set) var invocationCount = 0
+
+    func sleep(for _: Duration) async throws {
+        nextID &+= 1
+        let id = nextID
+        let barrier = DiscordGatewayEventBarrier()
+        invocationCount += 1
+        waiters.append((id: id, barrier: barrier))
+        await withTaskCancellationHandler {
+            await barrier.wait()
+        } onCancel: {
+            Task { await barrier.resolve() }
+        }
+        waiters.removeAll(where: { $0.id == id })
+        try Task.checkCancellation()
+    }
+
+    func releaseNext() async {
+        guard !waiters.isEmpty else {
+            Issue.record("Expected a controlled sleeper waiter")
+            return
+        }
+        let waiter = waiters.removeFirst()
+        await waiter.barrier.resolve()
+    }
+
+    var waiterCount: Int { waiters.count }
+}
+
+private actor CollisionVoiceGatewaySession: DiscordVoiceGatewaySessionClient {
+    func connect(
+        using _: DiscordVoiceGatewayPair
+    ) async throws -> DiscordVoiceGatewayTransportReady {
+        .init(
+            address: "127.0.0.1",
+            port: 5_000,
+            ssrc: 42,
+            encryptionModes: ["aead_xchacha20_poly1305_rtpsize"]
+        )
+    }
+
+    func selectTransport(_: DiscordVoiceDiscoveredEndpoint) async throws {}
+
+    func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities {
+        .init(dave: true, aead: true, opus: true)
+    }
+
+    func disconnect() async {}
+}
+
+private actor CollisionVoiceUDPSession: DiscordVoiceUDPDiscoverySession {
+    func discoverEndpoint(
+        for _: DiscordVoiceGatewayTransportReady
+    ) async throws -> DiscordVoiceDiscoveredEndpoint {
+        .init(address: "127.0.0.1", port: 6_000)
+    }
+
+    func disconnect() async {}
+}
+
+private struct CollisionVoiceSessionFactory: DiscordVoiceSessionFactory {
+    let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability = .fullyWired
+    let gateway = CollisionVoiceGatewaySession()
+    let udp = CollisionVoiceUDPSession()
+
+    func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient { gateway }
+    func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession { udp }
 }
 
 @Suite("Discord bridge injected Gateway lifecycle")
@@ -427,6 +503,134 @@ struct DiscordBridgeLifecycleTests {
         await currentDriver.emit(try readyEvent(userID: "84"))
         #expect(await eventually { await bridge.state == .connected })
         #expect(await bridge.botUserId == "84")
+        await bridge.disconnect()
+    }
+
+    @Test("controller and bridge deadline collision emits one leave before replacement")
+    func controllerAndBridgeDeadlineCollision() async throws {
+        let oldDriver = FakeDiscordGatewayDriver(suspendsDisconnect: true)
+        let currentDriver = FakeDiscordGatewayDriver()
+        let driverFactory = FakeDiscordGatewayDriverFactory([oldDriver, currentDriver])
+        let bridgeSleeper = ControlledVoiceSleeper()
+        let controllerSleeper = ControlledVoiceSleeper()
+        let bridge = makeBridge(
+            factory: driverFactory,
+            sleeper: { try await bridgeSleeper.sleep(for: $0) }
+        )
+        try await connectReady(bridge: bridge, driver: oldDriver, userID: "42")
+
+        let controller = try DiscordVoiceController(
+            bridge: DiscordVoiceBridgeAdapter(bridge: bridge, pollInterval: .milliseconds(1)),
+            factory: CollisionVoiceSessionFactory(),
+            configuration: .init(credentialTimeout: .seconds(5)),
+            sleeper: { try await controllerSleeper.sleep(for: $0) }
+        )
+        let firstJoin = Task {
+            await controller.join(guildID: "guild", channelID: "old-channel")
+        }
+
+        #expect(await eventually {
+            await oldDriver.voiceUpdates == [
+                .init(guildID: "guild", channelID: "old-channel")
+            ]
+        })
+        let firstGeneration = await controller.currentSnapshot().generation
+        #expect(await eventually { await bridgeSleeper.waiterCount == 1 })
+        #expect(await eventually { await controllerSleeper.waiterCount == 1 })
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await bridgeSleeper.releaseNext() }
+            group.addTask { await controllerSleeper.releaseNext() }
+        }
+
+        #expect(await eventually { await oldDriver.nullVoiceUpdateCount == 1 })
+        #expect(await eventually {
+            let invocationCount = await bridgeSleeper.invocationCount
+            let waiterCount = await bridgeSleeper.waiterCount
+            return invocationCount == 2 && waiterCount == 1
+        })
+        #expect(await oldDriver.voiceUpdates.count == 2)
+
+        let replacementJoin = Task {
+            await controller.join(guildID: "guild", channelID: "new-channel")
+        }
+        #expect(await eventually {
+            let snapshot = await controller.currentSnapshot()
+            return snapshot.generation > firstGeneration
+                && snapshot.phase == .requestingGatewayState
+        })
+        #expect(await oldDriver.voiceUpdates.count == 2)
+
+        // Expire the old leave, but suspend its driver disconnect. The bridge
+        // may establish a fresh Gateway epoch while the controller must remain
+        // behind the old leave barrier.
+        await bridgeSleeper.releaseNext()
+        await oldDriver.waitUntilDisconnectStarted()
+        #expect(await bridge.state == .disconnected)
+
+        await bridge.connect(token: "replacement", hooks: .init())
+        #expect(await currentDriver.connectCount == 1)
+        await oldDriver.emit(try readyEvent(userID: "stale-user"))
+        await oldDriver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: nil,
+            userID: "42",
+            sessionID: "stale-session"
+        ))
+        await currentDriver.barrier()
+        #expect(await bridge.state == .connecting)
+        #expect(await bridge.botUserId == nil)
+
+        await currentDriver.emit(try readyEvent(userID: "84"))
+        #expect(await eventually { await bridge.state == .connected })
+        #expect(await currentDriver.voiceUpdates.isEmpty)
+        #expect(await oldDriver.nullVoiceUpdateCount == 1)
+
+        await oldDriver.releaseDisconnect()
+        _ = await firstJoin.value
+        #expect(await eventually {
+            await currentDriver.voiceUpdates == [
+                .init(guildID: "guild", channelID: "new-channel")
+            ]
+        })
+
+        // Callbacks queued on the retired driver cannot cancel or resurrect
+        // the accepted replacement generation.
+        await oldDriver.emit(try readyEvent(userID: "stale-user-2"))
+        await oldDriver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: nil,
+            userID: "42",
+            sessionID: "stale-session-2"
+        ))
+        await currentDriver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: "new-channel",
+            userID: "84",
+            sessionID: "replacement-session"
+        ))
+        await currentDriver.emit(try voiceServerEvent(
+            guildID: "guild",
+            endpoint: "voice.example.invalid",
+            token: "replacement-ephemeral-token"
+        ))
+        let replacementSnapshot = await replacementJoin.value
+        #expect(replacementSnapshot.phase == .readyMuted)
+        #expect(replacementSnapshot.failure == nil)
+        #expect(await bridge.state == .connected)
+        #expect(await bridge.botUserId == "84")
+        #expect(await bridge.voiceChannelId == "new-channel")
+        #expect(await oldDriver.nullVoiceUpdateCount == 1)
+
+        let cleanup = Task { await controller.leave() }
+        #expect(await eventually { await currentDriver.nullVoiceUpdateCount == 1 })
+        await currentDriver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: nil,
+            userID: "84",
+            sessionID: "replacement-session"
+        ))
+        _ = await cleanup.value
         await bridge.disconnect()
     }
 

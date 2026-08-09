@@ -56,6 +56,17 @@ status: in_progress
   emitted `VERIFY-ALL GREEN`. These results advance the local DAVE component boundary but do not
   compose or prove production RTP/Opus send/receive, Apple capture/playback, reconnect/resume, or a
   live DAVE-enabled call, so this goal remains `in_progress`.
+- **Phase 4 negotiated-media bootstrap 2026-08-03:** the Voice Gateway now consumes the validated
+  Ready SSRC, selected AEAD mode, 32-byte Session Description key, effective DAVE version, and
+  Gateway generation into a one-shot session-owned native media plane before returning only
+  secret-free readiness booleans to the controller. The Gateway no longer retains the raw Session
+  Description; duplicate/stale generations and reset races fail closed, DAVE changes re-attest the
+  current epoch, and teardown is ordered media reset → Voice WebSocket → retained UDP. The native
+  factory remains `.unavailable` and advertises DAVE 0 because no production packet pump exists.
+  Focused Core verification is 67/67 and the fresh pinned native gate passed 52 tests in 7 suites
+  in debug and release with output secrecy and `NATIVE_MEDIA_SMOKE_GREEN`. This closes the local
+  Phase 4 bootstrap boundary only; protected packet send/receive, capture/playback, reconnect,
+  UI, and live evidence remain open, so the goal stays `in_progress`.
 
 ## Complete Discord video and Go Live
 status: in_progress

@@ -268,6 +268,59 @@ private actor VoiceControllerTestUDP: DiscordVoiceUDPDiscoverySession {
     }
 }
 
+private actor VoiceControllerTeardownRecorder {
+    private var values: [String] = []
+
+    func record(_ value: String) { values.append(value) }
+    func snapshot() -> [String] { values }
+}
+
+private actor VoiceControllerOrderedGateway: DiscordVoiceGatewaySessionClient {
+    let recorder: VoiceControllerTeardownRecorder
+
+    init(recorder: VoiceControllerTeardownRecorder) { self.recorder = recorder }
+
+    func connect(using pair: DiscordVoiceGatewayPair) async throws -> DiscordVoiceGatewayTransportReady {
+        .init(
+            address: "127.0.0.1",
+            port: 5_000,
+            ssrc: 42,
+            encryptionModes: ["aead_xchacha20_poly1305_rtpsize"]
+        )
+    }
+
+    func selectTransport(_ endpoint: DiscordVoiceDiscoveredEndpoint) async throws {}
+
+    func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities {
+        .init(dave: true, aead: true, opus: true)
+    }
+
+    func disconnect() async { await recorder.record("gateway") }
+}
+
+private actor VoiceControllerOrderedUDP: DiscordVoiceUDPDiscoverySession {
+    let recorder: VoiceControllerTeardownRecorder
+
+    init(recorder: VoiceControllerTeardownRecorder) { self.recorder = recorder }
+
+    func discoverEndpoint(
+        for ready: DiscordVoiceGatewayTransportReady
+    ) async throws -> DiscordVoiceDiscoveredEndpoint {
+        .init(address: "127.0.0.1", port: 6_000)
+    }
+
+    func disconnect() async { await recorder.record("udp") }
+}
+
+private struct VoiceControllerOrderedFactory: DiscordVoiceSessionFactory {
+    let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability = .fullyWired
+    let gateway: VoiceControllerOrderedGateway
+    let udp: VoiceControllerOrderedUDP
+
+    func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient { gateway }
+    func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession { udp }
+}
+
 private struct VoiceControllerTestFactory: DiscordVoiceSessionFactory {
     let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability
     let gateway: VoiceControllerTestGateway
@@ -312,7 +365,7 @@ struct DiscordVoiceControllerTests {
         #expect(snapshot.phase == .failed)
         #expect(snapshot.failure == .mediaUnavailable)
         #expect(snapshot.mediaAdapterAvailable == false)
-        #expect(await gateway.mediaCount == 0)
+        #expect(await gateway.mediaCount == 1)
         #expect(snapshot.microphoneEnabled == false)
         #expect(snapshot.cameraEnabled == false)
         #expect(snapshot.screenShareEnabled == false)
@@ -631,6 +684,24 @@ struct DiscordVoiceControllerTests {
         #expect(await udp.disconnectCount == 1)
         #expect(await bridge.leaveCount == 1)
         #expect(await bridge.requestCount == 2)
+    }
+
+    @Test("Gateway resets media before the retained UDP transport closes")
+    func gatewayTeardownPrecedesUDP() async throws {
+        let recorder = VoiceControllerTeardownRecorder()
+        let controller = try DiscordVoiceController(
+            bridge: VoiceControllerTestBridge(),
+            factory: VoiceControllerOrderedFactory(
+                gateway: VoiceControllerOrderedGateway(recorder: recorder),
+                udp: VoiceControllerOrderedUDP(recorder: recorder)
+            ),
+            configuration: configuration()
+        )
+
+        #expect(await controller.join(guildID: "guild", channelID: "channel").phase == .readyMuted)
+        await controller.stopNow()
+        _ = await controller.leave()
+        #expect(await recorder.snapshot() == ["gateway", "udp"])
     }
 
     @Test("suspended teardown finishes before replacement transport connects")

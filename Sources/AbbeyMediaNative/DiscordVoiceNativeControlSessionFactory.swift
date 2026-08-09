@@ -19,7 +19,16 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     }
 
     public func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient {
-        makeGatewayClient(daveAdapter: makeDAVEAdapter())
+        let daveAdapter = makeDAVEAdapter()
+        let udp = DiscordVoiceUDPSessionAdapter()
+        let mediaPlane = DiscordVoiceNativeMediaPlane(
+            daveAdapter: daveAdapter,
+            datagramTransport: udp
+        )
+        return makeGatewayClient(
+            daveAdapter: daveAdapter,
+            mediaPlane: mediaPlane
+        )
     }
 
     public func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession {
@@ -29,8 +38,15 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     public func makeSessionComponents() -> DiscordVoiceSessionComponents {
         let daveAdapter = makeDAVEAdapter()
         let udp = DiscordVoiceUDPSessionAdapter()
+        let mediaPlane = DiscordVoiceNativeMediaPlane(
+            daveAdapter: daveAdapter,
+            datagramTransport: udp
+        )
         return DiscordVoiceSessionComponents(
-            gateway: makeGatewayClient(daveAdapter: daveAdapter),
+            gateway: makeGatewayClient(
+                daveAdapter: daveAdapter,
+                mediaPlane: mediaPlane
+            ),
             udp: udp
         )
     }
@@ -49,10 +65,12 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     }
 
     private func makeGatewayClient(
-        daveAdapter: NativeDAVEControlAdapter
+        daveAdapter: NativeDAVEControlAdapter,
+        mediaPlane: DiscordVoiceNativeMediaPlane
     ) -> DiscordVoiceGatewaySession {
         DiscordVoiceGatewaySession(
             mediaAttestation: .portableUnavailable,
+            mediaPlane: mediaPlane,
             daveControlHandler: daveAdapter.controlHandler,
             configuration: DiscordVoiceGatewaySessionConfiguration(
                 maximumDAVEProtocolVersion: Self.advertisedDAVEProtocolVersion(

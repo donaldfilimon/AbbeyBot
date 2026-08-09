@@ -28,15 +28,21 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
 ## Discord application + real voice audio — in progress
 
-- [ ] Harden the DiscordBM main-gateway lifecycle: READY remains the connected authority, explicit
+- [x] Harden the DiscordBM main-gateway lifecycle: READY remains the connected authority, explicit
       disconnect closes the pinned manager, failures become observable, and voice presence is not
       reported as joined before Discord confirms the bot's own `VOICE_STATE_UPDATE`.
+      *(Closed 2026-08-03: the injected `DiscordGatewayDriver` seam exercises the real
+      `DiscordBridge` event loop. Ten bridge lifecycle tests cover READY authority, retained
+      disconnect, normal/failed stream termination, both voice-event orders, wrong identities,
+      timeout and leave acknowledgement, stale epochs, and the real controller+bridge deadline
+      collision. The collision emits one null-channel cleanup, holds replacement behind the
+      authoritative leave barrier, and rejects late callbacks.)*
 - [x] Pair the unordered self `VOICE_STATE_UPDATE` and `VOICE_SERVER_UPDATE` events in a
       generation-scoped handshake accumulator; cover both event orders, wrong guild/user/channel,
       nil endpoint, stale partials, cancellation, timeout, and single-emission behavior.
-      *(Audited 2026-08-01: `VoiceGatewayHandshake.swift` + `VoiceGatewayHandshakeTests` cover
-      every listed sub-requirement; green in the 234-test AbbeyCoreTests run. Bridge-side
-      consumption of the accumulator remains untested — tracked under item 1.)*
+      *(Audited 2026-08-03: `VoiceGatewayHandshake.swift` + `VoiceGatewayHandshakeTests` cover
+      every listed sub-requirement, and `DiscordBridgeLifecycleTests` now exercises the real
+      bridge-side consumption and cleanup ownership.)*
 - [x] Implement the separate Discord Voice Gateway v8 state machine: endpoint normalization,
       Identify, Hello, heartbeat/ACK with `seq_ack`, Ready, Session Description, Speaking, binary
       payload decoding, close-code policy, and bounded parsing.
@@ -154,12 +160,39 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 - [ ] This does **not** close the DAVE/audio checklist item: production RTP/Opus send/receive,
       capture/playback composition, reconnect/resume, and a live DAVE-enabled call remain open.
 
+### Phase 4 negotiated-media bootstrap slice (2026-08-03)
+
+- [x] Added a one-shot, in-memory `DiscordVoiceNegotiatedMediaCapability` carrying the Voice
+      Gateway generation, Ready audio SSRC, selected typed AEAD mode, exact 32-byte Session
+      Description key, and effective DAVE version directly from `DiscordVoiceGatewaySession` to
+      its session-owned media plane. The key has no getter, Codable/Equatable conformance, UI or
+      controller route, snapshot field, log representation, or synthesized reflection surface.
+- [x] Removed the retained raw Session Description from the Gateway actor. Session Description now
+      installs the capability before resolving a secret-free readiness signal; repeated
+      negotiation does not reinstall the key. DAVE epoch changes re-attest the media plane's
+      current native session without caching a replaceable `NativeDAVESession`.
+- [x] Added `DiscordVoiceNativeMediaPlane`: it constructs one RTPSIZE encryption owner and one
+      Opus owner against the exact retained UDP discovery/media socket, rejects duplicate/stale
+      generations across reset, prevents suspended initialization from publishing after reset,
+      and exposes only redacted boolean state. The native factory still reports `.unavailable`
+      and advertises DAVE 0, so this bootstrap is not misreported as shipped audio.
+- [x] Enforced and tested teardown ordering: media-plane reset precedes local Voice WebSocket
+      close, and Gateway disconnect completes before the retained UDP socket closes. Focused Core
+      verification passed 67 tests in 4 suites; fresh pinned native debug and release each passed
+      52 tests in 7 suites, output secrecy passed, `STATIC_SECURITY_GREEN` and
+      `NATIVE_MEDIA_SMOKE_GREEN` were emitted.
+- [ ] Phase 5 remains open: send one deterministic protected 20 ms Opus/RTP packet through the
+      retained UDP socket and prove DAVE protection, RTP header/clock, AEAD counter, speaking
+      ordering, teardown, and no plaintext fallback. No live-audio claim is made by Phase 4.
+
 ### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
 
 Open items above, graded against the committed tree at `2a423e1`:
-- **Item 1 (gateway lifecycle) PARTIAL** — implementation hardened (generation-scoped READY
+- **Historical item 1 result (superseded 2026-08-03): gateway lifecycle was PARTIAL** — implementation hardened (generation-scoped READY
   authority, presence only from confirmed self `VOICE_STATE_UPDATE`, real `disconnect()`), but
-  `DiscordBridge.handleVoiceStateUpdate`/`handleVoiceServerUpdate` have zero bridge-level tests.
+  `DiscordBridge.handleVoiceStateUpdate`/`handleVoiceServerUpdate` then had zero bridge-level tests.
+  The Phase 1/2 closure above now supplies ten real bridge lifecycle tests, including the
+  controller/bridge timeout collision.
 - **libdave/DAVE PARTIAL** — pinned libdave 1.1.1 binding (`NativeDAVESession`) is real MLS, never
   enables passthrough, and nothing advertises nonzero DAVE (honest default 0). Missing piece is the
   control-handler bridge: production factory passes `.portableUnavailable`. A concurrent session
