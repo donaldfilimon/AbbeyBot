@@ -105,6 +105,15 @@ status: in_progress
   in-log evidence). Explicitly NOT closed: automatic controller-level full-reconnect
   (`DiscordVoiceController.reconnect()` remains production-uninvoked), induced UDP/invalid-session/
   channel-move/shutdown verification, and live-network resume evidence (operator-blocked).
+- **`/goal continue` 2026-08-20 ~02:55 (second pass, parallel dispatch):** unbroke the red linux CI
+  job first — `web/bun.lock` is lockfileVersion 2 (bun 1.4.0) while CI pinned bun 1.2.19, and the
+  "Test dashboard SPA" step ran `bun test` (bun's own runner, no `vi.stubGlobal`/DOM) against vitest
+  suites; fixed to bun 1.4.0 + `bun run test`, verified locally (install/lint/build green, vitest
+  17/17), pushed to PR #60 (`d7a36e7`). Then dispatched three worktree-isolated agents: (1) Phase 6a
+  AVAudioEngine capture composition into the production `sendAudioFrame` path; (2) video-goal
+  DAVE-protect/AEAD/RTP send extension to `.video` frames (see that goal); (3) swiftly-snapshot
+  server-graph parity (see new goal below). In flight — results and honest boundaries land
+  per-slice when each agent returns. Live evidence remains operator-blocked and was not attempted.
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -153,6 +162,28 @@ status: in_progress
   to the three in-flight slices. Next continue pass: once Phase 5 lands, extend its
   DAVE-protect/AEAD/RTP call pattern to `.video` frames rather than re-deriving it. Goal remains
   `in_progress`; no new evidence this pass.
+- **`/goal continue` 2026-08-20: the deferred slice is now dispatched.** Phase 5 landed on the
+  audio side, so a worktree-isolated agent is extending its DAVE-protect/AEAD/RTP call pattern to
+  `.video` frames exactly as the 2026-08-04 note prescribed: video SSRC from the landed Opcode
+  12/15 source/sink models, 90 kHz RTP clock and marker-bit frame boundaries, announcement-before-
+  send, fail-closed on plaintext fallback and stale generations, with a Phase-5-style composition
+  proof plus fail-closed tests. Scope is the video send boundary only — no capture wiring, codec
+  negotiation completion, rendering, or live claims. In flight; evidence lands when the agent
+  returns.
+
+## Cross-platform server-graph toolchain parity (swiftly snapshot)
+status: in_progress
+- Goal: local development gets a first-class swiftly-managed Swift 6.4/6.5 development-snapshot
+  path for the server graph (AbbeyCore/AbbeyServerKit/AbbeyServer/AbbeyCLI under
+  `ABBEY_PACKAGE_ROLE=server`), matching CI's `swiftlang/swift:nightly-6.4.x-bookworm` Linux image
+  — WITHOUT disturbing the desktop's Xcode toolchain path (`.swift-version` stays `xcode`; SwiftData
+  macros break under snapshot toolchains, so the swiftly selection is per-invocation only, never
+  the global default).
+- Acceptance: a committed `Scripts/check-server-snapshot.sh` that resolves/builds/tests the four CI
+  server suites under the snapshot with real per-gate exit codes, AGENTS.md documenting the path,
+  and the Xcode desktop build still green.
+- **`/goal continue` 2026-08-20: dispatched** as one of three parallel worktree-isolated slices.
+  In flight; evidence lands when the agent returns.
 
 ## Release and SwiftData hardening
 status: done
