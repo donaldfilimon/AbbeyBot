@@ -324,6 +324,16 @@ status: in_progress
   imports, no unguarded `CF*`/`kCF*`/`Unmanaged`/`@objc` users, no `DispatchQueue` users missing
   `import Dispatch`. `AppConfig.swift`'s `#if canImport(Security)` Keychain guard is the pattern
   the other fixes follow.
+- **2026-08-20 second pass — 6th break, and the lint that should have caught it.** CI found
+  `SOCK_STREAM` passed straight to `socket(_:_:_:)`: glibc types it as the `__socket_type` enum,
+  Darwin and musl as a plain `Int32`. It compiled locally, compiled under the new musl Linux
+  gate, AND passed review — glibc CI was the only thing that saw it. **That is now twice** the
+  musl gate has been green while a real glibc break was live (the first was the `stderr` global).
+  Both classes are now in `check-server-linux.sh`'s `glibc-divergence` lint, which was validated
+  by firing in both directions (reverted fix → exit 1 naming the line; fixed → exit 0), with a
+  visible `// glibc-divergence:ok` opt-out for deliberate non-Glibc branches.
+  **The standing lesson:** a green musl cross-build is evidence about *musl*. Treat every new
+  libc-adjacent construct as unproven for glibc until either the lint covers it or CI says so.
 - **Acceptance:** one green linux run. Not claimable until observed — a clean audit is not a
   passing build, and this job has proven it hides breakage one file at a time.
 - **Known gap in local tooling:** `Scripts/check-server-snapshot.sh` gives toolchain parity on
