@@ -868,6 +868,149 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await plane.snapshot().isInstalled == false)
     }
 
+    @Test(
+        "a superseding installVideoSource interrupts a video send suspended on DAVE work — no packet under the obsolete SSRC reaches the transport"
+    )
+    func supersedingVideoSourceInterruptsSendSuspendedOnDAVE() async throws {
+        let log = NativeMediaDatagramDouble()
+        let bootstrapSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let sendSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        // install() and sendVideoFrame() each call the provider once; only
+        // the second (send-time) call is gated.
+        let gate = SendPathGate(bootstrapSession: bootstrapSession, sendSession: sendSession)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { await gate.provide() },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 50, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        let send = Task {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        await gate.waitUntilRequested()
+
+        // The outbound source is switched (a camera/screen swap) while that
+        // send is still suspended. The generation is unchanged, so the send's
+        // `revision` check still passes — only the video-source generation
+        // can fail it closed.
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(videoSSRC: 0x3333_3333),
+            activeRIDs: ["100"],
+            codec: .h264
+        )
+        await gate.release()
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await send.value
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await sendSession.protectCallCount == 0)
+        // The only announcement that fired belongs to the superseded source;
+        // the new source has not announced and no frame carried either SSRC.
+        #expect(await announcements.callCount == 1)
+        #expect(await announcements.announcements.first?.videoSSRC == 0x2222_2222)
+        // The audio generation is untouched: replacing a video source must
+        // not tear down the installed connection.
+        #expect(await plane.snapshot().isInstalled)
+    }
+
+    @Test(
+        "a superseding installVideoSource interrupts a video send suspended on its Opcode 12 announcement"
+    )
+    func supersedingVideoSourceInterruptsSendSuspendedOnAnnouncement() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = SuspendableVideoAnnouncementSignal()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 51, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        let send = Task {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 1))
+        }
+        await announcements.waitUntilSignalStarted()
+
+        // Installing a source re-arms the announcement gate, so the suspended
+        // send's callback can no longer latch it. Nothing but the video-source
+        // generation stops that send from continuing to the wire.
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(videoSSRC: 0x4444_4444),
+            activeRIDs: ["100"],
+            codec: .h264
+        )
+        await announcements.release()
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await send.value
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await daveSession.protectCallCount == 0)
+        #expect(await announcements.callCount == 1)
+        #expect(await announcements.announcements.first?.videoSSRC == 0x2222_2222)
+        #expect(await plane.snapshot().isInstalled)
+    }
+
+    @Test("after a video source is replaced, the next frame announces and sends under the new source")
+    func replacedVideoSourceIsUsedByLaterFrames() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 52, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(videoSSRC: 0x5555_5555),
+            activeRIDs: ["100"],
+            codec: .h264
+        )
+
+        try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 2))
+
+        #expect(await announcements.callCount == 1)
+        #expect(await announcements.announcements.first?.videoSSRC == 0x5555_5555)
+        let receiver = try receiverTransport()
+        let rtpCodec = try DiscordVoiceRTPCodec()
+        let wirePacket = try #require(await log.sentPackets.first)
+        let opened = try await receiver.open(wirePacket)
+        let header = try rtpCodec.decodeHeader(from: opened)
+        #expect(header.ssrc == 0x5555_5555)
+        #expect(header.payloadType == DiscordVoiceRTPHeader.discordVideoH264PayloadType)
+        #expect(await daveSession.lastProtectedSSRC == 0x5555_5555)
+        #expect(await daveSession.lastProtectedCodec == .h264)
+    }
+
     private func fixedEncodedVideoFrame(seed: Int) -> Data {
         Data((0..<321).map { index in
             UInt8(truncatingIfNeeded: (index &* 31) &+ (seed &* 97) &+ 5)
@@ -1106,6 +1249,41 @@ private actor VideoAnnouncementRecorder {
 
 private enum TestVideoAnnouncementFailure: Error, Equatable {
     case injected
+}
+
+/// An Opcode 12 announcement callback that suspends its first caller until the
+/// test releases it, recording the exact announcement it was handed. Modeled on
+/// `SuspendableSpeakingSignal`; once released, later calls complete
+/// immediately so a re-attempting frame cannot hang the suite.
+private actor SuspendableVideoAnnouncementSignal {
+    private(set) var callCount = 0
+    private(set) var announcements: [VoiceGatewayV8Video] = []
+    private var released = false
+    private var signalStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal(_ announcement: VoiceGatewayV8Video) async throws {
+        callCount += 1
+        announcements.append(announcement)
+        let startWaiters = signalStartWaiters
+        signalStartWaiters.removeAll(keepingCapacity: false)
+        for waiter in startWaiters { waiter.resume() }
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+    }
+
+    func waitUntilSignalStarted() async {
+        guard callCount == 0 else { return }
+        await withCheckedContinuation { signalStartWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
+    }
 }
 
 private actor NativeDAVEMediaSessionSource {
