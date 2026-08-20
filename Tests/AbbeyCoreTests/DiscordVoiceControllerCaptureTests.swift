@@ -82,13 +82,53 @@ private actor ControllerCaptureLoopDouble: DiscordVoiceCaptureLoopControlling {
     private var terminalHandler: (@Sendable () async -> Void)?
     private let recorder: ControllerCaptureOrderRecorder?
 
+    // Deterministic reentrancy harness. `gateNextStart()` makes the next
+    // `start(generation:)` park *inside* the call until `releaseStart()`, so a
+    // test can land a mute or a terminal event in the exact window where the
+    // controller actor is suspended in `await captureLoop.start(...)`.
+    private var gateNextStartCall = false
+    private var startEntered = false
+    private var startReleased = false
+    private var startEntryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var startReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+
     init(recorder: ControllerCaptureOrderRecorder? = nil) {
         self.recorder = recorder
     }
 
     func failNextStart() { failStart = true }
 
+    func gateNextStart() {
+        gateNextStartCall = true
+        startEntered = false
+        startReleased = false
+    }
+
+    /// Returns once the gated `start` call has actually suspended.
+    func waitForStartEntry() async {
+        if startEntered { return }
+        await withCheckedContinuation { startEntryWaiters.append($0) }
+    }
+
+    /// Lets the gated `start` call proceed. Safe to call before entry.
+    func releaseStart() {
+        startReleased = true
+        let waiters = startReleaseWaiters
+        startReleaseWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
     func start(generation: UInt64) async throws {
+        if gateNextStartCall {
+            gateNextStartCall = false
+            startEntered = true
+            let waiters = startEntryWaiters
+            startEntryWaiters = []
+            for waiter in waiters { waiter.resume() }
+            if !startReleased {
+                await withCheckedContinuation { startReleaseWaiters.append($0) }
+            }
+        }
         if failStart {
             failStart = false
             throw ControllerCaptureTestError.failed
@@ -138,18 +178,28 @@ private struct ControllerCaptureFactory: DiscordVoiceSessionFactory {
     }
 }
 
+/// Collects every snapshot the controller publishes, so a test can assert on
+/// the *transient* states an operator's snapshot stream would observe — not
+/// only on the settled one.
+private actor ControllerCaptureSnapshotSink {
+    private var values: [DiscordVoiceControllerSnapshot] = []
+    func append(_ value: DiscordVoiceControllerSnapshot) { values.append(value) }
+    func snapshot() -> [DiscordVoiceControllerSnapshot] { values }
+}
+
 @Suite("Discord Voice Controller capture composition")
 struct DiscordVoiceControllerCaptureTests {
     private func makeController(
         bridge: ControllerCaptureBridge,
-        factory: ControllerCaptureFactory
+        factory: ControllerCaptureFactory,
+        snapshotBufferLimit: Int = 8
     ) throws -> DiscordVoiceController {
         try DiscordVoiceController(
             bridge: bridge,
             factory: factory,
             configuration: .init(
                 credentialTimeout: .seconds(5),
-                snapshotBufferLimit: 8,
+                snapshotBufferLimit: snapshotBufferLimit,
                 audioQueueCapacity: 2,
                 videoQueueCapacity: 2
             )
@@ -296,6 +346,107 @@ struct DiscordVoiceControllerCaptureTests {
         let snapshot = await controller.currentSnapshot()
         #expect(snapshot.microphoneEnabled == true)
         #expect(snapshot.failure == nil)
+        _ = await controller.leave()
+    }
+
+    // MARK: - Reentrancy across `captureLoop.start`
+
+    @Test("a mute landing while capture is starting is honored, never dropped")
+    func muteDuringCaptureStartIsHonored() async throws {
+        let loop = ControllerCaptureLoopDouble()
+        let controller = try makeController(
+            bridge: ControllerCaptureBridge(),
+            factory: ControllerCaptureFactory(
+                gateway: ControllerCaptureGateway(),
+                udp: ControllerCaptureUDP(),
+                loop: loop
+            ),
+            snapshotBufferLimit: 64
+        )
+
+        _ = await controller.join(guildID: "g", channelID: "c")
+
+        let sink = ControllerCaptureSnapshotSink()
+        let stream = await controller.snapshots()
+        let pump = Task { for await value in stream { await sink.append(value) } }
+
+        await loop.gateNextStart()
+        let enabling = Task { await controller.setMicrophoneEnabled(true) }
+        await loop.waitForStartEntry()
+
+        // Enters the actor while the enable is suspended inside
+        // `captureLoop.start` — the exact window the finding describes.
+        _ = await controller.setMicrophoneEnabled(false)
+        await loop.releaseStart()
+        _ = await enabling.value
+
+        let settled = await controller.currentSnapshot()
+        #expect(settled.microphoneEnabled == false)
+        // Capture stopped at the device boundary, not merely at the flag.
+        #expect(await loop.stopCount == 1)
+
+        await controller.shutdown()
+        _ = await pump.value
+        // The privacy action must never be contradicted mid-flight either: no
+        // published snapshot may ever report an enabled microphone.
+        #expect(await sink.snapshot().allSatisfy { $0.microphoneEnabled == false })
+    }
+
+    @Test("a terminal failure racing capture startup is preserved, not discarded")
+    func terminalDuringCaptureStartFailsClosed() async throws {
+        let loop = ControllerCaptureLoopDouble()
+        let controller = try makeController(
+            bridge: ControllerCaptureBridge(),
+            factory: ControllerCaptureFactory(
+                gateway: ControllerCaptureGateway(),
+                udp: ControllerCaptureUDP(),
+                loop: loop
+            )
+        )
+
+        _ = await controller.join(guildID: "g", channelID: "c")
+
+        await loop.gateNextStart()
+        let enabling = Task { await controller.setMicrophoneEnabled(true) }
+        await loop.waitForStartEntry()
+
+        // The loop self-terminates (already-finished stream, or a first send
+        // that failed immediately) before the controller's start resumes.
+        await loop.fireTerminal()
+        await loop.releaseStart()
+        let settled = await enabling.value
+
+        #expect(settled.microphoneEnabled == false)
+        #expect(settled.failure == .captureUnavailable)
+        let current = await controller.currentSnapshot()
+        #expect(current.microphoneEnabled == false)
+        #expect(current.failure == .captureUnavailable)
+        _ = await controller.leave()
+    }
+
+    @Test("a successful capture retry clears the stored capture failure")
+    func successfulRetryClearsCaptureFailure() async throws {
+        let loop = ControllerCaptureLoopDouble()
+        await loop.failNextStart()
+        let controller = try makeController(
+            bridge: ControllerCaptureBridge(),
+            factory: ControllerCaptureFactory(
+                gateway: ControllerCaptureGateway(),
+                udp: ControllerCaptureUDP(),
+                loop: loop
+            )
+        )
+
+        _ = await controller.join(guildID: "g", channelID: "c")
+        let failed = await controller.setMicrophoneEnabled(true)
+        #expect(failed.failure == .captureUnavailable)
+
+        let retried = await controller.setMicrophoneEnabled(true)
+        #expect(retried.microphoneEnabled)
+        // An enabled microphone and a capture failure must never be reported
+        // together: recovery has to be visible to operators and consumers.
+        #expect(retried.failure == nil)
+        #expect(await controller.currentSnapshot().failure == nil)
         _ = await controller.leave()
     }
 }
