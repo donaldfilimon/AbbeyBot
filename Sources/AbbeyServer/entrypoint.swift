@@ -21,7 +21,12 @@ public enum AbbeyServerMain {
             }
         } catch {
             // Environment / Application.make failed before we had a logger.
-            fputs("AbbeyServer failed to start: \(error)\n", stderr)
+            // `FileHandle.standardError`, not `fputs(..., stderr)`: on Linux
+            // Glibc exposes `stderr` as a mutable global, which Swift 6 strict
+            // concurrency rejects as shared mutable state.
+            FileHandle.standardError.write(
+                Data("AbbeyServer failed to start: \(error)\n".utf8)
+            )
             Foundation.exit(1)
         }
     }
