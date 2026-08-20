@@ -456,6 +456,25 @@ status: done
 
 ## Make the Linux CI job actually pass
 status: done
+caveat: closed on one green run (32415037815). A Linux-only FLAKE surfaced two commits later
+(32427615181) and is fixed below — the job is green, but "green once" was never the same claim as
+"reliably green", and this entry should not have read as if it were.
+- **Linux flake found and fixed 2026-08-20.** `protocolZeroStagesUpgradeUntilExecute` failed on
+  Linux (`upgraded.dave` / `upgraded.isProductionReady` both false) on `9f347f6`. It is a **test**
+  defect, not a product regression, and the evidence says so from three directions: `9f347f6`
+  touched only the controller, the media plane (not compiled on Linux), and receive tests — it
+  cannot have changed `DiscordVoiceGatewaySession`; the test passes on macOS; and `048d57c`, one
+  commit later on the identical gateway code, passed Linux (run 32428530569).
+  The defect is an unsound synchronization point: the test waited on
+  `handler.receivedOpcodes().count == 3` — the *handler's* observation — then read the session's
+  own `lastCapabilities`. Those are two different moments, and nothing orders them. The 32 test
+  lines `9f347f6` added perturbed scheduling enough to expose it. It now waits on the capability
+  itself.
+  **Honest limit of the local proof:** macOS cannot red-prove a Linux scheduling race — the broken
+  version passes here too. What was proved instead is that the new wait is not vacuous:
+  suppressing the Execute Transition makes it time out rather than pass. Restored byte-identical
+  by sha256 (ce6fc3c7...); AbbeyCoreTests 406/406. Confirmation that the flake is gone can only
+  come from Linux CI.
 - **Discovered 2026-08-20:** the `Abbey CI` linux job has **not succeeded in any of the last 30
   runs, on any branch, including `main`.** It is not a regression from any one PR — the server
   graph (`ABBEY_PACKAGE_ROLE=server`: AbbeyCore/AbbeyServerKit/AbbeyServer/AbbeyCLI) simply does

@@ -690,9 +690,27 @@ struct DiscordVoiceGatewaySessionTests {
         )
         try await eventually { await handler.receivedOpcodes().count == 3 }
 
+        // The handler recording the Execute Transition and the session settling
+        // `lastCapabilities` are two DIFFERENT moments: the handler is a callback
+        // the session invokes, the capabilities are the session's own state,
+        // updated on its inbound path. Waiting on the handler's count and then
+        // reading capabilities asserts an ordering nothing guarantees. It held on
+        // macOS and failed on Linux CI (run 32427615181) where the scheduler put
+        // the read first — a flake, not a regression: the commit it failed on
+        // touched neither this test nor `DiscordVoiceGatewaySession`.
+        //
+        // Wait on the capability itself. `negotiateDAVEAndMedia` is a pure read
+        // once the description signal has resolved (it returns `lastCapabilities`),
+        // so polling it is side-effect-free. `try?` here only absorbs the
+        // not-yet-settled case; the unconditional call below still throws sharply
+        // if the session genuinely went stale, and the phase assertion after it
+        // catches a session that failed rather than merely lagged.
+        try await eventually { ((try? await gateway.negotiateDAVEAndMedia())?.dave ?? false) }
+
         let upgraded = try await gateway.negotiateDAVEAndMedia()
         #expect(upgraded.dave)
         #expect(upgraded.isProductionReady)
+        #expect(await gateway.snapshot().phase == .established)
         #expect(await harness.closeCodes().isEmpty)
         await gateway.disconnect()
     }
