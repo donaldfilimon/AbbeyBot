@@ -1,4 +1,6 @@
+import AbbeyCore
 import AbbeyMediaMacOS
+import Foundation
 import Testing
 @testable import AbbeyBotApp
 
@@ -60,6 +62,61 @@ private actor CaptureRuntimeSpy: AudioEngineRuntime {
     }
 }
 
+/// Hermetic video boundary so the kill-switch tests can drive the real
+/// `MacOSMediaSessionPlatform` without touching a camera or the screen.
+private struct EmptyVideoSourceProvider: VideoCaptureSourceProviding {
+    func sourceSnapshots(
+        includeCameras: Bool,
+        includeScreens: Bool
+    ) async throws -> [VideoCaptureSourceSnapshot] { [] }
+}
+
+private actor InertVideoRuntime: VideoCaptureRuntime {
+    func installEventHandler(
+        _ handler: @escaping @Sendable (UInt64, VideoCaptureRuntimeEvent) async -> Void
+    ) {}
+
+    func startCapture(
+        generation: UInt64,
+        source: VideoCaptureSourceSnapshot,
+        deliver: @escaping @Sendable (UInt64, VideoCaptureRuntimeDelivery) async -> Void
+    ) async throws {}
+
+    func stopCapture() {}
+    func stopNow() {}
+}
+
+private actor RecordingFrameSender: DiscordVoiceAudioFrameSender {
+    private(set) var sentFrames = 0
+
+    func sendAudioFrame(pcm: [Int16]) async {
+        sentFrames += 1
+    }
+}
+
+/// One-shot cross-task signal: the capture loop's terminal handler and the
+/// stream drain both complete on their own tasks.
+private actor AsyncFlag {
+    private var raised = false
+
+    func raise() { raised = true }
+    func isRaised() -> Bool { raised }
+}
+
+/// Bounded poll, so a regression fails the test instead of hanging the suite
+/// on a stream that never finishes.
+private func waitUntil(
+    seconds: Double = 2,
+    _ condition: @Sendable () async -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    return await condition()
+}
+
 private struct MicrophoneFixture {
     let runtime: CaptureRuntimeSpy
     let adapter: AVAudioEngineAdapter
@@ -77,6 +134,29 @@ private struct MicrophoneFixture {
             policy: policy
         )
         source = MicrophoneCaptureSource(adapter: adapter)
+    }
+
+    /// The real platform wired to this fixture's shared adapter and bridge —
+    /// the same sharing the desktop `MediaSessionModel` performs — with an
+    /// inert video boundary and no permission prompts.
+    func makePlatform() -> MacOSMediaSessionPlatform {
+        let policy = FixedMediaPolicy(disabled: false)
+        let permissions = MediaPermissionController(
+            provider: FixedPermissionProvider(status: .authorized),
+            policy: policy
+        )
+        return MacOSMediaSessionPlatform(
+            permissions: permissions,
+            audioCatalog: AudioDeviceCatalog(),
+            audio: adapter,
+            video: VideoCaptureAdapter(
+                sourceProvider: EmptyVideoSourceProvider(),
+                runtime: InertVideoRuntime(),
+                permissions: permissions,
+                policy: policy
+            ),
+            microphone: source
+        )
     }
 }
 
@@ -119,6 +199,76 @@ struct MicrophoneCaptureSourceTests {
 
         #expect(await iterator.next() == nil)
         #expect(await fixture.runtime.captureStops >= 1)
+    }
+
+    @Test("the platform kill switch finishes the delivered capture stream")
+    func killSwitchFinishesStream() async throws {
+        let fixture = MicrophoneFixture()
+        let platform = fixture.makePlatform()
+        let stream = try await fixture.source.startCapture()
+
+        let drained = AsyncFlag()
+        let drainTask = Task {
+            for await _ in stream {}
+            await drained.raise()
+        }
+        defer { drainTask.cancel() }
+
+        await platform.stopAllCapture()
+
+        #expect(await waitUntil { await drained.isRaised() })
+    }
+
+    @Test("the platform kill switch fails the capture loop closed")
+    func killSwitchFailsCaptureLoopClosed() async throws {
+        let fixture = MicrophoneFixture()
+        let platform = fixture.makePlatform()
+        let sender = RecordingFrameSender()
+        let loop = DiscordVoiceCaptureLoop(source: fixture.source, sender: sender)
+        let terminal = AsyncFlag()
+        await loop.setTerminalHandler { await terminal.raise() }
+
+        try await loop.start(generation: 1)
+        let started = await loop.snapshot()
+        #expect(started.phase == .capturing)
+
+        await platform.stopAllCapture()
+
+        // The loop's terminal path is what drops the controller's microphone
+        // to disabled, so an unfinished stream leaves the UI reporting a live
+        // microphone on a stopped device.
+        #expect(await waitUntil { await terminal.isRaised() })
+        let terminated = await loop.snapshot()
+        #expect(terminated.phase == .failed)
+    }
+
+    @Test("capture can be enabled again after the kill switch fires")
+    func captureRestartsAfterKillSwitch() async throws {
+        let fixture = MicrophoneFixture()
+        let platform = fixture.makePlatform()
+        let sender = RecordingFrameSender()
+        let loop = DiscordVoiceCaptureLoop(source: fixture.source, sender: sender)
+        let terminal = AsyncFlag()
+        await loop.setTerminalHandler { await terminal.raise() }
+
+        try await loop.start(generation: 1)
+        await platform.stopAllCapture()
+        #expect(await waitUntil { await terminal.isRaised() })
+
+        // A later enable attempt must reach the device again rather than
+        // silently no-op until the whole session is torn down.
+        try await loop.start(generation: 1)
+        let restarted = await loop.snapshot()
+        let adapterState = await fixture.adapter.currentState()
+        #expect(restarted.phase == .capturing)
+        #expect(adapterState == .capturing)
+
+        await fixture.runtime.emitSamples(
+            Array(repeating: Float(0.25), count: AudioPCMFrame.interleavedSampleCount)
+        )
+        #expect(await waitUntil { await sender.sentFrames >= 1 })
+
+        await loop.stop()
     }
 
     @Test("a second start while a session is active fails closed")
