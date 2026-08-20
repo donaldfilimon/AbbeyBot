@@ -5,9 +5,12 @@ import Foundation
 // This file models the JSON wire shapes for Opcode 12 Video and Opcode 15
 // Media Sink Wants, plus SSRC allocation and participant-mapping state, as
 // documented by the community Voice Gateway reference (docs.discord.food,
-// "voice-connections", formerly userdoccers). No video capture, codec,
-// RTP packetization, or DAVE video-frame encryption path exists in this
-// repository; nothing here transmits or receives media. Video remains
+// "voice-connections", formerly userdoccers). Nothing in this file transmits
+// or receives media itself. The native media plane's `sendVideoFrame`
+// boundary consumes `VoiceGatewayV8VideoSSRCAllocation` announcements to
+// compose an outbound DAVE-protected video RTP send, but no camera/screen
+// capture, video encoder, codec negotiation completion, receive/render path,
+// or live video evidence exists in this repository. Video remains
 // independently incomplete from voice audio.
 
 /// Local parsing bounds for video signaling payloads. The numeric limits are
@@ -200,8 +203,9 @@ public struct VoiceGatewayV8Stream: Codable, Equatable, Sendable {
 /// objects can still include `rtx_ssrc`).
 ///
 /// Documented requirement: at least one Video payload must be sent before
-/// sending or receiving video data. This type is signaling-shape only — no
-/// media path consumes it.
+/// sending or receiving video data. The native media plane's video send path
+/// enforces that obligation by emitting one announcement before the first
+/// protected packet of an installed video source.
 public struct VoiceGatewayV8Video: Codable, Equatable, Sendable {
     public static let opcode = 12
 

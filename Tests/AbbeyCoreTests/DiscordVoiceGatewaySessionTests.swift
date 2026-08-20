@@ -1287,6 +1287,26 @@ struct DiscordVoiceGatewaySessionTests {
         await gateway.disconnect()
     }
 
+    @Test("operator disconnect of a LIVE session resolves awaitTermination as false")
+    func liveDisconnectResolvesTermination() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness)
+
+        // Regression guard: disconnect() bumps the generation before the
+        // cancelled transport loop reports back, so the loop's own
+        // transportDidFinish resolve can never run — disconnect() must
+        // resolve the termination signal itself or this await hangs forever.
+        let monitor = Task { await gateway.awaitTermination() }
+        await gateway.disconnect()
+        #expect(await monitor.value == false)
+        #expect(await gateway.snapshot().phase == .disconnected)
+    }
+
     @Test("explicit disconnect during the resume backoff wins and lands disconnected")
     func disconnectDuringResumeBackoff() async throws {
         let harness = DiscordVoiceGatewayResumeHarness()
@@ -1395,6 +1415,77 @@ struct DiscordVoiceGatewaySessionTests {
         #expect(await harness.sentOpcodes() == [0, 1, 5])
     }
 
+    @Test(
+        "an established session validates the Opcode 12 Video announcement against Ready and sends it through the media plane's callback; foreign SSRCs and stale callbacks fail closed"
+    )
+    func videoAnnouncementSendsThroughGatewayAndFailsClosedWhenStale() async throws {
+        let plane = DiscordVoiceGatewaySpeakingSignalCapturingPlane()
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            mediaPlane: plane
+        )
+        try await establish(
+            gateway,
+            harness: harness,
+            daveProtocolVersion: 0,
+            includeVideoStreams: true
+        )
+
+        // Nothing announces video on its own; only the media plane's video
+        // send path (not exercised by signaling alone) triggers it.
+        #expect(await harness.sentOpcodes() == [0, 1])
+
+        let signal = try #require(await plane.capturedVideoSignal())
+        let allocation = try VoiceGatewayV8VideoSSRCAllocation(
+            audioSSRC: 44,
+            streams: [
+                try VoiceGatewayV8Stream(
+                    type: "video",
+                    rid: "100",
+                    quality: 100,
+                    ssrc: 45,
+                    rtxSSRC: 46
+                )
+            ]
+        )
+        let announcement = try allocation.announcement(activeRIDs: ["100"])
+        try await signal(announcement)
+
+        #expect(await harness.sentOpcodes() == [0, 1, 12])
+        #expect(await harness.sentInteger(opcode: 12, key: "audio_ssrc") == 44)
+        #expect(await harness.sentInteger(opcode: 12, key: "video_ssrc") == 45)
+        #expect(await harness.sentInteger(opcode: 12, key: "rtx_ssrc") == 46)
+
+        // An announcement naming an SSRC the voice server never assigned in
+        // Ready is rejected before anything reaches the socket.
+        let foreign = try VoiceGatewayV8VideoSSRCAllocation(
+            audioSSRC: 44,
+            streams: [
+                try VoiceGatewayV8Stream(
+                    type: "video",
+                    rid: "100",
+                    quality: 100,
+                    ssrc: 900,
+                    rtxSSRC: 901
+                )
+            ]
+        ).announcement(activeRIDs: ["100"])
+        await #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            try await signal(foreign)
+        }
+        #expect(await harness.sentOpcodes() == [0, 1, 12])
+
+        // The gateway never announces video on behalf of a torn-down or
+        // superseded connection.
+        await gateway.disconnect()
+        await #expect(throws: (any Error).self) {
+            try await signal(announcement)
+        }
+        #expect(await harness.sentOpcodes() == [0, 1, 12])
+    }
+
     private func pair(token: String = "ephemeral-voice-token") -> DiscordVoiceGatewayPair {
         DiscordVoiceGatewayPair(
             endpoint: "voice.example.test",
@@ -1413,9 +1504,12 @@ struct DiscordVoiceGatewaySessionTests {
         )
     }
 
-    private func readyJSON(modes: [String]) -> String {
+    private func readyJSON(modes: [String], includeVideoStreams: Bool = false) -> String {
         let modesJSON = modes.map { "\"\($0)\"" }.joined(separator: ",")
-        return #"{"op":2,"seq":2,"d":{"ssrc":44,"ip":"203.0.113.8","port":50000,"modes":[\#(modesJSON)]}}"#
+        let streamsJSON = includeVideoStreams
+            ? #","streams":[{"type":"video","rid":"100","ssrc":45,"rtx_ssrc":46,"quality":100}]"#
+            : ""
+        return #"{"op":2,"seq":2,"d":{"ssrc":44,"ip":"203.0.113.8","port":50000,"modes":[\#(modesJSON)]\#(streamsJSON)}}"#
     }
 
     private func sessionDescriptionJSON(
@@ -1430,13 +1524,14 @@ struct DiscordVoiceGatewaySessionTests {
     private func establish(
         _ gateway: DiscordVoiceGatewaySession,
         harness: DiscordVoiceGatewaySessionHarness,
-        daveProtocolVersion: Int
+        daveProtocolVersion: Int,
+        includeVideoStreams: Bool = false
     ) async throws {
         let mode = DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue
         let connection = Task { try await gateway.connect(using: pair()) }
         try await eventually { await harness.attemptCount() == 1 }
         await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
-        await harness.send(readyJSON(modes: [mode]))
+        await harness.send(readyJSON(modes: [mode], includeVideoStreams: includeVideoStreams))
         _ = try await connection.value
         try await gateway.selectTransport(
             .init(address: "198.51.100.40", port: 63_040)
@@ -1831,6 +1926,7 @@ private actor DiscordVoiceGatewayMediaPlaneRecorder: DiscordVoiceMediaPlane {
 private actor DiscordVoiceGatewaySpeakingSignalCapturingPlane: DiscordVoiceMediaPlane {
     nonisolated let aes256GCMAvailable = false
     private var signal: (@Sendable () async throws -> Void)?
+    private var videoSignal: (@Sendable (VoiceGatewayV8Video) async throws -> Void)?
 
     func install(
         _ capability: DiscordVoiceNegotiatedMediaCapability
@@ -1846,7 +1942,17 @@ private actor DiscordVoiceGatewaySpeakingSignalCapturingPlane: DiscordVoiceMedia
         self.signal = signal
     }
 
+    func attachVideoAnnouncementSignal(
+        _ signal: @escaping @Sendable (VoiceGatewayV8Video) async throws -> Void
+    ) async {
+        self.videoSignal = signal
+    }
+
     func capturedSignal() -> (@Sendable () async throws -> Void)? { signal }
+
+    func capturedVideoSignal() -> (@Sendable (VoiceGatewayV8Video) async throws -> Void)? {
+        videoSignal
+    }
 }
 
 private actor DiscordVoiceGatewaySuspendedMediaPlane: DiscordVoiceMediaPlane {

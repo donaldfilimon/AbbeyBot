@@ -105,6 +105,23 @@ status: in_progress
   in-log evidence). Explicitly NOT closed: automatic controller-level full-reconnect
   (`DiscordVoiceController.reconnect()` remains production-uninvoked), induced UDP/invalid-session/
   channel-move/shutdown verification, and live-network resume evidence (operator-blocked).
+- **`/goal continue` 2026-08-20 ~03:00 (third pass): controller full-reconnect fallback landed** —
+  the reconnect/resume residual's second half, in worktree `codex/voice-reconnect-fallback-20260820`
+  to stay clear of the three in-flight parallel agents. `awaitTermination()` on the session-client
+  seam (default-inert for unaware clients), a generation-scoped post-ready monitor, and a bounded
+  auto-rejoin budget (default 2, refilled only by a fresh operator join, exhaustion fails closed
+  as `.gatewayUnavailable`). Kick/move policy: before any rejoin the fallback consults the pair
+  bridge's main-gateway presence evidence (`voicePresenceHeld()`, wired to
+  `DiscordBridge.voicePresenceState().confirmedInChannel`); a Discord-authoritative removal reads
+  as presence lost and fails closed instead of rejoining. (Review corrected an earlier claim that
+  the bridge clears the controller's target on removal — no such wiring exists; the presence gate
+  is the real mechanism.) Two real races were caught and fixed during
+  verification: an actor-reentrancy stomp of `.failed` by the join tail (monitor now starts
+  strictly after the ready transition) and a test-harness sleeper collision (credential-timeout
+  race vs. backoff on one injected sleeper). Controller suite 22/22 ×10, AbbeyCoreTests 317
+  green. Reconnect/resume is now Current at both layers (in-session buffered resume + controller
+  full rejoin); still open in that todo bullet: induced UDP loss/reorder, invalid-session,
+  channel-move, process-shutdown verification, and operator-blocked live evidence.
 - **`/goal continue` 2026-08-20 ~02:55 (second pass, parallel dispatch):** unbroke the red linux CI
   job first — `web/bun.lock` is lockfileVersion 2 (bun 1.4.0) while CI pinned bun 1.2.19, and the
   "Test dashboard SPA" step ran `bun test` (bun's own runner, no `vi.stubGlobal`/DOM) against vitest
@@ -114,6 +131,53 @@ status: in_progress
   DAVE-protect/AEAD/RTP send extension to `.video` frames (see that goal); (3) swiftly-snapshot
   server-graph parity (see new goal below). In flight — results and honest boundaries land
   per-slice when each agent returns. Live evidence remains operator-blocked and was not attempted.
+
+- **`/goal continue` 2026-08-20 ~06:20 (third pass, integration + review).** Landed on the branch:
+  (a) all five automated-review findings on PR #60, each with a regression test that fails on the
+  previous behavior — the Speaking gate no longer latches before its callback succeeds (a failed
+  or still-suspended signal can no longer let a frame reach the UDP transport), `reset()` now
+  cancels and awaits suspended datagram sends, a missed heartbeat ACK no longer resets the media
+  plane it is about to resume onto, a confirmed server-side channel move retargets later mute
+  updates, and the desktop mute/deafen toggles compose through one pending pair instead of undoing
+  each other; (b) the red linux CI job's real cause — `URLSession` is unavailable in Foundation on
+  Linux, so `RemoteOpenAICompatibleProvider` failed to build; it now carries the
+  `canImport(FoundationNetworking)` guard the rest of the repo already used (every server-graph
+  file referencing URLSession/URLRequest/HTTPURLResponse was audited; this was the only gap).
+  Verified locally: AbbeyCoreTests 314/314, AbbeyBotAppTests 70/70, native gate
+  NATIVE_MEDIA_SMOKE_GREEN + STATIC_SECURITY_GREEN in debug and release, all EXIT:0.
+  (c) **Phase 6a capture composition landed** — with a correction to this entry's first draft. Its
+  agent was killed by a session limit before it could run any gate, so the work was first preserved
+  as an explicitly unverified commit; on review it turned out to be complete and correct, not
+  half-written (it built clean and its own suite passed on first run — the agent died before
+  *reporting*, not before *working*). Reviewed by hand, then integrated: `DiscordVoiceCaptureLoop`
+  (revision-guarded, fail-closed on malformed framing / send failure / unexpected stream end,
+  ordered teardown that drains the pump before the media plane may reset, redacted diagnostics,
+  no key material), `MicrophoneCaptureSource`, controller mute-gating, and the native factory
+  binding the loop to the session's own media plane.
+  **This closes the composition boundary: `sendAudioFrame` now has a production caller** — capture
+  → 20 ms PCM → Opus → DAVE protect → RTP → AEAD → UDP composes end to end in the shipped path,
+  where before this pass nothing called it. **What that does NOT mean:** it has never been
+  exercised against Discord. `mediaAdapterAvailability` stays `.unavailable` and the advertised
+  DAVE version stays 0, deliberately — receive/playback do not exist, and composition is not
+  evidence of interoperability. Live join/speak/hear/reconnect/leave evidence remains
+  operator-blocked (no token/guild in this environment) and was not attempted.
+  Full integrated verification: AbbeyCoreTests 327/327, AbbeyBotAppTests 74/74, native gate 75
+  tests in 8 suites in debug AND release, STATIC_SECURITY_GREEN, NATIVE_MEDIA_SMOKE_GREEN, all
+  EXIT:0.
+
+- **`/goal complete all / cleanup all` 2026-08-20 ~07:1x.** Found that **PR #60 was merged at
+  13:05 UTC while work was still landing on its branch**, stranding ten commits behind a closed
+  PR; reunited the histories and opened **PR #64** for them. Swept the repository for orphaned
+  work at the same time and found two agent branches nobody had merged, both worth keeping:
+  hermetic UDP loss/reorder/corruption fault injection (directly one of this goal's required
+  evidence items) and deterministic Twitch loopback connection-state tests. Both are now
+  integrated — AbbeyCoreTests 333/333 (from 327), AbbeyBotAppTests 74/74, build exit 0.
+  Cleanup: 8 worktrees removed (3 were stale pointers into the deleted `~/Desktop/AbbeyBot`) and
+  8 fully-merged branches deleted. Deliberately left alone: the `voice-reconnect-fallback`
+  worktree and branch, which carry another session's in-flight work (a live-disconnect
+  termination-signal fix and a cursor-mirror doc sync) that is **not** in PR #64 and still needs
+  its owner — note it independently landed the same `import Observation` fix, so it will conflict
+  trivially on that file.
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -150,6 +214,26 @@ status: in_progress
   This is signaling and local-preview proof only: source selection UX, negotiated codec/RTP,
   remote rendering, DAVE video-frame transport, fault/performance coverage, and live camera plus
   Go Live evidence remain open, so this goal remains `in_progress`.
+- **Video send-boundary composition 2026-08-20 (extends audio Phase 5 to `.video`):**
+  `DiscordVoiceNativeMediaPlane.sendVideoFrame(encodedFrame:)` now composes the same protected
+  send path the audio Phase 5 slice proved, for one already-encoded video frame: the installed
+  `NativeDAVESession.protect(...)` with the video frame type and negotiated codec label, a
+  90 kHz `DiscordVoiceVideoRTPClock`, the negotiated video RTP payload type with the marker bit
+  set on the frame boundary, the shared single-owner `DiscordVoiceTransportEncryption` AEAD
+  counter, and the retained UDP transport. `installVideoSource(...)` binds a video SSRC only
+  from the existing bounded Ready allocation models (`VoiceGatewayV8VideoSSRCAllocation`) —
+  clients never invent SSRCs — and `DiscordVoiceGatewaySession` now sends the real Opcode 12
+  announcement through `machine.videoAnnouncement(_:)` (validated against Ready) exactly once
+  before the first video packet, the announcement-before-media analogue of Speaking. Fail-closed
+  everywhere: no DAVE attestation → no video source and no send; missing/failed announcement
+  callback, empty frames, foreign allocations, unmapped codecs (Opus/H.265), protect failures,
+  and reset-mid-send all throw with nothing reaching the socket, proven by one composition test
+  and eight dedicated fail-closed tests mirroring the audio Phase 5 style. **This closes the
+  outbound video send-path composition boundary only.** Nothing in production calls
+  `sendVideoFrame`; there is no camera/screen capture wiring into it, no video encoder, no
+  completed codec negotiation, no packetization/pacing/RTX, no receive/render path, no
+  congestion/fault/perf coverage, and no live camera or Go Live evidence — no capability
+  advertisement changed. The goal remains `in_progress`.
 - **`/goal continue` 2026-08-04: deliberately deferred, not stopped.** This pass's audio-side
   Phase 5 slice (see the voice-audio goal above) is actively composing the production call site for
   `NativeDAVESession.protect(...)` and the AEAD/RTP send path in the same files this goal's DAVE
@@ -171,6 +255,17 @@ status: in_progress
   negotiation completion, rendering, or live claims. In flight; evidence lands when the agent
   returns.
 
+- **Integrated onto the branch 2026-08-20 ~06:30, with one correction.** The video send slice was
+  merged into `codex/discord-voice-phase4` (conflicts were in the media plane, where the audio
+  review fixes had landed in parallel). Reviewing the merged result surfaced that the new video
+  path had faithfully copied the audio path's *pre-fix* shape and so reintroduced both bugs the
+  review had just closed: the Opcode 12 announcement latched its one-shot flag before the callback
+  ran, and the video datagram send was untracked by `reset()`. Audio and video now share one
+  `OneShotSignalGate` (with a documented per-kind difference: a missing Opcode 12 callback fails
+  closed, a missing Speaking callback does not) and one `sendTracked` path, specifically so the
+  two cannot diverge again. Still the send boundary only — no capture, codec negotiation,
+  packetization, rendering, or live evidence; no capability advertisement changed.
+
 ## Cross-platform server-graph toolchain parity (swiftly snapshot)
 status: in_progress
 - Goal: local development gets a first-class swiftly-managed Swift 6.4/6.5 development-snapshot
@@ -182,8 +277,46 @@ status: in_progress
 - Acceptance: a committed `Scripts/check-server-snapshot.sh` that resolves/builds/tests the four CI
   server suites under the snapshot with real per-gate exit codes, AGENTS.md documenting the path,
   and the Xcode desktop build still green.
-- **`/goal continue` 2026-08-20: dispatched** as one of three parallel worktree-isolated slices.
-  In flight; evidence lands when the agent returns.
+- **Landed 2026-08-20 (commits on the branch).** `Scripts/check-server-snapshot.sh` builds and
+  tests the server graph under a swiftly-selected development snapshot (`main-snapshot-2026-08-11`,
+  6.5-dev), per-invocation only — the swiftly global default is untouched. Measured: resolve/build
+  exit 0; AbbeyCoreTests 302, AbbeyCLITests 30, AbbeyServerKitTests 117, AbbeyServerTests 22, all
+  exit 0, `SERVER_SNAPSHOT_GREEN`, with no source changes needed for the newer toolchain. The Xcode
+  desktop path stayed green (3622/3622 targets). `.swift-version` is now gitignored and untracked:
+  `xcode` is a macOS-only swiftly selector that breaks every proxied `swift` invocation on Linux
+  (the review's P1). **Honest limit:** this runs a 6.5-dev snapshot on Darwin against the Xcode
+  SDK, while CI runs Linux glibc/Foundation in a nightly-6.4.x image — it is toolchain parity, not
+  platform parity, and it cannot catch Linux-only breakage. The very next CI run proved that: the
+  `FoundationNetworking` failure was invisible to this gate. Docker/Linux remains the only real
+  check for that class.
+
+## Make the Linux CI job actually pass
+status: in_progress
+- **Discovered 2026-08-20:** the `Abbey CI` linux job has **not succeeded in any of the last 30
+  runs, on any branch, including `main`.** It is not a regression from any one PR — the server
+  graph (`ABBEY_PACKAGE_ROLE=server`: AbbeyCore/AbbeyServerKit/AbbeyServer/AbbeyCLI) simply does
+  not build on Linux, and each fix only reveals the next break, because the compiler stops at the
+  first failing file.
+- Fixed this pass, all the same class (Darwin re-exports or provides something Linux does not):
+  `RemoteOpenAICompatibleProvider` needed `#if canImport(FoundationNetworking)` for `URLSession`;
+  `EngineMetrics` needed an explicit `import Observation` for `@Observable`; `TwitchBridge`'s
+  CFStream/CFNetwork TLS path is Darwin-only and is now `#if canImport(Darwin)`-guarded, failing
+  closed on Linux rather than falling back to plaintext IRC.
+- A full audit of the server graph for this class is now clean: no unguarded Darwin-only framework
+  imports, no unguarded `CF*`/`kCF*`/`Unmanaged`/`@objc` users, no `DispatchQueue` users missing
+  `import Dispatch`. `AppConfig.swift`'s `#if canImport(Security)` Keychain guard is the pattern
+  the other fixes follow.
+- **Acceptance:** one green linux run. Not claimable until observed — a clean audit is not a
+  passing build, and this job has proven it hides breakage one file at a time.
+- **Known gap in local tooling:** `Scripts/check-server-snapshot.sh` gives toolchain parity on
+  Darwin, not platform parity, so it cannot catch this class at all (it did not catch any of the
+  three). The only real pre-flight is a Linux build. There is no container runtime on this machine
+  (no docker/colima/podman) and the Swift static-Linux SDK URL tried for 6.3.2 returned 404, so
+  every fix currently costs one ~18-minute CI round trip. Worth solving before the next Linux
+  push: either install a container runtime or find the correct static-SDK artifact.
+- **Product decision surfaced, needs Donald:** Twitch IRC now explicitly does not work on Linux.
+  If the server is meant to run Twitch IRC on Linux, that needs a NIOSSL-based client (the repo
+  already depends on swift-nio-ssl) — a real piece of work, deliberately not bolted into a voice PR.
 
 ## Release and SwiftData hardening
 status: done

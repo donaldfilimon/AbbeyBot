@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Darwin)
 import CoreFoundation
+#endif
 import Logging
 
 public enum TwitchConnectionState: String, Sendable {
@@ -335,6 +337,18 @@ actor TwitchIRCConnection {
     }
 
     static func connect(host: String, port: Int, useTLS: Bool) async throws -> TwitchIRCConnection {
+        // CFNetwork's stream SSL settings (kCFStreamSSLPeerName, the
+        // negotiated-SSL security level) exist only on Apple platforms;
+        // swift-corelibs-foundation ships CoreFoundation without them, so
+        // this implementation cannot compile — let alone secure a socket —
+        // on Linux. Mirrors the `#if canImport(Security)` Keychain guard in
+        // AppConfig.swift.
+        //
+        // Linux deliberately fails closed instead of falling back: an
+        // unencrypted IRC connection would put the bot's OAuth token on the
+        // wire in plaintext. Supporting Twitch IRC on Linux needs a real
+        // NIOSSL-based client, which is a separate piece of work.
+        #if canImport(Darwin)
         var readStream: Unmanaged<CFReadStream>?
         var writeStream: Unmanaged<CFWriteStream>?
         CFStreamCreatePairWithSocketToHost(nil, host as CFString, UInt32(port), &readStream, &writeStream)
@@ -387,6 +401,10 @@ actor TwitchIRCConnection {
             throw TwitchIRCError.streamOpenFailed
         }
         return TwitchIRCConnection(input: input, output: output)
+        #else
+        _ = (host, port, useTLS)
+        throw TwitchIRCError.tlsUnsupportedOnPlatform
+        #endif
     }
 
     func send(_ line: String) throws {
@@ -442,9 +460,13 @@ enum TwitchIRCError: Error, LocalizedError, Sendable {
     case encodeFailed
     case writeFailed
     case readFailed
+    /// Twitch IRC over TLS is unavailable on this platform (see `connect`).
+    case tlsUnsupportedOnPlatform
 
     var errorDescription: String? {
         switch self {
+        case .tlsUnsupportedOnPlatform:
+            return "Twitch IRC over TLS is not supported on this platform"
         case .streamCreateFailed: return "Twitch IRC stream create failed"
         case .tlsConfigurationFailed: return "Twitch IRC TLS configuration failed"
         case .streamOpenFailed: return "Twitch IRC stream open failed"

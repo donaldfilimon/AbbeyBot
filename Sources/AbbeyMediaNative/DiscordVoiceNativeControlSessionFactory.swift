@@ -7,15 +7,26 @@ import AbbeyCore
 /// signaling alone is not evidence that Discord audio can be transmitted.
 public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactory, Sendable {
     private let makeDAVEAdapter: @Sendable () -> NativeDAVEControlAdapter
+    /// Optional platform microphone source. When present,
+    /// `makeSessionComponents()` composes a `DiscordVoiceCaptureLoop` bound to
+    /// the same session-owned media plane, so the controller can pump
+    /// capture → 20 ms PCM → the protected `sendAudioFrame` path while the
+    /// operator's microphone is enabled. Absent, the components carry no
+    /// capture loop and the microphone fails closed to disabled.
+    private let captureSource: (any DiscordVoiceCaptureSource)?
 
     public let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability = .unavailable
 
-    public init(daveAdapter: NativeDAVEControlAdapter? = nil) {
+    public init(
+        daveAdapter: NativeDAVEControlAdapter? = nil,
+        captureSource: (any DiscordVoiceCaptureSource)? = nil
+    ) {
         if let daveAdapter {
             self.makeDAVEAdapter = { daveAdapter }
         } else {
             self.makeDAVEAdapter = { NativeDAVEControlAdapter() }
         }
+        self.captureSource = captureSource
     }
 
     public func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient {
@@ -42,12 +53,21 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
             daveAdapter: daveAdapter,
             datagramTransport: udp
         )
+        // Phase 6a: the capture loop is bound to this session's own media
+        // plane, whose `sendAudioFrame` fails closed without an installed
+        // generation and attested DAVE session. Composing it here does not
+        // change `mediaAdapterAvailability`: receive/playback and live
+        // evidence remain missing, so audio is still not claimed as shipped.
+        let captureLoop: (any DiscordVoiceCaptureLoopControlling)? = captureSource.map {
+            DiscordVoiceCaptureLoop(source: $0, sender: mediaPlane)
+        }
         return DiscordVoiceSessionComponents(
             gateway: makeGatewayClient(
                 daveAdapter: daveAdapter,
                 mediaPlane: mediaPlane
             ),
-            udp: udp
+            udp: udp,
+            captureLoop: captureLoop
         )
     }
 

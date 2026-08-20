@@ -19,6 +19,7 @@ public enum DiscordVoiceRTPError: Error, Equatable, Sendable, CustomStringConver
     case missingPadding
     case invalidPaddingCount(Int)
     case invalidSamplesPerFrame(UInt32)
+    case invalidVideoTicksPerFrame(UInt32)
     case invalidMappingCapacity(Int)
     case mappingCapacityExceeded(Int)
     case invalidReplayWindowSize(Int)
@@ -58,6 +59,8 @@ public enum DiscordVoiceRTPError: Error, Equatable, Sendable, CustomStringConver
             return "RTP padding count is invalid: \(count)"
         case .invalidSamplesPerFrame(let count):
             return "RTP samples per frame must be in 1...5760; got \(count)"
+        case .invalidVideoTicksPerFrame(let count):
+            return "RTP video ticks per frame must be in 1...90000; got \(count)"
         case .invalidMappingCapacity(let capacity):
             return "RTP SSRC mapping capacity must be positive; got \(capacity)"
         case .mappingCapacityExceeded(let capacity):
@@ -92,10 +95,33 @@ public struct DiscordVoiceRTPHeaderExtension: Equatable, Sendable {
 public struct DiscordVoiceRTPHeader: Equatable, Sendable {
     public static let version: UInt8 = 2
     public static let discordAudioPayloadType: UInt8 = 0x78
+
+    /// Client-proposed dynamic video payload types, as used by Discord's
+    /// codec negotiation per the community Voice Gateway reference
+    /// (docs.discord.food, "voice-connections"). The client offers these in
+    /// Select Protocol's codec list; they are the primary (non-RTX) payload
+    /// types. RTX payload types are deliberately not accepted — no RTX
+    /// retransmission path exists in this repository, so an RTX-marked packet
+    /// fails closed at the header validation boundary.
+    public static let discordVideoH264PayloadType: UInt8 = 101
+    public static let discordVideoVP8PayloadType: UInt8 = 103
+    public static let discordVideoVP9PayloadType: UInt8 = 105
+    public static let discordVideoAV1PayloadType: UInt8 = 107
+
+    /// Every payload type this RTP layer will build or accept.
+    public static let acceptedPayloadTypes: Set<UInt8> = [
+        discordAudioPayloadType,
+        discordVideoH264PayloadType,
+        discordVideoVP8PayloadType,
+        discordVideoVP9PayloadType,
+        discordVideoAV1PayloadType,
+    ]
+
     public static let baseLength = 12
 
     public let marker: Bool
     public let hasPadding: Bool
+    public let payloadType: UInt8
     public let sequence: UInt16
     public let timestamp: UInt32
     public let ssrc: UInt32
@@ -105,17 +131,22 @@ public struct DiscordVoiceRTPHeader: Equatable, Sendable {
     public init(
         marker: Bool = false,
         hasPadding: Bool = false,
+        payloadType: UInt8 = Self.discordAudioPayloadType,
         sequence: UInt16,
         timestamp: UInt32,
         ssrc: UInt32,
         csrcs: [UInt32] = [],
         headerExtension: DiscordVoiceRTPHeaderExtension? = nil
     ) throws {
+        guard Self.acceptedPayloadTypes.contains(payloadType) else {
+            throw DiscordVoiceRTPError.unexpectedPayloadType(payloadType)
+        }
         guard csrcs.count <= 15 else {
             throw DiscordVoiceRTPError.tooManyCSRCs(csrcs.count)
         }
         self.marker = marker
         self.hasPadding = hasPadding
+        self.payloadType = payloadType
         self.sequence = sequence
         self.timestamp = timestamp
         self.ssrc = ssrc
@@ -167,7 +198,7 @@ public struct DiscordVoiceRTPCodec: Equatable, Sendable {
         first |= UInt8(header.csrcs.count)
         bytes.append(first)
 
-        var second = DiscordVoiceRTPHeader.discordAudioPayloadType
+        var second = header.payloadType
         if header.marker { second |= 0x80 }
         bytes.append(second)
         append(header.sequence, to: &bytes)
@@ -255,6 +286,7 @@ public struct DiscordVoiceRTPCodec: Equatable, Sendable {
         return try DiscordVoiceRTPHeader(
             marker: packet[1] & 0x80 != 0,
             hasPadding: first & 0x20 != 0,
+            payloadType: packet[1] & 0x7f,
             sequence: readUInt16(packet, at: 2),
             timestamp: readUInt32(packet, at: 4),
             ssrc: readUInt32(packet, at: 8),
@@ -332,7 +364,7 @@ public struct DiscordVoiceRTPCodec: Equatable, Sendable {
             throw DiscordVoiceRTPError.unsupportedVersion(version)
         }
         let payloadType = packet[1] & 0x7f
-        guard payloadType == DiscordVoiceRTPHeader.discordAudioPayloadType else {
+        guard DiscordVoiceRTPHeader.acceptedPayloadTypes.contains(payloadType) else {
             throw DiscordVoiceRTPError.unexpectedPayloadType(payloadType)
         }
     }
@@ -397,6 +429,49 @@ public struct DiscordVoiceRTPClock: Equatable, Sendable {
         let tick = DiscordVoiceRTPClockTick(sequence: sequence, timestamp: timestamp)
         sequence &+= 1
         timestamp &+= samplesPerFrame
+        return tick
+    }
+}
+
+/// A single-owner, deterministic 90 kHz RTP clock for video frames.
+///
+/// Video RTP uses the fixed 90,000 Hz media clock. Every packet of one frame
+/// shares a timestamp and the timestamp advances by `ticksPerFrame` between
+/// frames (90,000 / frame rate; the default 3,000 is 30 fps). This slice
+/// sends one complete encoded frame per packet, so `next()` advances both the
+/// sequence and the timestamp per call; MTU packetization with shared
+/// timestamps is a later, separate boundary. Initial values are always
+/// injected by the caller — production from a secure random source, tests
+/// from fixed values.
+public struct DiscordVoiceVideoRTPClock: Equatable, Sendable {
+    public static let sampleRate: UInt32 = 90_000
+    /// 30 fps at the 90 kHz video clock.
+    public static let defaultTicksPerFrame: UInt32 = 3_000
+    /// 1 fps floor: a frame may never advance more than one second.
+    public static let maximumTicksPerFrame: UInt32 = 90_000
+
+    public private(set) var sequence: UInt16
+    public private(set) var timestamp: UInt32
+    public let ticksPerFrame: UInt32
+
+    public init(
+        initialSequence: UInt16,
+        initialTimestamp: UInt32,
+        ticksPerFrame: UInt32 = Self.defaultTicksPerFrame
+    ) throws {
+        guard (1...Self.maximumTicksPerFrame).contains(ticksPerFrame) else {
+            throw DiscordVoiceRTPError.invalidVideoTicksPerFrame(ticksPerFrame)
+        }
+        self.sequence = initialSequence
+        self.timestamp = initialTimestamp
+        self.ticksPerFrame = ticksPerFrame
+    }
+
+    /// Returns the current RTP position, then advances with wrapping arithmetic.
+    public mutating func next() -> DiscordVoiceRTPClockTick {
+        let tick = DiscordVoiceRTPClockTick(sequence: sequence, timestamp: timestamp)
+        sequence &+= 1
+        timestamp &+= ticksPerFrame
         return tick
     }
 }

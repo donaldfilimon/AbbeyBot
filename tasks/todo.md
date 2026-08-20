@@ -90,8 +90,48 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       scripted transports (`DiscordVoiceGatewayResumeHarness`); full `AbbeyCoreTests` 312 green.
       Still open in this bullet: controller-level full-reconnect fallback is NOT auto-triggered —
       `DiscordVoiceController.reconnect()` exists and is tested but nothing invokes it on session
-      failure; induced UDP loss/reorder, invalid-session, channel-move, and process-shutdown
+      failure; invalid-session, channel-move, and process-shutdown
       verification remain unattempted; live-network resume evidence stays operator-blocked.)*
+      *(PARTIAL 2026-08-20 — induced UDP loss/reorder verified at the UDP layer only, via
+      hermetic 127.0.0.1 loopback fault injection — this is LOCAL loopback evidence, not
+      live-network evidence. Six new tests in `DiscordVoiceUDPSessionTests` /
+      `DiscordVoiceUDPDiscoveryTests`: (1) dropped discovery response → bounded timeout, no
+      in-call retransmit, session returns to `.open`, and a caller-driven retry completes on the
+      SAME socket/source port (NAT-mapping invariant), plus the one-shot client equivalent;
+      (2) truncated (73-byte) and SSRC-mismatched discovery responses fail closed
+      (`invalidPacketSize` / `ssrcMismatch`) while preserving the socket for a later intact
+      response, in both session and client; (3) duplicated + reordered media datagrams are
+      delivered exactly as received — the session deliberately does no dedupe/reorder/replay
+      handling (RTP sequence numbers and SRTP replay protection above it own that), and a late
+      duplicate discovery response after readiness is opaque media-path bytes that do not disturb
+      state. No production code changes were needed — existing behavior held under all injected
+      faults. NOT covered here: loss/reorder during active encrypted RTP flow end-to-end through
+      the controller/media plane (owned by PR #61's layer), gateway-driven re-discovery after
+      loss, and any live-network UDP evidence. Gate: full `AbbeyCoreTests` 320 green +
+      `check-static-security.sh` STATIC_SECURITY_GREEN.)*
+      *(PARTIAL 2026-08-20 second slice — the controller-level full-reconnect fallback is now
+      wired. `DiscordVoiceGatewaySessionClient` gained `awaitTermination() -> Bool` (default
+      `false` keeps the fallback inert for fakes/unaware clients); the production session resolves
+      it `true` only on the credential-dropping terminal teardown and `false` on operator
+      disconnect. After every ready join the controller starts a generation-scoped monitor —
+      strictly AFTER the ready transition, with no suspension point between, so a pending verdict
+      can never be stomped by the join's own tail (an actor-reentrancy race the budget-exhaustion
+      test caught live). Unexpected termination triggers the existing `reconnect()` full rejoin
+      through a bounded budget (`maximumAutoReconnectAttempts`, default 2, refilled only by a
+      fresh operator join) with deterministic 1/2/4/8s-capped delays via the injected sleeper;
+      exhaustion fails closed as `.gatewayUnavailable`. Kick/move policy: before any rejoin the
+      fallback consults `voicePresenceHeld()` on the pair bridge (production adapter reads
+      `DiscordBridge.voicePresenceState().confirmedInChannel`); presence lost = Discord-initiated
+      removal = fail closed, never rejoin — 4014 close-code discrimination is deliberately NOT
+      attempted at the session layer. (Review pass corrected the original claim that the bridge
+      clears the controller target on removal; no such wiring exists, and the review also fixed a
+      live-disconnect leak where `terminationSignal` was never resolved because `disconnect()`
+      bumps the generation before the cancelled transport loop reports back.) Five controller tests (rejoin, operator-cause inertness, bounded
+      exhaustion, budget refill, stale-monitor immunity), suite 22/22 stable across 10 runs after
+      fixing a test-harness race (one injected sleeper drives both the credential-timeout race and
+      the backoff — park timeout-sized sleeps, instant backoff sleeps). AbbeyCoreTests 317 green.
+      Still open: induced UDP loss/reorder, invalid-session, channel-move, process-shutdown
+      verification; live-network evidence remains operator-blocked.)*
 - [ ] Expand `/voice` and the Discord SwiftUI surface with honest connection phases, guild/channel
       selection, join/leave/status, mute/deafen, PTT/VAD, device/volume controls, speaking meters,
       reconnect/error visibility, stage-channel state, permission preflight, privacy policy, and an
@@ -248,10 +288,38 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       (debug + release), output secrecy and `STATIC_SECURITY_GREEN`, `NATIVE_MEDIA_SMOKE_GREEN`; the
       four non-desktop targets 472/472 (`AbbeyCoreTests` 303 + `AbbeyServerKitTests` 117 +
       `AbbeyCLITests` 30 + `AbbeyServerTests` 22), `EXIT:0`.
-- [ ] Phase 6: wire a real capture loop (microphone or a deterministic test source) that actually
-      calls `sendAudioFrame` in production, so the native factory can honestly stop reporting
-      `.unavailable`. This is the `AVAudioEngine` capture/playback composition item below, not a
-      separate task.
+- [x] Phase 6a (capture composition, 2026-08-20): production now has a capture loop that calls
+      `sendAudioFrame`. New portable `DiscordVoiceCaptureLoop` actor
+      (`Sources/AbbeyCore/Discord/DiscordVoiceCaptureLoop.swift`) pumps exact 20 ms 48 kHz stereo
+      Int16 frames from an injected `DiscordVoiceCaptureSource` into a
+      `DiscordVoiceAudioFrameSender` — `DiscordVoiceNativeMediaPlane` conforms, so the loop drives
+      the full Phase 5 protected path (Opus → DAVE protect → RTP → AEAD → retained socket) and can
+      never bypass it. Composition: `DiscordVoiceNativeControlSessionFactory` accepts an optional
+      capture source and binds a loop to the session-owned media plane in its components;
+      `DiscordVoiceController` owns the gating — enabling the microphone starts capture for the
+      current established generation, muting stops capture at the device boundary, a start failure
+      or loop terminal fails closed to mic-disabled with the new operator-visible
+      `.captureUnavailable` failure, and teardown stops capture *before* the gateway disconnect
+      resets the media plane. Desktop wiring: `MicrophoneCaptureSource` (AbbeyBotApp) bridges the
+      shared `AVAudioEngineAdapter` (same instance as the platform's device selection/kill switch)
+      to the loop; permission preflight stays inside the adapter, and any engine interruption or
+      device/configuration change finishes the stream so the loop fails closed — no automatic
+      restart. Loop fail-closed rules covered by tests: stale/zero generation rejection (equal
+      generation restarts across a mute cycle), double-start rejection, malformed frame, sender
+      failure, unexpected capture end, start failure with retry, ordered stop with nothing sent
+      after it. Verified this tree: non-desktop 493/493 (`AbbeyCoreTests` 324 incl. 13 new +
+      `AbbeyServerKitTests` 117 + `AbbeyCLITests` 30 + `AbbeyServerTests` 22) `EXIT:0`; desktop
+      604/604 across 6 bundles (incl. 4 new `MicrophoneCaptureSourceTests`) `EXIT:0`; native bundle
+      61/61 in 8 suites `EXIT:0` (2 new composition tests prove fake-source → loop → real plane →
+      2 ordered protected wire packets with Speaking exactly once, and a pre-negotiation loop sends
+      nothing); `STATIC_SECURITY_GREEN`.
+- [ ] Phase 6 remains open for the honest availability flip: the native factory still reports
+      `.unavailable` and advertises DAVE 0 **deliberately** — receive/decode/playback, jitter
+      handling, reconnect behavior for the capture path, PTT/VAD and UI capture controls, and live
+      DAVE-enabled call evidence are still missing, so send-side capture composition alone must not
+      be presented as shipped audio. (Because availability is unchanged, the controller never
+      reaches `readyMuted` in production yet; the capture path is exercised by deterministic tests
+      only.)
 
 ### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
 
@@ -350,6 +418,49 @@ Open items above, graded against the committed tree at `2a423e1`:
       codec/RTP send/receive, remote rendering, DAVE video-frame wire path, congestion recovery, or
       live camera/screen evidence.
 
+### Video send-boundary composition slice (2026-08-20, extends audio Phase 5 to `.video`)
+
+- [x] `DiscordVoiceNativeMediaPlane.sendVideoFrame(encodedFrame:)` composes the outbound video
+      send path with the exact audio Phase 5 pattern: DAVE-protect the already-encoded frame via
+      the installed `NativeDAVESession.protect(_:mediaType:.video, codec:, ssrc:)` (fails closed
+      with `.daveProtectionRequired` unless the generation attested a ready DAVE session — no
+      transport-only or plaintext video path exists), build the RTP header via the extended
+      `DiscordVoiceRTPCodec` with the negotiated video payload type and marker bit set on the
+      frame boundary, tick a new 90 kHz `DiscordVoiceVideoRTPClock` (tick and the one-shot
+      announcement obligation are reserved synchronously before the first `await`, mirroring the
+      audio sequence/Speaking reservation), seal via the same installed single-owner
+      `DiscordVoiceTransportEncryption` (audio and video counters share one never-reused nonce
+      sequence), and send through the retained `DiscordVoiceMediaDatagramTransport`.
+- [x] `installVideoSource(allocation:activeRIDs:codec:ticksPerFrame:)` binds the video SSRC from
+      the existing bounded `VoiceGatewayV8VideoSSRCAllocation` Ready models — clients never invent
+      video SSRCs — and rejects foreign allocations (audio SSRC mismatch) and codecs with no
+      modeled Discord payload type (Opus, H.265). Payload types follow the community-documented
+      client proposals: H264 101, VP8 103, VP9 105, AV1 107; RTX payload types are deliberately
+      not accepted anywhere (no RTX path exists).
+- [x] Announcement-before-send: `DiscordVoiceGatewaySession.connect()` attaches a video
+      announcement callback alongside Speaking; the media plane fires it exactly once per
+      installed video source before the first protected packet, and the new
+      `VoiceGatewayV8StateMachine.videoAnnouncement(_:)` validates the Opcode 12 payload against
+      the Ready allocation (client-owned, matching audio SSRC, only server-assigned stream SSRCs)
+      before it reaches the socket. Unlike Speaking, a missing announcement callback fails the
+      send closed — Discord documents the announcement as mandatory before video media.
+- [x] Proof mirrors Phase 5: `sendVideoFrameComposesTheFullSendPath` decrypts every wire packet
+      and asserts real DAVE output (never the raw encoded frame), 90 kHz timestamps/sequence,
+      payload type 103/marker/SSRC, shared AEAD counter continuity after an audio frame,
+      announcement-exactly-once, and teardown via `reset()`; eight dedicated fail-closed tests
+      cover no-install, no-video-source, DAVE-never-attested (install and send), foreign
+      allocation/non-video codec, empty frame, announcement missing/failing, protect failure, the
+      real pinned-libdave unready session, and reset-mid-send. A session-level test proves the
+      gateway sends Opcode 12 for a Ready-backed announcement and fails closed on foreign SSRCs
+      and after disconnect.
+- [ ] **Still open, not attempted here (do not upgrade the claim):** nothing in production calls
+      `sendVideoFrame` — no camera/screen capture wiring, no video encoder, no codec negotiation
+      completion (payload types are modeled client proposals, not a negotiated selection), no MTU
+      packetization/pacing (one whole encoded frame per packet, marker always set), no
+      keyframes/RTX/feedback, no receive/reassembly/render path, no congestion/loss/perf
+      coverage, and no live camera or Go Live evidence. No capability advertisement changed; the
+      native factory still reports `.unavailable`.
+
 ### Video audit snapshot (2026-08-01, read-only)
 
 Nothing checkable; graded against `2a423e1`:
@@ -359,10 +470,15 @@ Nothing checkable; graded against `2a423e1`:
   AVFoundation/ScreenCaptureKit with permission gating, source enumeration/selection, screen-lock
   kill, bounded queues, and 17 hermetic tests. But there is no preview surface, and nothing in the
   app can call `startCapture()` — `MediaSessionPlatform` exposes only `stopAllCapture()`.
-- **Video RTP/codec MISSING** — `DiscordVoiceRTPMediaKind.video` is a label only; no pacer,
-  keyframes, RTX/feedback, reassembly, or negotiation fields on Select Protocol.
-- **DAVE video PARTIAL** — `NativeDAVESession` accepts `.video` + five codecs but has zero video
-  callers and zero video tests; only audio protect/unprotect is exercised.
+- **Video RTP/codec MISSING (partially superseded 2026-08-20)** — `DiscordVoiceRTPMediaKind.video`
+  was a label only. The send-boundary slice above added video payload types, a 90 kHz clock, and
+  marker semantics to the RTP layer; still no pacer, keyframes, RTX/feedback, reassembly, or
+  negotiation fields on Select Protocol.
+- **DAVE video PARTIAL (superseded 2026-08-20)** — `NativeDAVESession` accepted `.video` + five
+  codecs with zero video callers and zero video tests. The send-boundary slice above is now a
+  real `.video` caller with composition and fail-closed tests, including the real pinned binding's
+  own fail-closed `protect`; genuine multi-party MLS video ciphertext still cannot be produced in
+  this environment (see the audio Phase 5 note on roster activation).
 - **Render/UI MISSING** — read-only "Camera capture: Stopped" labels; no preview, tiles, or
   start/stop controls; `daveLabel`/`captureLabel` hardcoded to unavailable copy.
 - **Fault/perf tests** — 2 of 11 scenarios exist (screen lock, device removal); the other 9 are
