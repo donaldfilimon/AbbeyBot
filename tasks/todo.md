@@ -605,11 +605,29 @@ thread is answered on GitHub. Comment ids kept so replies can be posted.
       validation checks only each stream's primary SSRC, so an arbitrary
       explicit `rtx_ssrc` can be announced despite the method's stated
       allocation guarantee. Validate primary AND RTX against Ready.
-- [ ] **P2 `MediaSessionModel.swift`** (3822337045) — the UI kill switch calls
+- [x] **P2 `MediaSessionModel.swift`** (3822337045) — FIXED and verified on main.
+      Root cause was ownership: one `AVAudioEngineAdapter` was handed to both
+      `MicrophoneCaptureSource` and `MacOSMediaSessionPlatform`, and
+      `stopNow()` emits no runtime event, so the bridge's fail-closed path
+      never fired. `stopAllCapture()` now runs
+      `video.killSwitch()` → `audio.stopNow()` → `microphone?.stopCapture()`,
+      which finishes the delivered stream; the capture loop then fails closed
+      and the controller drops the microphone. Because `stopAllCapture()` is
+      the single chokepoint, all five paths (`stopLocalCapture`, `leave`,
+      `disconnect`, `stopAllMedia`, `shutdown`) are covered. Re-enabling after
+      a kill works and is asserted end to end. Three new tests, each
+      mutation-checked: commenting out the added call makes all three fail.
+      AbbeyBotAppTests 77/77, AbbeyCoreTests 340/340, build exit 0.
+      *Residual (read-verified, not test-verified):* deliberate leave paths stop
+      capture before controller teardown, so a transient `.captureUnavailable`
+      is published; it is not operator-visible because no view reads `failure`
+      outside a `.failed` phase and the later snapshot carries a bumped
+      generation.
+- [ ] ~~**P2 `MediaSessionModel.swift`** (3822337045) — the UI kill switch calls
       `audio.stopNow()` directly, bypassing `MicrophoneCaptureSource.stopCapture()`.
       The adapter's stream stays open, the capture loop never sees a terminal
       event, and the controller keeps reporting the microphone enabled after the
-      device has stopped.
+      device has stopped.~~
 
 Note: the three controller findings are one underlying shape — actor reentrancy
 across the `await` in capture startup — and are being fixed as one mechanism
