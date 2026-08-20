@@ -631,23 +631,24 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         // outcome rather than bypassing the gate.
         try await runOnce(.speaking, signal: speakingSignal, revision: sendRevision)
 
-        let opusPayload = try await installed.opus.encode(pcm)
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        let opusPayload = try await guarded(revision: sendRevision) {
+            try await installed.opus.encode(pcm)
+        }
 
-        guard let daveSession = await daveSessionProvider() else {
+        guard let daveSession = try await guarded(revision: sendRevision, { await daveSessionProvider() }) else {
             throw DiscordVoiceNativeMediaPlaneError.daveSessionUnavailable
         }
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
 
         // DAVE protection is applied to the raw Opus payload before it ever
         // becomes an RTP body; nothing downstream can substitute plaintext.
-        let protectedFrame = try await daveSession.protect(
-            Data(opusPayload),
-            mediaType: .audio,
-            codec: .opus,
-            ssrc: installed.ssrc
-        )
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        let protectedFrame = try await guarded(revision: sendRevision) {
+            try await daveSession.protect(
+                Data(opusPayload),
+                mediaType: .audio,
+                codec: .opus,
+                ssrc: installed.ssrc
+            )
+        }
 
         let header = try DiscordVoiceRTPHeader(
             sequence: tick.sequence,
@@ -657,9 +658,9 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         let rtpCodec = try DiscordVoiceRTPCodec()
         let plaintextPacket = try rtpCodec.encode(header) + Array(protectedFrame)
 
-        let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-
+        let wirePacket = try await guarded(revision: sendRevision) {
+            try await installed.transportEncryption.seal(plaintextPacket)
+        }
         try await sendTracked(wirePacket, through: installed.datagramTransport)
     }
 
@@ -1107,31 +1108,37 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         } else {
             boundAnnouncement = nil
         }
-        try await runOnce(
-            .videoAnnouncement,
-            signal: boundAnnouncement,
-            revision: sendRevision
-        )
         // `runOnce` re-checks `revision` itself but knows nothing about video
-        // sources, so the announcement suspension gets its own check here.
-        try requireCurrentVideoSource(sendVideoRevision)
+        // sources, so the announcement suspension is wrapped for the video half.
+        try await guarded(revision: sendRevision, videoRevision: sendVideoRevision) {
+            try await runOnce(
+                .videoAnnouncement,
+                signal: boundAnnouncement,
+                revision: sendRevision
+            )
+        }
 
-        guard let daveSession = await daveSessionProvider() else {
+        guard let daveSession = try await guarded(
+            revision: sendRevision,
+            videoRevision: sendVideoRevision,
+            { await daveSessionProvider() }
+        ) else {
             throw DiscordVoiceNativeMediaPlaneError.daveSessionUnavailable
         }
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-        try requireCurrentVideoSource(sendVideoRevision)
 
         // DAVE protection is applied to the raw encoded frame before it ever
         // becomes an RTP body; nothing downstream can substitute plaintext.
-        let protectedFrame = try await daveSession.protect(
-            encodedFrame,
-            mediaType: .video,
-            codec: videoSource.codec,
-            ssrc: videoSource.ssrc
-        )
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-        try requireCurrentVideoSource(sendVideoRevision)
+        let protectedFrame = try await guarded(
+            revision: sendRevision,
+            videoRevision: sendVideoRevision
+        ) {
+            try await daveSession.protect(
+                encodedFrame,
+                mediaType: .video,
+                codec: videoSource.codec,
+                ssrc: videoSource.ssrc
+            )
+        }
 
         // Fragment to the path MTU. Previously this emitted ONE packet per
         // frame with `marker: true` unconditionally, which is wire-incorrect
@@ -1154,16 +1161,19 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         let rtpCodec = try DiscordVoiceRTPCodec()
         for fragment in fragments {
             let plaintextPacket = try rtpCodec.encode(fragment.header) + fragment.payload
-            let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
-            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-            // Re-checked per fragment, not once per frame: a video source
+            // Guarded PER FRAGMENT, not once per frame: a video source
             // installed midway through a multi-fragment frame must not let the
             // remaining fragments reach the wire under the obsolete SSRC,
             // which would also strand a partial frame at the receiver.
-            try requireCurrentVideoSource(sendVideoRevision)
-            try await sendTracked(wirePacket, through: installed.datagramTransport)
-            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-            try requireCurrentVideoSource(sendVideoRevision)
+            let wirePacket = try await guarded(
+                revision: sendRevision,
+                videoRevision: sendVideoRevision
+            ) {
+                try await installed.transportEncryption.seal(plaintextPacket)
+            }
+            try await guarded(revision: sendRevision, videoRevision: sendVideoRevision) {
+                try await sendTracked(wirePacket, through: installed.datagramTransport)
+            }
         }
     }
 
@@ -1221,6 +1231,29 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             }
         }
         highestGeneration = generation
+    }
+
+    /// Runs one suspending step and re-validates the generation on the way
+    /// out, so the reserve-then-recheck invariant is carried by the call itself
+    /// rather than by a `requireCurrent` the author had to remember to write.
+    ///
+    /// This exists because the manual form failed twice under review: the video
+    /// send path shipped without a per-fragment check, and the announcement
+    /// step needed one added by hand because `runOnce` knows nothing about
+    /// video sources. A suspension that is not wrapped is now the visible
+    /// exception rather than the invisible default.
+    private func guarded<Value>(
+        revision expectedRevision: UInt64,
+        videoRevision expectedVideoRevision: UInt64? = nil,
+        orThrow error: DiscordVoiceNativeMediaPlaneError = .sendInterrupted,
+        _ step: () async throws -> Value
+    ) async throws -> Value {
+        let value = try await step()
+        try requireCurrent(expectedRevision, orThrow: error)
+        if let expectedVideoRevision {
+            try requireCurrentVideoSource(expectedVideoRevision, orThrow: error)
+        }
+        return value
     }
 
     private func requireCurrent(

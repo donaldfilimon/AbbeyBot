@@ -408,8 +408,11 @@ public actor DiscordVoiceController {
     /// inventing a second one: `receiveLoop.start` is a cross-actor call and
     /// therefore suspends, so a terminal verdict can land before
     /// `receiveActive` is set. It is recorded here and reconciled by the
-    /// resuming start. There is deliberately no pending-desired-state loop —
-    /// unlike the microphone, receive has no operator toggle to race.
+    /// resuming start. Receive has an operator toggle exactly like the
+    /// microphone, so it uses the same pending-desired-state loop: a request
+    /// landing mid-transition is recorded, not dropped.
+    private var receiveTransitionInFlight = false
+    private var pendingReceiveDesiredState: Bool?
     private var receiveStartInFlightGeneration: UInt64?
     private var receiveTerminalDuringStart = false
     private var receiveActive = false
@@ -559,34 +562,64 @@ public actor DiscordVoiceController {
     /// than leaving the session in a state that looks like it is listening.
     @discardableResult
     public func setReceiveEnabled(_ enabled: Bool) async -> DiscordVoiceControllerSnapshot {
+        // Same reconcile loop as the microphone, for the same reason: both
+        // start/stop steps suspend, so a request arriving during one must be
+        // recorded rather than dropped. Turning receive OFF is a privacy
+        // action; losing it would leave the bot decrypting audio after the
+        // operator asked it to stop.
+        guard !receiveTransitionInFlight else {
+            pendingReceiveDesiredState = enabled
+            return makeSnapshot()
+        }
+        receiveTransitionInFlight = true
+        defer {
+            receiveTransitionInFlight = false
+            pendingReceiveDesiredState = nil
+        }
+
+        var desired = enabled
+        while true {
+            pendingReceiveDesiredState = nil
+            await applyReceiveDesiredState(desired)
+            guard let pending = pendingReceiveDesiredState else { break }
+            pendingReceiveDesiredState = nil
+            desired = pending
+        }
+        return makeSnapshot()
+    }
+
+    /// One reconciliation step toward `enabled`.
+    private func applyReceiveDesiredState(_ enabled: Bool) async {
         guard let receiveLoop else {
             // No receive loop was composed for this session (no playback sink,
             // or a portable build). Refuse rather than report success.
             if enabled { failure = .receiveUnavailable }
-            return makeSnapshot()
+            return
         }
         guard acceptsFrames else {
             if enabled { failure = .receiveUnavailable }
-            return makeSnapshot()
+            return
         }
-        if enabled == receiveActive { return makeSnapshot() }
+        if enabled == receiveActive { return }
 
         let localGeneration = generation
         if enabled {
             guard await startReceiveLoop(receiveLoop, generation: localGeneration) else {
-                return makeSnapshot()
+                return
             }
         } else {
+            // Clear the flag BEFORE the suspending stop, so nothing can read an
+            // active receive after the operator has asked for silence — the
+            // same ordering the mute path uses.
+            receiveActive = false
             // Ordered teardown: the loop drains before this returns, so no
             // packet can race a later media reset.
             await receiveLoop.stop()
-            guard generation == localGeneration else { return makeSnapshot() }
-            receiveActive = false
+            guard generation == localGeneration else { return }
             // A clean operator stop is not a failure.
             if failure == .receiveUnavailable { failure = nil }
         }
         publish()
-        return makeSnapshot()
     }
 
     @discardableResult
@@ -897,9 +930,10 @@ public actor DiscordVoiceController {
 
     /// Starts the session's receive loop for `localGeneration`.
     ///
-    /// Unlike the microphone, receive has no operator toggle: the bot hears the
-    /// channel for as long as it is in it, so this runs once per established
-    /// generation. `receiveLoop.start` is a cross-actor call and therefore
+    /// Called only from `applyReceiveDesiredState` — NEVER from `join()`.
+    /// Receiving decrypts other members' speech, so it starts only when the
+    /// operator asks; a session that merely joined must stay silent.
+    /// `receiveLoop.start` is a cross-actor call and therefore
     /// suspends, so the same two reentrancy hazards the capture path fixed apply
     /// here and are handled by the same mechanism:
     ///

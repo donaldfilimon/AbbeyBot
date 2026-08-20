@@ -238,6 +238,38 @@ struct DiscordVoiceControllerReceiveTests {
         }
     }
 
+    @Test("A disable landing mid-enable is honored, not dropped")
+    func disableDuringReceiveStartIsHonored() async throws {
+        let loop = ControllerReceiveLoopDouble()
+        let factory = ControllerReceiveFactory(
+            gateway: ControllerReceiveGateway(),
+            udp: ControllerReceiveUDP(),
+            receiveLoop: loop
+        )
+        let controller = try makeController(bridge: ControllerReceiveBridge(), factory: factory)
+        _ = await controller.join(guildID: "g", channelID: "c")
+
+        // Park the controller inside `await receiveLoop.start(...)`, then ask
+        // for silence from that window.
+        await loop.gateNextStart()
+        let enable = Task { await controller.setReceiveEnabled(true) }
+        await loop.waitForStartEntry()
+        let disable = Task { await controller.setReceiveEnabled(false) }
+        await Task.yield()
+        await loop.releaseStart()
+        _ = await enable.value
+        _ = await disable.value
+
+        // The regression this pins: without a pending-desired-state loop the
+        // disable hit the in-flight guard and vanished, and the resuming enable
+        // then published an active receive — i.e. the bot kept decrypting
+        // everyone's audio after the operator asked it to stop.
+        let settled = await controller.currentSnapshot()
+        #expect(!settled.receiveActive)
+        #expect(await loop.stopCount >= 1)
+        await controller.shutdown()
+    }
+
     @Test("A receive-loop start failure fails closed while signaling stays up")
     func receiveStartFailureFailsClosed() async throws {
         let loop = ControllerReceiveLoopDouble()
