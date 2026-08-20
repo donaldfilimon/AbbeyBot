@@ -1511,6 +1511,104 @@ struct DiscordVoiceNativeMediaPlaneTests {
         return try await codec.encode(fixedPCMFrame(seed: seed))
     }
 
+    @Test("a video frame above MTU is fragmented: one timestamp, contiguous sequences, marker only on the last")
+    func videoFrameAboveMTUIsFragmented() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { announcement in
+            try await announcements.signal(announcement)
+        }
+        _ = try await plane.install(makeCapability(generation: 90, daveProtocolVersion: 1))
+        try await plane.installVideoSource(
+            allocation: try makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        // Comfortably past the 1200-byte sealed budget, so this must fragment.
+        let big = Data((0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) })
+        try await plane.sendVideoFrame(encodedFrame: big)
+
+        let packets = await log.sentPackets
+        #expect(packets.count > 1)
+
+        let receiver = try receiverTransport()
+        var headers: [DiscordVoiceRTPHeader] = []
+        var reassembled: [UInt8] = []
+        let codec = try DiscordVoiceRTPCodec()
+        for packet in packets {
+            let opened = try await receiver.open(packet)
+            let header = try codec.decodeHeader(from: opened)
+            headers.append(header)
+            let layout = try codec.plaintextLayout(in: opened)
+            reassembled += Array(opened[layout.payloadRange])
+            // Every fragment must still fit the path MTU once sealed — the
+            // failure mode a naive fragmenter hides until it hits the wire.
+            #expect(packet.count <= DiscordVoiceVideoPacketizer.defaultPathMTU)
+        }
+
+        // The regression this pins: one packet per frame with marker always
+        // true. A fragmented frame carries exactly one marker, on the last
+        // fragment, one shared timestamp, and contiguous sequence numbers.
+        #expect(headers.filter(\.marker).count == 1)
+        #expect(headers.last?.marker == true)
+        #expect(Set(headers.map(\.timestamp)).count == 1)
+        let sequences = headers.map(\.sequence)
+        #expect(sequences == Array(sequences.map { $0 }).sorted())
+        for (index, sequence) in sequences.enumerated() where index > 0 {
+            #expect(sequence == sequences[index - 1] &+ 1)
+        }
+
+        // Reassembly reproduces exactly what DAVE produced — no fragment lost
+        // or duplicated on the way out.
+        let protected = await daveSession.lastProtectedFrame
+        #expect(reassembled == Array(protected ?? Data()))
+        #expect(await announcements.callCount == 1)
+    }
+
+    @Test("a video source installed mid-frame stops the remaining fragments")
+    func videoSourceSwapMidFrameStopsRemainingFragments() async throws {
+        let transport = SuspendableDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: transport
+        )
+        await plane.attachVideoAnnouncementSignal { _ in }
+        _ = try await plane.install(makeCapability(generation: 91, daveProtocolVersion: 1))
+        try await plane.installVideoSource(
+            allocation: try makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        let big = Data((0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 11 &+ 5) })
+        let send = Task { try await plane.sendVideoFrame(encodedFrame: big) }
+        // Park inside the first fragment's transport write, then swap sources.
+        await transport.waitUntilSendStarted()
+        try await plane.installVideoSource(
+            allocation: try makeVideoAllocation(videoSSRC: 0x3333_3333),
+            activeRIDs: ["100"],
+            codec: .h264
+        )
+        await transport.release()
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await send.value
+        }
+        // The per-fragment check is what stops this: without it the remaining
+        // fragments would go out under the obsolete SSRC, stranding a partial
+        // frame at the receiver.
+        #expect(await transport.deliveredPackets.count < 4)
+    }
+
     private func fixedEncodedVideoFrame(seed: Int) -> Data {
         Data((0..<321).map { index in
             UInt8(truncatingIfNeeded: (index &* 31) &+ (seed &* 97) &+ 5)

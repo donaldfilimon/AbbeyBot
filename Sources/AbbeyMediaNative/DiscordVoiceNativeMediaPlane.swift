@@ -374,6 +374,14 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     private var videoRevision: UInt64 = 0
     private var videoAnnouncementSignal: (@Sendable (VoiceGatewayV8Video) async throws -> Void)?
 
+    /// MTU-aware fragmenter for outbound video. Stateless and shared across
+    /// sends; all per-frame state lives in the clock it is handed. Built
+    /// lazily because the initializer validates its bounds and can throw,
+    /// which a stored-property initializer cannot propagate.
+    private func makeVideoPacketizer() throws -> DiscordVoiceVideoPacketizer {
+        try DiscordVoiceVideoPacketizer()
+    }
+
     /// One Opus decoder per authenticated remote SSRC.
     ///
     /// Opus decoders carry per-stream state (overlap-add history, PLC state),
@@ -1077,13 +1085,17 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         // this frame reach the socket under the obsolete SSRC and codec.
         let sendVideoRevision = videoRevision
 
-        // Reserve the RTP tick and the one-shot announcement obligation
-        // synchronously, before this call's first `await`, exactly like the
-        // audio path reserves its tick and Speaking obligation: two
-        // overlapping sends can never observe or emit the same video RTP
-        // sequence number, and at most one of them owns the announcement.
-        let tick = reservedClock.next()
-        videoClock = reservedClock
+        // NOTE — deliberate divergence from the audio path, which reserves its
+        // tick before the first `await`. A video frame's fragment count is a
+        // function of the DAVE-PROTECTED size, which is not known until
+        // `protect` returns, so the sequence run cannot be reserved up front.
+        // The guarantee that actually matters is preserved: the reservation
+        // below (`nextFrame(fragmentCount:)`) is a synchronous, actor-isolated
+        // step, so two overlapping sends still receive disjoint sequence runs
+        // and can never emit the same sequence number. What is given up is
+        // that run ORDER may not match frame order if a caller drives
+        // overlapping sends — production drives one frame at a time, as the
+        // audio path already assumes.
         // Bind the stored callback to this source's announcement so the shared
         // gate can treat audio and video uniformly. Written as an explicit
         // if-let: the equivalent `Optional.map` with a nested @Sendable async
@@ -1121,22 +1133,38 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
         try requireCurrentVideoSource(sendVideoRevision)
 
-        let header = try DiscordVoiceRTPHeader(
-            marker: true,
+        // Fragment to the path MTU. Previously this emitted ONE packet per
+        // frame with `marker: true` unconditionally, which is wire-incorrect
+        // for any frame above MTU — and real encoded video frames routinely
+        // are. The packetizer assigns one shared timestamp, contiguous
+        // sequence numbers, and the marker bit on the FINAL fragment only, and
+        // sizes each fragment so it still fits after `seal` adds the AEAD tag
+        // and counter.
+        //
+        // Reserving through the clock overload keeps the run atomic: a frame
+        // rejected for being empty or oversized consumes no sequence numbers.
+        let fragments = try makeVideoPacketizer().packetize(
+            frame: Array(protectedFrame),
             payloadType: videoSource.payloadType,
-            sequence: tick.sequence,
-            timestamp: tick.timestamp,
-            ssrc: videoSource.ssrc
+            ssrc: videoSource.ssrc,
+            clock: &reservedClock
         )
+        videoClock = reservedClock
+
         let rtpCodec = try DiscordVoiceRTPCodec()
-        let plaintextPacket = try rtpCodec.encode(header) + Array(protectedFrame)
-
-        let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
-        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-        // Last gate before the packet is committed to the transport.
-        try requireCurrentVideoSource(sendVideoRevision)
-
-        try await sendTracked(wirePacket, through: installed.datagramTransport)
+        for fragment in fragments {
+            let plaintextPacket = try rtpCodec.encode(fragment.header) + fragment.payload
+            let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
+            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+            // Re-checked per fragment, not once per frame: a video source
+            // installed midway through a multi-fragment frame must not let the
+            // remaining fragments reach the wire under the obsolete SSRC,
+            // which would also strand a partial frame at the receiver.
+            try requireCurrentVideoSource(sendVideoRevision)
+            try await sendTracked(wirePacket, through: installed.datagramTransport)
+            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+            try requireCurrentVideoSource(sendVideoRevision)
+        }
     }
 
     /// Drops every object that can retain the transport key while preserving
