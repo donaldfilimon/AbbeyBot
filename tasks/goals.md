@@ -89,7 +89,10 @@ status: in_progress
   and is proven by six properties in `sendAudioFrameComposesTheFullSendPath` plus five dedicated
   fail-closed tests, and `DiscordVoiceGatewaySession` now actually sends the previously-modeled
   Speaking opcode. Nothing in production calls `sendAudioFrame` yet (no capture loop), so the native
-  factory still honestly reports `.unavailable` and DAVE 0 — this closes the send-path composition
+  factory still honestly reports `.unavailable` and DAVE 0 **[SUPERSEDED 2026-08-20 — see the
+  Phase 6a entry below: `sendAudioFrame` now has a production caller via
+  `MediaSessionModel` → factory → `DiscordVoiceCaptureLoop`. Left in place as the historical
+  record, annotated so nobody stops reading here.]** — this closes the send-path composition
   boundary only. All three slices verified together in one tree: native gate 59/59 (debug+release),
   the four non-desktop targets 472/472, `STATIC_SECURITY_GREEN`, all `EXIT:0`. This goal remains
   `in_progress` — reconnect/resume and AVAudioEngine capture composition (Phase 6) are the next
@@ -225,6 +228,33 @@ status: in_progress
   **Still not end to end:** the adapter conforming the media plane to
   `DiscordVoiceAudioFrameDecoder` is the remaining seam. Nothing calls receive in production and
   no audio is heard.
+- **Receive path connected end to end 2026-08-20 (`c2c1981`) — audio can now flow locally.**
+  Three things blocked it, and only one was wiring.
+  (a) **The availability gate was self-locking.** `mediaAdapterAvailability` was hardcoded
+  `.unavailable`, `join()` refused `acceptsFrames` without `.fullyWired`, and
+  `setReceiveEnabled(true)` then failed its guard — so no amount of receive code could produce
+  sound. But `.fullyWired` also drives the advertised DAVE version, which must not be claimed
+  without live evidence, which requires audio to work. Split into `.locallyComposed` (audio may
+  flow here, DAVE still 0) and `.fullyWired` (that plus the wire claim). The snapshot reports
+  both separately so "works locally" can never be read as "DAVE advertised".
+  (b) **Wiring**: the factory takes an injected playback sink, binds the gateway to a local so
+  the sender resolver closes over the *concrete* session (the existential would risk the
+  protocol extension's nil default, and receive would never learn a sender — silently), and
+  builds the receive loop over the same UDP session the send path uses.
+  (c) **A defect in the playback sink written earlier the same day**: `AVAudioEngineAdapter.play`
+  returns `false` for expected backpressure (deafened, or a queue-full it already counts) and
+  throws only for a real refusal. The sink turned `false` into a throw, and the receive loop
+  treats playback failure as terminal — so being deafened, or one transient queue-full, would
+  have killed receive for the whole generation.
+  Verified: native gate 94 tests in 9 suites debug AND release, `NATIVE_MEDIA_SMOKE_GREEN`,
+  `STATIC_SECURITY_GREEN`, AbbeyCoreTests 405/405, AbbeyBotAppTests 77/77.
+  **Still NOT proven — interoperability.** Nothing has run against Discord, the advertised DAVE
+  version is still 0, and live evidence remains operator-blocked (verified this session: no
+  `.env`, no token/guild in the environment, no Keychain entry).
+  **Testing lesson recorded:** the first version of the new tests sat behind
+  `#if canImport(AbbeyMediaNative)` in a target that does not link it, so they compiled out and
+  "passed" without running. A guarded test in the wrong target is indistinguishable from a
+  passing one.
 
 ## Complete Discord video and Go Live
 status: in_progress
