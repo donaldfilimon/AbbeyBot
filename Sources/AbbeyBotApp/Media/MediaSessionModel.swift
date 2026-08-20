@@ -418,10 +418,16 @@ final class MediaSessionModel {
             preconditionFailure("Static voice-controller configuration is invalid")
         }
         let controller: DiscordVoiceController
+        // One shared audio engine boundary: the platform's device selection,
+        // kill switch, and runtime snapshot operate on the same adapter whose
+        // capture frames feed the Discord capture loop.
+        let audio = AVAudioEngineAdapter()
         do {
             let factory: any DiscordVoiceSessionFactory
 #if canImport(AbbeyMediaNative)
-            factory = DiscordVoiceNativeControlSessionFactory()
+            factory = DiscordVoiceNativeControlSessionFactory(
+                captureSource: MicrophoneCaptureSource(adapter: audio)
+            )
 #else
             factory = DiscordVoicePortableSessionFactory()
 #endif
@@ -435,7 +441,7 @@ final class MediaSessionModel {
         }
         self.init(
             controller: controller,
-            platform: MacOSMediaSessionPlatform(),
+            platform: MacOSMediaSessionPlatform(audio: audio),
             presencePort: DiscordBridgeVoicePresencePort(bridge: discordBridge)
         )
     }
