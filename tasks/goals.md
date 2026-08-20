@@ -1,7 +1,9 @@
 # Goals
 
 ## Complete Discord application and real Discord Voice audio
-status: in_progress
+status: blocked
+blocked-on: a rotated Discord bot token + an authorized DAVE-enabled test guild. Only Donald can
+supply these; nothing in the code is waiting on more code.
 - Gateway voice presence is shipped today; real Discord audio is not. Completion requires a
   confirmed main-gateway voice handshake, Voice Gateway v8, UDP discovery, mandatory transport
   AEAD, DAVE end-to-end encryption, RTP/Opus send and receive, capture/playback, reconnect/resume,
@@ -270,9 +272,37 @@ status: in_progress
   join/speak/hear/reconnect/leave evidence is operator-blocked — no token, guild, or Keychain
   entry exists in this environment. That last step needs a rotated bot token and an authorized
   test guild, which only Donald can supply.
+- **Status → `blocked` 2026-08-20, and the last self-inflicted debt is paid.** Two things closed
+  this pass, neither of them new capability.
+  (a) **The verification gap left open in `048d57c` is closed.** That commit was pushed with its
+  message stating plainly that the native gate had NOT been run on it — the first attempt was
+  killed (exit 137, memory pressure) and the retry was declined. The gate has now been run on
+  that exact tree: `NATIVE_MEDIA_SMOKE_GREEN`, `STATIC_SECURITY_GREEN`, 94 tests in 9 suites
+  passing in **debug and release**, `NATIVE_GATE_EXIT: 0`. The commit message's caveat is now
+  historical rather than live.
+  (b) **`f2f8fd2` shares the terminal-disposition decision between the capture and receive
+  lanes** — the last open finding from the strict review that did not require widening access on
+  key-holding code. See that commit for the red-proof.
+  **Why `blocked` and not `in_progress`:** every checklist item that code can close is closed and
+  gated. What remains is item 12 alone — a live join/speak/hear/reconnect/leave run — and it is
+  operator-blocked, not code-blocked: re-verified this session that no `.env`, no
+  `DISCORD_BOT_TOKEN`/`DISCORD_DEV_GUILD_ID`, and no Keychain entry exist here. `in_progress`
+  implied someone was still grinding on it; `blocked` says correctly that the ball is in Donald's
+  court. The advertised DAVE version stays `0` and `mediaAdapterAvailability` stays
+  `.locallyComposed`, exactly as before — **composition is still not interoperability, and
+  nothing in this pass moved that line.**
+  **Two review findings are deliberately left open, not quietly dropped:**
+  `DiscordVoiceNativeMediaPlane.swift` (1266 lines) and `DiscordVoiceController.swift` (1303 —
+  the dedup traded lines for shared logic plus its rationale). Decomposing the plane is not
+  cleanup: Swift's `private` is file-scoped, so splitting it means **widening visibility on the
+  code that owns the AEAD keys and DAVE sessions**. That is a security-posture change wearing a
+  refactor's clothes, on the one file whose last restructuring silently reintroduced two
+  just-fixed bugs. It needs its own deliberate decision, not the tail end of a long session.
 
 ## Complete Discord video and Go Live
-status: in_progress
+status: blocked
+blocked-on: the same live-Discord verification as the voice goal — specifically, observing which
+video codec Discord actually negotiates and on what field it arrives.
 - Discord camera video and Go Live screen sharing are separate from the audio completion claim and
   are not shipped. Completion requires Voice Gateway video source/sink signaling, camera and screen
   capture permissions, negotiated video codec and RTP pipelines, DAVE video-frame encryption,
@@ -370,8 +400,29 @@ status: in_progress
   video may be sent. **Where the negotiated codec name actually arrives is now an open question
   requiring live verification, not an assumption baked into code.**
   Still open: `sendVideoFrame` emits one packet per frame (adoption needs a `NativeDAVECodec`
-  bridge + per-fragment revision re-check), and fragments are opaque byte ranges — no H.264
-  FU-A, VP8 descriptor, or AV1 OBU header, so no receiver interoperability is claimed.
+  bridge + per-fragment revision re-check) **[SUPERSEDED 2026-08-20 — `27dff85` adopted the
+  packetizer: `sendVideoFrame` now calls `makeVideoPacketizer().packetize(...)` and re-checks
+  both the generation and the video-source revision after every fragment, so a source swap
+  mid-frame cannot put the remaining fragments on the wire under the obsolete SSRC. Left in
+  place as the historical record, annotated so nobody stops reading here.]**, and fragments are
+  opaque byte ranges — no H.264 FU-A, VP8 descriptor, or AV1 OBU header, so no receiver
+  interoperability is claimed.
+- **Status → `blocked` 2026-08-20.** Both remaining items reduce to one unblocker, which is why
+  this is no longer `in_progress`.
+  **Codec negotiation** is live-blocked outright: `DiscordVoiceVideoCodecNegotiation` documents
+  that neither `VoiceGatewayV8Ready` nor `VoiceGatewayV8SessionDescription` carries a codec name
+  or payload type, so `resolve` can only ever be handed `nil` today, and `nil` throws. That is
+  the intended state — no codec is negotiated, so no video may be sent.
+  **Payload descriptors** (H.264 FU-A, VP8 descriptor, AV1 OBU header) are a closer call, and the
+  reasoning is recorded rather than assumed. They are *not* barred by the precedent that stopped
+  us inventing a `video_codec` CodingKey: that precedent is about unobserved **Discord-proprietary**
+  wire shapes, whereas RTP payload formats are published IETF standards and could be implemented
+  from a normative source. What blocks them is different and stronger — **which** descriptor to
+  build is determined by which codec is negotiated, and that is exactly the unknown above. Building
+  one now would mean guessing the codec, then shipping the result beneath a `resolve` that cannot
+  execute: dead code whose correctness could never be observed.
+  So the honest ordering is: live verification first, descriptor second. No capability
+  advertisement moved, and no video path in this repository works.
 
 ## Cross-platform server-graph toolchain parity (swiftly snapshot)
 status: done

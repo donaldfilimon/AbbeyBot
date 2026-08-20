@@ -623,7 +623,7 @@ thread is answered on GitHub. Comment ids kept so replies can be posted.
       is published; it is not operator-visible because no view reads `failure`
       outside a `.failed` phase and the later snapshot carries a bumped
       generation.
-- [ ] ~~**P2 `MediaSessionModel.swift`** (3822337045) — the UI kill switch calls
+- [x] ~~**P2 `MediaSessionModel.swift`** (3822337045) — the UI kill switch calls
       `audio.stopNow()` directly, bypassing `MicrophoneCaptureSource.stopCapture()`.
       The adapter's stream stays open, the capture loop never sees a terminal
       event, and the controller keeps reporting the microphone enabled after the
