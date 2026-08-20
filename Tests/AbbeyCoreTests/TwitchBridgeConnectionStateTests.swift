@@ -3,8 +3,12 @@ import Testing
 
 #if canImport(Darwin)
 import Darwin
-#else
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+// The static Linux SDK (used by Scripts/check-server-linux.sh) is musl-based, so
+// `canImport(Glibc)` is false there even though CI's bookworm image has Glibc.
+import Musl
 #endif
 
 @testable import AbbeyCore
