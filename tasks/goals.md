@@ -190,6 +190,25 @@ status: in_progress
   **Still open on this goal:** receive/playback, and the live join/speak/hear/reconnect/leave
   evidence that remains operator-blocked. `mediaAdapterAvailability` is still `.unavailable` and
   the advertised DAVE version is still 0 — composition is not interoperability.
+- **Receive/playback composition landed 2026-08-20 (`4a94cfe`), NOT connected.** Three
+  worktree-isolated slices, each verified in isolation and merged clean: the media plane's
+  receive entry point (AEAD open → DAVE unprotect → Opus decode, per-SSRC decoders created only
+  after both AEAD and DAVE accept, so a spoofed-SSRC spray cannot grow memory); the portable
+  receive loop; and a per-SSRC jitter buffer + PLC + saturating mixer. The buffer holds
+  *protected* packets and releases them in sequence order — decoding on arrival would have been a
+  silent correctness bug, since Opus decoder state is order-sensitive and `decodePacketLoss()`
+  only means anything in-sequence.
+  Verified: AbbeyCoreTests 403/403 in 34 suites, native gate 89 in 8 suites debug AND release,
+  `NATIVE_MEDIA_SMOKE_GREEN`, `STATIC_SECURITY_GREEN`, all EXIT:0.
+  **What this explicitly does NOT mean: no audio is heard.** Nothing calls the receive path in
+  production. The plane needs `senderID` for DAVE's per-participant ratchet, which arrives on
+  Speaking events, so an SSRC→user map has to exist before the loop can drive the plane — a
+  design decision, not a shim. `mediaAdapterAvailability` stays `.unavailable` and the advertised
+  DAVE version stays 0. Live evidence remains operator-blocked.
+  One spec error was caught by an implementer rather than followed: "malformed framing is
+  terminal" would have killed receive on the first normal RTCP receiver report, because Discord
+  multiplexes RTP/RTX/RTCP on one socket. Corrected to: terminal only for unparseable framing
+  claiming the audio payload type.
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -277,6 +296,21 @@ status: in_progress
   closed, a missing Speaking callback does not) and one `sendTracked` path, specifically so the
   two cannot diverge again. Still the send boundary only — no capture, codec negotiation,
   packetization, rendering, or live evidence; no capability advertisement changed.
+- **Packetization + negotiation landed 2026-08-20 (`3ebce81`), not adopted by the send path.**
+  `DiscordVoiceVideoPacketizer` fixes a real wire bug — the RTP marker bit was unconditionally
+  `true`, which is incorrect for any frame above MTU. Now one shared timestamp per frame,
+  contiguous sequence numbers, marker on the final fragment only, with MTU (1200) measured on the
+  *sealed* datagram and the AEAD's exact 20-byte expansion subtracted from every fragment budget.
+  **The spec's negotiation premise was wrong and the implementer refused to paper over it:**
+  neither Ready nor Session Description carries any codec field (verified — zero repo-wide hits
+  for `video_codec|audio_codec|payload_type`). Rather than invent a CodingKey for a field nobody
+  has observed on the wire, `DiscordVoiceVideoCodecNegotiation` fails closed; its only reachable
+  input today is `nil` → throws, which is the correct state, because no codec is negotiated so no
+  video may be sent. **Where the negotiated codec name actually arrives is now an open question
+  requiring live verification, not an assumption baked into code.**
+  Still open: `sendVideoFrame` emits one packet per frame (adoption needs a `NativeDAVECodec`
+  bridge + per-fragment revision re-check), and fragments are opaque byte ranges — no H.264
+  FU-A, VP8 descriptor, or AV1 OBU header, so no receiver interoperability is claimed.
 
 ## Cross-platform server-graph toolchain parity (swiftly snapshot)
 status: done
