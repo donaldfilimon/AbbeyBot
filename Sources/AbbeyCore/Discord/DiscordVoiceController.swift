@@ -78,6 +78,9 @@ public protocol DiscordVoiceGatewayPairBridge: Sendable {
     func requestGatewayState(guildID: String, channelID: String) async throws
     func awaitGatewayPair() async throws -> DiscordVoiceGatewayPair
     func leaveVoice(guildID: String) async
+    /// See the protocol extension's default: main-gateway presence evidence
+    /// gating the controller's full-reconnect fallback.
+    func voicePresenceHeld() async -> Bool
 }
 
 public protocol DiscordVoiceGatewaySessionClient: Sendable {
@@ -85,6 +88,26 @@ public protocol DiscordVoiceGatewaySessionClient: Sendable {
     func selectTransport(_ endpoint: DiscordVoiceDiscoveredEndpoint) async throws
     func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities
     func disconnect() async
+    /// Suspends until the session leaves service. `true` means the session
+    /// terminated unexpectedly (terminal transport failure after its own
+    /// buffered-resume budget is spent); `false` means an operator-requested
+    /// disconnect. The default reports `false` immediately, which keeps the
+    /// controller's full-reconnect fallback inert for clients that cannot
+    /// distinguish termination causes.
+    func awaitTermination() async -> Bool
+}
+
+extension DiscordVoiceGatewaySessionClient {
+    public func awaitTermination() async -> Bool { false }
+}
+
+extension DiscordVoiceGatewayPairBridge {
+    /// Whether the main gateway's authoritative self VOICE_STATE_UPDATE
+    /// evidence still shows the bot present in its voice channel. The
+    /// full-reconnect fallback consults this before any rejoin so it never
+    /// fights a Discord-initiated removal. The default reports `true`, which
+    /// preserves the fallback for bridges that carry no presence evidence.
+    public func voicePresenceHeld() async -> Bool { true }
 }
 
 public protocol DiscordVoiceUDPDiscoverySession: Sendable {
@@ -187,16 +210,27 @@ public struct DiscordVoiceControllerConfiguration: Equatable, Sendable {
     public let snapshotBufferLimit: Int
     public let audioQueueCapacity: Int
     public let videoQueueCapacity: Int
+    /// Full-rejoin budget per operator-initiated join. Spent only by
+    /// unexpected session terminations; zero disables the fallback so every
+    /// unexpected termination fails closed immediately.
+    public let maximumAutoReconnectAttempts: Int
 
     public init(
         credentialTimeout: Duration = .seconds(10),
         snapshotBufferLimit: Int = 32,
         audioQueueCapacity: Int = 64,
-        videoQueueCapacity: Int = 4
+        videoQueueCapacity: Int = 4,
+        maximumAutoReconnectAttempts: Int = 2
     ) throws {
         guard credentialTimeout > .zero else {
             throw DiscordVoiceMediaContractError.invalidCredentialTimeout
         }
+        guard (0...10).contains(maximumAutoReconnectAttempts) else {
+            throw DiscordVoiceMediaContractError.invalidAutoReconnectAttempts(
+                maximumAutoReconnectAttempts
+            )
+        }
+        self.maximumAutoReconnectAttempts = maximumAutoReconnectAttempts
         guard snapshotBufferLimit > 0 else {
             throw DiscordVoiceMediaContractError.invalidQueueCapacity(snapshotBufferLimit)
         }
@@ -299,6 +333,8 @@ public actor DiscordVoiceController {
     private var acceptsFrames = false
     private var nextTeardownID: UInt64 = 0
     private var teardownTasks: [UInt64: Task<Void, Never>] = [:]
+    private var autoReconnectAttempts = 0
+    private var sessionMonitorTask: Task<Void, Never>?
 
     private var microphoneEnabled = false
     private var cameraEnabled = false
@@ -352,6 +388,9 @@ public actor DiscordVoiceController {
         let prior = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
         enqueueTeardown(prior)
+        // A fresh operator-initiated join refills the full-reconnect budget;
+        // reconnect() deliberately does not.
+        autoReconnectAttempts = 0
         let localGeneration = beginGeneration(
             target: DiscordVoiceJoinTarget(guildID: guildID, channelID: channelID),
             initialPhase: .requestingGatewayState
@@ -589,6 +628,13 @@ public actor DiscordVoiceController {
         cameraEnabled = false
         screenShareEnabled = false
         transition(to: .readyMuted)
+        // Started strictly AFTER the ready transition, with no suspension
+        // point between: a termination verdict that is already pending can
+        // therefore only be acted on once this join has fully returned, and
+        // can never be overwritten by this method's own tail. (Starting the
+        // monitor earlier let an interleaved `fail()` be stomped back to
+        // `.readyMuted` — caught by the budget-exhaustion test.)
+        startSessionMonitor(gateway: gateway, generation: localGeneration)
         return makeSnapshot()
     }
 
@@ -604,6 +650,56 @@ public actor DiscordVoiceController {
             phase = .readyMuted
         }
         publish()
+    }
+
+    /// Watches the live gateway session and drives the bounded full-reconnect
+    /// fallback. Kick/move policy: before any rejoin, `sessionDidTerminate`
+    /// consults the pair bridge's main-gateway presence evidence
+    /// (`voicePresenceHeld()`). A Discord-authoritative removal — the bot's
+    /// own null-channel VOICE_STATE_UPDATE — reads as presence lost and the
+    /// fallback fails closed instead of rejoining, so it never fights a
+    /// server-initiated removal. (Nothing external mutates the controller's
+    /// `target`/`generation`; the presence gate, not any bridge-driven
+    /// teardown, is what makes kicks safe.) Replaced monitors retire inertly
+    /// through the generation and target guards once their session's
+    /// teardown resolves.
+    private func startSessionMonitor(
+        gateway: any DiscordVoiceGatewaySessionClient,
+        generation localGeneration: UInt64
+    ) {
+        sessionMonitorTask = Task { [weak self] in
+            let unexpected = await gateway.awaitTermination()
+            await self?.sessionDidTerminate(
+                unexpected: unexpected,
+                generation: localGeneration
+            )
+        }
+    }
+
+    private func sessionDidTerminate(
+        unexpected: Bool,
+        generation localGeneration: UInt64
+    ) async {
+        guard generation == localGeneration, unexpected, target != nil else { return }
+        guard autoReconnectAttempts < configuration.maximumAutoReconnectAttempts else {
+            _ = await fail(.gatewayUnavailable, ifCurrent: localGeneration)
+            return
+        }
+        autoReconnectAttempts += 1
+        let attempt = autoReconnectAttempts
+        // Deterministic bounded delay (1s, 2s, 4s, capped at 8s). A single
+        // client needs no jitter; the budget cap prevents rejoin loops.
+        try? await sleeper(.seconds(min(8, 1 << (attempt - 1))))
+        guard generation == localGeneration, target != nil else { return }
+        // Kick/move gate: if the main gateway no longer shows the bot in its
+        // channel, this termination was a Discord-initiated removal — never
+        // rejoin over the server's decision; surface it as a failure instead.
+        guard await bridge.voicePresenceHeld() else {
+            _ = await fail(.gatewayUnavailable, ifCurrent: localGeneration)
+            return
+        }
+        guard generation == localGeneration, target != nil else { return }
+        _ = await reconnect()
     }
 
     private func awaitPairWithTimeout() async -> DiscordVoicePairRaceResult {
@@ -652,6 +748,13 @@ public actor DiscordVoiceController {
     }
 
     private func invalidateAndDetach(clearTarget: Bool) -> DiscordVoiceDetachedSession {
+        // The monitor holds no teardown-bearing resources — it self-retires
+        // when its session's teardown resolves the termination signal, and
+        // the generation guard below makes any late verdict inert. Cancel is
+        // ownership hygiene, keeping the generation-scoped-task invariant
+        // visible rather than load-bearing.
+        sessionMonitorTask?.cancel()
+        sessionMonitorTask = nil
         generation &+= 1
         acceptsFrames = false
         microphoneEnabled = false

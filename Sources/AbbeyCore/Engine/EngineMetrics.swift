@@ -1,6 +1,8 @@
 import Foundation
-// @Observable needs an explicit Observation import on Linux (AppConfig.swift
-// already does this); Darwin re-exports it, so the omission only broke CI.
+// Explicit, like AppConfig.swift: the Apple SDK makes `@Observable` visible
+// through Foundation, but corelibs Foundation on Linux does not — without
+// this the server graph fails to compile with "unknown attribute 'Observable'".
+
 import Observation
 
 /// In-memory counters for the Dashboard view. Deliberately not persisted — these reset

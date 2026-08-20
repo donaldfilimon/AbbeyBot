@@ -146,6 +146,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private var daveMembershipTask: Task<Void, Never>?
     private var readySignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceGatewayTransportReady>?
     private var descriptionSignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceMediaCapabilities>?
+    private var terminationSignal: DiscordVoiceGatewaySessionSignal<Bool>?
     private var selectedMode: DiscordVoiceTransportMode?
     private var negotiatedDAVEProtocolVersion: Int?
     private var daveTransitionState: VoiceGatewayDAVETransitionStateMachine
@@ -253,6 +254,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         let descriptionSignal = DiscordVoiceGatewaySessionSignal<DiscordVoiceMediaCapabilities>()
         self.readySignal = readySignal
         self.descriptionSignal = descriptionSignal
+        terminationSignal = DiscordVoiceGatewaySessionSignal<Bool>()
         machine = VoiceGatewayV8StateMachine(identity: identity)
         // Re-attach every connect() so a reused session's callback always
         // closes over the current generation rather than a stale one.
@@ -311,14 +313,25 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 case .resumeAfterBackoff(let attempt):
                     do {
                         try await self.resumeBackoff.wait(attempt: attempt)
-                    } catch {
-                        // The only expected throw is cancellation from
-                        // `disconnect()`, which owns the remaining teardown.
-                        // Route through the cancellation branch so a spurious
-                        // backoff failure still leaves a coherent final state.
+                    } catch is CancellationError {
+                        // Cancellation comes from `disconnect()`, which owns
+                        // the remaining teardown; route through the
+                        // cancellation branch for a coherent final state.
                         _ = await self.transportDidFinish(
                             close: nil,
                             error: CancellationError(),
+                            generation: connectionGeneration
+                        )
+                        return
+                    } catch {
+                        // A non-cancellation backoff failure is a terminal
+                        // transport fault, NOT an operator disconnect — route
+                        // it through the credential-dropping teardown so
+                        // `awaitTermination()` reports it truthfully and the
+                        // controller's fallback can react.
+                        _ = await self.transportDidFinish(
+                            close: nil,
+                            error: error,
                             generation: connectionGeneration
                         )
                         return
@@ -424,6 +437,14 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         return lastCapabilities
     }
 
+    /// Suspends until the current connection leaves service. `true` = terminal
+    /// transport failure after the buffered-resume budget is spent; `false` =
+    /// operator disconnect (or no connection was ever started).
+    public func awaitTermination() async -> Bool {
+        guard let terminationSignal else { return false }
+        return (try? await terminationSignal.value()) ?? false
+    }
+
     public func disconnect() async {
         if transportTask == nil {
             generation &+= 1
@@ -433,6 +454,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             let failure = DiscordVoiceGatewaySessionError.disconnected
             await readySignal?.resolve(.failure(failure))
             await descriptionSignal?.resolve(.failure(failure))
+            await terminationSignal?.resolve(.success(false))
             await mediaPlane.reset()
             await cancelDAVEHandling()
             clearEphemeralState(finalPhase: .disconnected)
@@ -445,6 +467,14 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         let failure = DiscordVoiceGatewaySessionError.disconnected
         await readySignal?.resolve(.failure(failure))
         await descriptionSignal?.resolve(.failure(failure))
+        // Resolve directly: the generation bump above means the cancelled
+        // transport loop's own `transportDidFinish` call fails its stale-
+        // generation guard and can never reach the resolving branch. Without
+        // this, every live-session operator disconnect left the signal
+        // pending forever — permanently suspending any `awaitTermination()`
+        // monitor and retaining this actor. `resolve` is idempotent, so the
+        // loop's own resolve (when it does run) stays a safe no-op.
+        await terminationSignal?.resolve(.success(false))
 
         let task = transportTask
         daveHandlingTask?.cancel()
@@ -1181,6 +1211,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             let failure = DiscordVoiceGatewaySessionError.disconnected
             await readySignal?.resolve(.failure(failure))
             await descriptionSignal?.resolve(.failure(failure))
+            await terminationSignal?.resolve(.success(false))
             phase = .disconnected
             return .stop
         }
@@ -1237,6 +1268,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         }
         await readySignal?.resolve(.failure(failure))
         await descriptionSignal?.resolve(.failure(failure))
+        await terminationSignal?.resolve(.success(true))
         // Drop credentials, transport key material, and completed signals as
         // soon as the socket is no longer usable. Callers already waiting on a
         // signal retain only their resolved result long enough to observe the

@@ -22,13 +22,15 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 4. **Multi-Persona (claim-honest):** `AbbeyPersona` / `AvivaPersona` / `AbiPersona` in AbbeyCore; switch via `/persona`, ingest `personaSwitch`, or desktop Personas tab. Engines call `ABIRouter.route(intent:)` on ingest `craftReply` and `/ask` (mod/command → Abi, question → Aviva, greeting/smallTalk → Abbey). `research_mlai.md` = roles reference only. DQN = strategy selection only. Do not claim Python ML, blockchain, industry certification, or WDBX throughput.
 5. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` so desktop and server do not drift.
 6. **Shipped sync / Twitch (post-#33–#39):** EventSub `channel.chat.message` → `BotRuntime.handleTwitchChat`; `stream.online`/`stream.offline` → `handleTwitchStreamLifecycle` (`twitchStreamLive` on `/api/status`); follow/subscribe/cheer log + soft-ingest social context; env-gated six-type auto-subscribe is off by default (`ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` + full `TWITCH_*` contract including `TWITCH_BOT_USER_ID`; unverified live). Desktop push+pull uses `AbbeyServerClient` / `SyncCursorStore`; CLI provides `/sync pull` + `/sync push` (messages + facts). Soft-delete tombstones cover all six sync entities. Plain HTTP sync is loopback-only; remote sync requires HTTPS.
-7. **Won't-ship (do not scaffold):** CRDT merge, Twitch PubSub, codegen sandbox. LWW+tombstones+CLI pull/push, EventSub, and static `CodeProposalValidator` are the claims. Discord Voice **audio** and **video/Go Live** are **in progress, not shipped** — voice presence (`/voice join|leave`) is the only verified runtime claim; track completion in `tasks/goals.md` / `tasks/todo.md` and do not claim audio/video without the live-call evidence listed there.
+7. **Won't-ship (do not scaffold):** CRDT merge, Twitch PubSub, codegen sandbox. LWW+tombstones+CLI pull/push, EventSub, and static `CodeProposalValidator` are the claims. Discord Voice **audio** and **video/Go Live** are **in progress, not shipped** — voice presence (`/voice join|leave` plus mute/deafen presence controls on the Discord tab) is the only verified runtime claim. A voice **signaling** stack lives in `Sources/AbbeyCore/Discord/`: Voice Gateway v8 session with in-session buffered resume (`.resuming` phase, bounded resume budget, heartbeat-resume media retention), a controller full-reconnect fallback (bounded auto-reconnect budget; presence-gated kick policy — never rejoins after an operator/kick removal), and protected-send composition in the media plane, verified by loopback WebSocket voice-gate fixtures. Reconnect/resume is current at the signaling layer only — none of it is audio; live-call evidence stays operator-blocked (no token in this environment). Track completion in `tasks/goals.md` / `tasks/todo.md` and do not claim audio/video without the live-call evidence listed there.
 
 **Toolchain (hard rules):**
 1. Always `unset TOOLCHAINS` before Swift builds/tests.
 2. Use Xcode toolchain only: `/usr/bin/xcrun --toolchain default` (or repo wrappers). Swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros.
 3. Build under `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
 4. Swift 6.4 language mode; do not upgrade the pin casually.
+5. `.swift-version` is machine-local and **gitignored — never commit it** (`xcode` is a macOS-only swiftly selector; a tracked copy breaks every swiftly-proxied invocation on Linux). Keep an untracked `xcode` copy at the repo root on macOS dev machines.
+6. Snapshot toolchains are allowed only for the **server graph** via `Scripts/check-server-snapshot.sh` (per-invocation `+toolchain` selector; never change the swiftly global default; never use snapshots for desktop).
 
 **Workflow:**
 1. Read `AGENTS.md` (and nearby sources only as needed).
@@ -42,13 +44,14 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
    - Desktop: `bash Scripts/run-smoke.sh`
    - Server: `bash Scripts/run-server-smoke.sh`
    - CLI: `bash Scripts/run-cli-smoke.sh`
-   - Launch wrappers: `Scripts/run.sh`, `Scripts/run-server.sh`, `Scripts/run-abbey.sh`
+   - Server-graph CI parity (swiftly snapshot; never desktop): `bash Scripts/check-server-snapshot.sh`
+   - Launch wrappers: `Scripts/run.sh`, `Scripts/run-server.sh`, `Scripts/run-abbey.sh`, `Scripts/swift-run.sh`
 6. Prefer `cursor/` branches from `origin/main`; draft PRs when offered; never commit/push straight to `main`.
 7. Summarize what changed, what you verified, and what remains out of scope.
 
 **Learning & Safety Policy (binding summary):**
 
-Prioritize **care, clarity, and competence**. Never treat RL rewards as permission to ignore safety — DQN is strategy selection only. Phase 1 shipped: `AppConfig.validateForStartup()`, dry-run connect, durable DQN checkpoints. Phase 2 shipped: experience journal, static `CodeProposalValidator`, `RollbackStore`, Twitch IRC + EventSub chat ingest + stream.online/offline status + follow/subscribe/cheer side-effects (interaction log + soft ingest) + env-gated auto-subscribe (unverified live) + persisted (Fluent-backed) EventSub replay guard. Gate: `AGENTS.md` → **Verify**. Still deferred: live Helix `webhook_callback_verification` handshake (needs a public HTTPS callback). In progress, not shipped: Discord Voice audio and video/Go Live. Won't ship: PubSub, codegen sandbox, CRDT. Full policy in `AGENTS.md`.
+Prioritize **care, clarity, and competence**. Never treat RL rewards as permission to ignore safety — DQN is strategy selection only. Phase 1 shipped: `AppConfig.validateForStartup()`, dry-run connect, durable DQN checkpoints. Phase 2 shipped: experience journal, static `CodeProposalValidator`, `RollbackStore`, Twitch IRC + EventSub chat ingest + stream.online/offline status + follow/subscribe/cheer side-effects (interaction log + soft ingest) + env-gated auto-subscribe (unverified live) + persisted (Fluent-backed) EventSub replay guard. Gate: `AGENTS.md` → **Verify**. Still deferred: live Helix `webhook_callback_verification` handshake (needs a public HTTPS callback). In progress, not shipped: Discord Voice audio and video/Go Live — signaling-layer reconnect/resume (buffered resume + controller full-reconnect fallback) exists, but live-call evidence is operator-blocked. Won't ship: PubSub, codegen sandbox, CRDT. Full policy in `AGENTS.md`.
 
 **Quality Standards:**
 - Claim-honest: cite real targets, scripts, env vars, and routes — no speculative APIs.
@@ -68,4 +71,5 @@ Prioritize **care, clarity, and competence**. Never treat RL rewards as permissi
 - **No Discord token:** CLI/server can run local-only; desktop live Discord needs token + Message Content intent.
 - **Ambiguous "sync":** desktop push+pull + CLI `/sync pull` + `/sync push` (messages/facts only); CRDT is out — not a multi-writer merge.
 - **EventSub live claim:** auto-subscribe and Helix handshake are unverified without a public HTTPS callback; unit tests use fake `Client` only.
+- **Voice reconnect/resume green ≠ audio:** loopback voice-gate fixtures and signaling resume/reconnect tests never convert into a shipped-audio claim — live join/speak/hear/reconnect evidence is operator-blocked (no token/`.env` in this environment).
 - **Conflicting docs vs code:** prefer code + `AGENTS.md`; fix drift rather than inventing features.

@@ -109,6 +109,29 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       the controller/media plane (owned by PR #61's layer), gateway-driven re-discovery after
       loss, and any live-network UDP evidence. Gate: full `AbbeyCoreTests` 320 green +
       `check-static-security.sh` STATIC_SECURITY_GREEN.)*
+      *(PARTIAL 2026-08-20 second slice — the controller-level full-reconnect fallback is now
+      wired. `DiscordVoiceGatewaySessionClient` gained `awaitTermination() -> Bool` (default
+      `false` keeps the fallback inert for fakes/unaware clients); the production session resolves
+      it `true` only on the credential-dropping terminal teardown and `false` on operator
+      disconnect. After every ready join the controller starts a generation-scoped monitor —
+      strictly AFTER the ready transition, with no suspension point between, so a pending verdict
+      can never be stomped by the join's own tail (an actor-reentrancy race the budget-exhaustion
+      test caught live). Unexpected termination triggers the existing `reconnect()` full rejoin
+      through a bounded budget (`maximumAutoReconnectAttempts`, default 2, refilled only by a
+      fresh operator join) with deterministic 1/2/4/8s-capped delays via the injected sleeper;
+      exhaustion fails closed as `.gatewayUnavailable`. Kick/move policy: before any rejoin the
+      fallback consults `voicePresenceHeld()` on the pair bridge (production adapter reads
+      `DiscordBridge.voicePresenceState().confirmedInChannel`); presence lost = Discord-initiated
+      removal = fail closed, never rejoin — 4014 close-code discrimination is deliberately NOT
+      attempted at the session layer. (Review pass corrected the original claim that the bridge
+      clears the controller target on removal; no such wiring exists, and the review also fixed a
+      live-disconnect leak where `terminationSignal` was never resolved because `disconnect()`
+      bumps the generation before the cancelled transport loop reports back.) Five controller tests (rejoin, operator-cause inertness, bounded
+      exhaustion, budget refill, stale-monitor immunity), suite 22/22 stable across 10 runs after
+      fixing a test-harness race (one injected sleeper drives both the credential-timeout race and
+      the backoff — park timeout-sized sleeps, instant backoff sleeps). AbbeyCoreTests 317 green.
+      Still open: induced UDP loss/reorder, invalid-session, channel-move, process-shutdown
+      verification; live-network evidence remains operator-blocked.)*
 - [ ] Expand `/voice` and the Discord SwiftUI surface with honest connection phases, guild/channel
       selection, join/leave/status, mute/deafen, PTT/VAD, device/volume controls, speaking meters,
       reconnect/error visibility, stage-channel state, permission preflight, privacy policy, and an
