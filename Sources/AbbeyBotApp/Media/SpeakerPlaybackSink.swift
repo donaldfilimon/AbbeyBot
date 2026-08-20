@@ -18,18 +18,20 @@ struct SpeakerPlaybackSink: DiscordVoicePlaybackSink {
 
     func play(pcm: [Int16]) async throws {
         let frame = try AudioPCMFrame(int16: pcm)
-        // `play` reports whether the frame was enqueued; a refusal is a real
-        // failure for the loop, not something to swallow, because silently
-        // dropping frames would look like a working call with no audio.
-        guard try await adapter.play(frame) else {
-            throw DiscordVoicePlaybackRejected.frameNotEnqueued
-        }
+        // `play` distinguishes two different things, and conflating them is a
+        // bug I shipped in the first version of this file:
+        //
+        //   * returning `false` is EXPECTED BACKPRESSURE — the adapter is
+        //     deafened, or its playback queue is full (which it already counts
+        //     as a drop in `playbackDropCount`). The right response is to drop
+        //     this 20 ms frame and keep going.
+        //   * THROWING is a real refusal (e.g. media disabled by environment)
+        //     and propagates, because the receive loop treats a playback
+        //     failure as terminal.
+        //
+        // The first version turned `false` into a thrown error, so being
+        // deafened — or one transient queue-full — would have killed receive
+        // for the whole generation instead of dropping a single frame.
+        _ = try await adapter.play(frame)
     }
-}
-
-/// Redacted by construction: carries no PCM and no device detail.
-enum DiscordVoicePlaybackRejected: Error, Equatable, Sendable, CustomStringConvertible {
-    case frameNotEnqueued
-
-    var description: String { "Playback refused a mixed audio frame" }
 }

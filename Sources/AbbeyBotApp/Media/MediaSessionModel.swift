@@ -442,11 +442,16 @@ final class MediaSessionModel {
         // platform, so the kill switch terminates the very stream the capture
         // loop is pumping rather than only the adapter underneath it.
         let microphone = MicrophoneCaptureSource(adapter: audio)
+        // Playback rides the SAME adapter as capture — one engine owns the
+        // device, so the kill switch, deafen state, and runtime snapshot cover
+        // both directions rather than only what we send.
+        let speaker = SpeakerPlaybackSink(adapter: audio)
         do {
             let factory: any DiscordVoiceSessionFactory
 #if canImport(AbbeyMediaNative)
             factory = DiscordVoiceNativeControlSessionFactory(
-                captureSource: microphone
+                captureSource: microphone,
+                playbackSink: speaker
             )
 #else
             factory = DiscordVoicePortableSessionFactory()

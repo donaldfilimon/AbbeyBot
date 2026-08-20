@@ -14,12 +14,23 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     /// operator's microphone is enabled. Absent, the components carry no
     /// capture loop and the microphone fails closed to disabled.
     private let captureSource: (any DiscordVoiceCaptureSource)?
+    /// Playback boundary for received audio. Injected because the concrete sink
+    /// lives in AbbeyBotApp, which this target cannot depend on.
+    private let playbackSink: (any DiscordVoicePlaybackSink)?
 
-    public let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability = .unavailable
+    /// `.locallyComposed` once BOTH directions are actually composed — capture
+    /// in, playback out — because that is when real audio can flow on this
+    /// machine. It deliberately stops short of `.fullyWired`: that case
+    /// additionally advertises a nonzero DAVE version to Discord, and nothing
+    /// here has been proven against a live call.
+    public var mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability {
+        (captureSource != nil && playbackSink != nil) ? .locallyComposed : .unavailable
+    }
 
     public init(
         daveAdapter: NativeDAVEControlAdapter? = nil,
-        captureSource: (any DiscordVoiceCaptureSource)? = nil
+        captureSource: (any DiscordVoiceCaptureSource)? = nil,
+        playbackSink: (any DiscordVoicePlaybackSink)? = nil
     ) {
         if let daveAdapter {
             self.makeDAVEAdapter = { daveAdapter }
@@ -27,6 +38,7 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
             self.makeDAVEAdapter = { NativeDAVEControlAdapter() }
         }
         self.captureSource = captureSource
+        self.playbackSink = playbackSink
     }
 
     public func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient {
@@ -53,21 +65,47 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
             daveAdapter: daveAdapter,
             datagramTransport: udp
         )
-        // Phase 6a: the capture loop is bound to this session's own media
-        // plane, whose `sendAudioFrame` fails closed without an installed
-        // generation and attested DAVE session. Composing it here does not
-        // change `mediaAdapterAvailability`: receive/playback and live
-        // evidence remain missing, so audio is still not claimed as shipped.
+        // The capture loop is bound to this session's own media plane, whose
+        // `sendAudioFrame` fails closed without an installed generation and an
+        // attested DAVE session.
         let captureLoop: (any DiscordVoiceCaptureLoopControlling)? = captureSource.map {
             DiscordVoiceCaptureLoop(source: $0, sender: mediaPlane)
         }
+
+        // Bound to a local rather than built inline, because the sender
+        // resolver below has to close over the concrete session. Going through
+        // `any DiscordVoiceGatewaySessionClient` would risk dispatching to the
+        // protocol extension's nil-returning default, and receive would then
+        // never learn a sender — silently, with no error.
+        let gateway = makeGatewayClient(daveAdapter: daveAdapter, mediaPlane: mediaPlane)
+
+        // Receive: UDP in -> AEAD open -> DAVE unprotect -> Opus decode ->
+        // jitter/PLC/mix -> playback. `udp` is both the discovery session and
+        // the media datagram transport, so it is the same socket the send path
+        // uses. DAVE needs the sender's identity for its per-participant
+        // ratchet; only the gateway knows it, learned from inbound Speaking.
+        //
+        // A failure to construct the loop must not take the whole session down
+        // — signaling and capture are still perfectly usable without playback —
+        // so this degrades to "no receive" rather than throwing.
+        var receiveLoop: (any DiscordVoiceReceiveLoopControlling)?
+        if let playbackSink {
+            let decoder = DiscordVoiceNativeAudioFrameDecoder(
+                plane: mediaPlane,
+                resolveSender: { [gateway] ssrc in await gateway.senderID(forSSRC: ssrc) }
+            )
+            receiveLoop = try? DiscordVoiceReceiveLoop(
+                transport: udp,
+                decoder: decoder,
+                sink: playbackSink
+            )
+        }
+
         return DiscordVoiceSessionComponents(
-            gateway: makeGatewayClient(
-                daveAdapter: daveAdapter,
-                mediaPlane: mediaPlane
-            ),
+            gateway: gateway,
             udp: udp,
-            captureLoop: captureLoop
+            captureLoop: captureLoop,
+            receiveLoop: receiveLoop
         )
     }
 

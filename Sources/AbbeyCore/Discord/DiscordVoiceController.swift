@@ -71,7 +71,26 @@ public struct DiscordVoiceMediaCapabilities: Equatable, Sendable {
 
 public enum DiscordVoiceMediaAdapterAvailability: Equatable, Sendable {
     case unavailable
+    /// The native stack is composed well enough to carry real audio on this
+    /// machine — capture, receive, and the media plane are all present — but
+    /// nothing is claimed to Discord. The advertised DAVE version stays 0.
+    ///
+    /// This case exists because the two-state version was self-locking: audio
+    /// could not flow until availability opened, and availability was not
+    /// supposed to open until live evidence existed, which required audio to
+    /// flow. Separating "works locally" from "advertised on the wire" breaks
+    /// that circle without overstating anything to Discord.
+    case locallyComposed
+    /// Everything above, PLUS the wire-facing claim: a nonzero DAVE version is
+    /// advertised, which tells Discord this client can honor E2EE. Only set
+    /// this when that is actually true.
     case fullyWired
+
+    /// Whether audio may flow at all. Both composed states qualify; only
+    /// `fullyWired` additionally advertises DAVE.
+    public var permitsLocalMedia: Bool {
+        self != .unavailable
+    }
 }
 
 public protocol DiscordVoiceGatewayPairBridge: Sendable {
@@ -233,11 +252,18 @@ public struct DiscordVoiceControllerSnapshot: Equatable, Sendable, CustomStringC
     public let droppedAudioFrames: UInt64
     public let droppedVideoFrames: UInt64
     public let failure: DiscordVoiceControllerFailure?
+    /// The WIRE-FACING claim: a nonzero DAVE version is advertised to Discord.
+    /// Deliberately keeps its original meaning so no existing reader silently
+    /// starts reporting something stronger than before.
     public let mediaAdapterAvailable: Bool
+    /// Audio may flow on this machine. True for both composed states, so it is
+    /// true in cases where `mediaAdapterAvailable` is false — that combination
+    /// is the whole point of the split and is not a contradiction.
+    public let localMediaAvailable: Bool
 
     public var description: String {
         let failureDescription = failure?.rawValue ?? "none"
-        return "DiscordVoiceControllerSnapshot(phase: \(phase.rawValue), generation: \(generation), microphone: \(microphoneEnabled), camera: \(cameraEnabled), screen: \(screenShareEnabled), receiveActive: \(receiveActive), audioQueued: \(queuedAudioFrames), videoQueued: \(queuedVideoFrames), failure: \(failureDescription), mediaAdapterAvailable: \(mediaAdapterAvailable))"
+        return "DiscordVoiceControllerSnapshot(phase: \(phase.rawValue), generation: \(generation), microphone: \(microphoneEnabled), camera: \(cameraEnabled), screen: \(screenShareEnabled), receiveActive: \(receiveActive), audioQueued: \(queuedAudioFrames), videoQueued: \(queuedVideoFrames), failure: \(failureDescription), mediaAdapterAvailable: \(mediaAdapterAvailable), localMediaAvailable: \(localMediaAvailable))"
     }
 }
 
@@ -801,7 +827,7 @@ public actor DiscordVoiceController {
         // Always complete the secure Gateway-to-media-plane bootstrap first,
         // then apply the product claim gate. This lets an unavailable factory
         // prove Phase 4 without presenting audio as shipped before Phase 5.
-        guard factory.mediaAdapterAvailability == .fullyWired,
+        guard factory.mediaAdapterAvailability.permitsLocalMedia,
               capabilities.isProductionReady
         else {
             return await fail(.mediaUnavailable, ifCurrent: localGeneration)
@@ -1169,7 +1195,8 @@ public actor DiscordVoiceController {
             droppedAudioFrames: audioQueue.droppedCount,
             droppedVideoFrames: videoQueue.droppedCount,
             failure: failure,
-            mediaAdapterAvailable: factory.mediaAdapterAvailability == .fullyWired
+            mediaAdapterAvailable: factory.mediaAdapterAvailability == .fullyWired,
+            localMediaAvailable: factory.mediaAdapterAvailability.permitsLocalMedia
         )
     }
 
