@@ -24,6 +24,7 @@ public enum DiscordVoiceRTPError: Error, Equatable, Sendable, CustomStringConver
     case mappingCapacityExceeded(Int)
     case invalidReplayWindowSize(Int)
     case invalidMaximumForwardJump(UInt16)
+    case invalidFragmentCount(Int)
 
     public var description: String {
         switch self {
@@ -69,6 +70,8 @@ public enum DiscordVoiceRTPError: Error, Equatable, Sendable, CustomStringConver
             return "RTP replay window must be in 1...64; got \(size)"
         case .invalidMaximumForwardJump(let distance):
             return "RTP maximum forward jump must be in 1...32767; got \(distance)"
+        case .invalidFragmentCount(let count):
+            return "RTP frame must occupy at least one fragment; got \(count)"
         }
     }
 }
@@ -96,13 +99,20 @@ public struct DiscordVoiceRTPHeader: Equatable, Sendable {
     public static let version: UInt8 = 2
     public static let discordAudioPayloadType: UInt8 = 0x78
 
-    /// Client-proposed dynamic video payload types, as used by Discord's
+    /// Client-*offered* dynamic video payload types, as used by Discord's
     /// codec negotiation per the community Voice Gateway reference
     /// (docs.discord.food, "voice-connections"). The client offers these in
     /// Select Protocol's codec list; they are the primary (non-RTX) payload
     /// types. RTX payload types are deliberately not accepted — no RTX
     /// retransmission path exists in this repository, so an RTX-marked packet
     /// fails closed at the header validation boundary.
+    ///
+    /// These constants name what this client *would* send for a codec; they do
+    /// not select one. Selecting a payload type goes through
+    /// `DiscordVoiceVideoCodecNegotiation.resolve(negotiatedCodecName:)`, which
+    /// requires a codec the connection actually negotiated and fails closed
+    /// otherwise. Reading a constant here directly, keyed off a codec label a
+    /// caller happens to hold, skips that negotiation.
     public static let discordVideoH264PayloadType: UInt8 = 101
     public static let discordVideoVP8PayloadType: UInt8 = 103
     public static let discordVideoVP9PayloadType: UInt8 = 105
@@ -437,12 +447,15 @@ public struct DiscordVoiceRTPClock: Equatable, Sendable {
 ///
 /// Video RTP uses the fixed 90,000 Hz media clock. Every packet of one frame
 /// shares a timestamp and the timestamp advances by `ticksPerFrame` between
-/// frames (90,000 / frame rate; the default 3,000 is 30 fps). This slice
-/// sends one complete encoded frame per packet, so `next()` advances both the
-/// sequence and the timestamp per call; MTU packetization with shared
-/// timestamps is a later, separate boundary. Initial values are always
-/// injected by the caller — production from a secure random source, tests
-/// from fixed values.
+/// frames (90,000 / frame rate; the default 3,000 is 30 fps). A frame that
+/// exceeds the path MTU occupies several packets, so `nextFrame(fragmentCount:)`
+/// reserves one timestamp plus a contiguous run of sequence numbers for the
+/// whole frame; `next()` remains the single-packet case. Initial values are
+/// always injected by the caller — production from a secure random source,
+/// tests from fixed values.
+///
+/// Boundary honesty: this is RTP bookkeeping only. No video capture, encoder,
+/// receive, or render path exists in this repository.
 public struct DiscordVoiceVideoRTPClock: Equatable, Sendable {
     public static let sampleRate: UInt32 = 90_000
     /// 30 fps at the 90 kHz video clock.
@@ -471,6 +484,26 @@ public struct DiscordVoiceVideoRTPClock: Equatable, Sendable {
     public mutating func next() -> DiscordVoiceRTPClockTick {
         let tick = DiscordVoiceRTPClockTick(sequence: sequence, timestamp: timestamp)
         sequence &+= 1
+        timestamp &+= ticksPerFrame
+        return tick
+    }
+
+    /// Reserves the RTP position of one whole frame that will be sent as
+    /// `fragmentCount` packets: the returned tick is the base sequence number
+    /// and the single timestamp every fragment of the frame carries. The
+    /// sequence advances by exactly `fragmentCount` (wrapping) so the next
+    /// frame starts after this frame's last fragment, while the timestamp
+    /// advances by one frame, not one packet.
+    ///
+    /// The bound is `UInt16.max` because the sequence space is 16 bits: a
+    /// frame that claimed more positions than the space holds would alias its
+    /// own fragments. Callers fail closed rather than truncate.
+    public mutating func nextFrame(fragmentCount: Int) throws -> DiscordVoiceRTPClockTick {
+        guard (1...Int(UInt16.max)).contains(fragmentCount) else {
+            throw DiscordVoiceRTPError.invalidFragmentCount(fragmentCount)
+        }
+        let tick = DiscordVoiceRTPClockTick(sequence: sequence, timestamp: timestamp)
+        sequence &+= UInt16(fragmentCount)
         timestamp &+= ticksPerFrame
         return tick
     }
