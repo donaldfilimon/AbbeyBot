@@ -23,7 +23,7 @@ enum AbbeyEntry {
             do {
                 try await AbbeyCLIMain.main(arguments: [program] + rest)
             } catch {
-                fputs("abbey failed: \(error)\n", stderr)
+                Self.writeStandardError("abbey failed: \(error)\n")
                 Foundation.exit(1)
             }
         case "help", "-h", "--help":
@@ -33,12 +33,11 @@ enum AbbeyEntry {
                 Self.runDesktop()
             }
         default:
-            fputs(
+            Self.writeStandardError(
                 """
                 error: unknown command '\(args[0])'
                 \(Self.usage)
-                """,
-                stderr
+                """
             )
             Foundation.exit(2)
         }
@@ -49,16 +48,26 @@ enum AbbeyEntry {
         #if ABBEY_HAS_DESKTOP
         AbbeyDesktopMain.main()
         #else
-        fputs(
+        Self.writeStandardError(
             """
             error: desktop UI requires the full package graph (no ABBEY_PACKAGE_ROLE=server).
             Use: swift run AbbeyBot serve
                  swift run AbbeyBot cli
-            """,
-            stderr
+            """
         )
         Foundation.exit(2)
         #endif
+    }
+
+    /// Write to stderr without touching the C `stderr` global.
+    ///
+    /// Glibc declares `extern FILE *stderr;` — a *mutable* global, which Swift 6 strict
+    /// concurrency rejects ("reference to var 'stderr' is not concurrency-safe"). musl
+    /// declares `extern FILE *const stderr;`, so the same code compiles under the static
+    /// Linux (musl) SDK and only fails on the glibc/bookworm image CI uses. Route through
+    /// `FileHandle.standardError` instead, matching `AbbeyServerMain`.
+    private static func writeStandardError(_ message: String) {
+        FileHandle.standardError.write(Data(message.utf8))
     }
 
     private static var usage: String {

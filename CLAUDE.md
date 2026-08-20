@@ -19,7 +19,11 @@ bash Scripts/run-web-smoke.sh      # dashboard lint + tests + production build
 bash Scripts/run-smoke.sh          # desktop build/test/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + Postgres (compose) or sqlite fallback + GET /health
 bash Scripts/run-cli-smoke.sh      # abbey CLI boot + DATABASE_URL isolation
+bash Scripts/check-server-snapshot.sh # server graph under a swiftly nightly (builds + runs CI's four test filters)
+bash Scripts/check-server-linux.sh    # server graph CROSS-COMPILED for Linux (musl static SDK; product only, no tests)
 ```
+
+`check-server-linux.sh` is the fast way to catch a Linux-only break without an ~18-minute Actions round trip, but it is musl while CI is glibc, and it cannot compile test targets (the Static Linux SDK ships no `Testing`/`XCTest`). Read the "Server-graph Linux cross-compile" section in AGENTS.md before trusting a green run from it.
 
 Five test targets: `AbbeyCoreTests`, `AbbeyCLITests`, `AbbeyServerKitTests`, `AbbeyServerTests` (HTTP-level via `VaporTesting`), `AbbeyBotAppTests`. The first four are what Linux CI runs; `AbbeyBotAppTests` needs the desktop target and therefore macOS + Xcode.
 

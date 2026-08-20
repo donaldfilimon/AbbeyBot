@@ -26,6 +26,8 @@ bash Scripts/run-web-smoke.sh      # SPA lint/test/build + packed-resource asser
 bash Scripts/run-smoke.sh          # all five Swift test bundles + desktop build/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
 bash Scripts/run-cli-smoke.sh      # abbey CLI boot + DATABASE_URL isolation
+bash Scripts/check-server-snapshot.sh # server graph under a swiftly nightly (builds + runs CI's four test filters)
+bash Scripts/check-server-linux.sh    # server graph cross-compiled for Linux (musl static SDK; product only, no tests)
 bash Scripts/verify-all.sh         # all gates
 ```
 
@@ -51,6 +53,19 @@ CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run s
 `bash Scripts/check-server-snapshot.sh` builds and tests the **server** graph (`ABBEY_PACKAGE_ROLE=server`) locally under a swiftly-managed Swift development snapshot, mirroring the Linux CI job: resolve → `swift build --product AbbeyBot` → the four CI test filters (`AbbeyServerKitTests` with `DATABASE_URL=sqlite://memory`; the other three without it, exactly like CI). It auto-picks the newest installed `main-snapshot-*` (override: `ABBEY_SNAPSHOT_TOOLCHAIN=...`), selects it **per-invocation only** via swiftly's `+toolchain` selector, writes each gate's output to a log, and echoes the real exit code per gate. Build scratch lives under `${TMPDIR}` like the other scripts.
 
 Hard rules: the swiftly global default is never changed, and **desktop work must never use snapshot toolchains** — the desktop target REQUIRES the Xcode toolchain (SwiftData macros and codesigning break under DEVELOPMENT-SNAPSHOT toolchains). This script exists only so server-graph changes can be checked against the same nightly-6.4.x-line compiler CI uses without waiting on Docker/Actions.
+
+### Server-graph Linux cross-compile
+
+`bash Scripts/check-server-linux.sh` **cross-compiles** the server graph for Linux on this Mac, so a "Darwin provides something Linux does not" break is found in minutes instead of ~18 per Actions round trip. This machine has no container runtime (no `docker`/`colima`/`podman`), so a swift.org **Static Linux SDK** is the mechanism. Gates: `package resolve` → `swift build --product AbbeyBot` → a `glibc-divergence` static lint. Same conventions as the snapshot script: pinned per-invocation `+toolchain`, a log per gate, real exit codes echoed, scratch under `${TMPDIR}`, exit 69 when the toolchain or SDK is missing.
+
+Setup is in the script's header and is a one-time cost: `swiftly install main-snapshot-2026-07-11`, then download `swift-DEVELOPMENT-SNAPSHOT-2026-07-11-a_static-linux-0.1.0.artifactbundle.tar.gz` from `download.swift.org`, `gpg --verify` it against `https://swift.org/keys/all-keys.asc` (expect "Swift Automatic Signing Key #4"), and `swift sdk install` it. **The SDK version must match the toolchain version** — that is why the toolchain is hard-pinned here rather than auto-picked like the snapshot script does; pairing the newest installed snapshot with an older SDK fails confusingly at build time. Overrides: `ABBEY_LINUX_TOOLCHAIN`, `ABBEY_LINUX_SWIFT_SDK`, `ABBEY_LINUX_SDK_BUNDLE`.
+
+**Two limits, both load-bearing — this script does not predict CI on its own:**
+
+- **musl, not glibc.** The Static Linux SDK is musl; CI's `swiftlang/swift:nightly-6.4.x-bookworm` is glibc. The gap is not theoretical: glibc declares `extern FILE *stderr;` (mutable global → Swift 6 strict concurrency rejects every reference) while musl declares `extern FILE *const stderr;` (a `let`, compiles clean). A musl-green build hid exactly that break in `Sources/AbbeyEntry/main.swift`. The `glibc-divergence` gate statically flags references to `stdin`/`stdout`/`stderr` (use `FileHandle.standardError`/`.standardOutput` instead) and warns about `canImport(Glibc)` branches that lack a `canImport(Musl)` companion, since this SDK does not compile them.
+- **No tests.** The Static Linux SDK ships no `Testing` and no `XCTest` module, so `swift build --build-tests` cannot even compile the test targets. Test sources are covered natively by `check-server-snapshot.sh`.
+
+The two scripts are **complementary, not redundant**: snapshot = macOS host, nightly compiler, builds *and runs* the four CI test filters; linux = real Linux target, product graph only. Neither is the gate of record.
 
 **`.swift-version` is machine-local and gitignored — never commit it.** On macOS dev machines keep an untracked `.swift-version` containing `xcode` at the repo root: it pins swiftly-proxied `swift` to the Xcode toolchain, which protects the desktop path (do NOT rely on the swiftly global default for this — on the primary dev machine that default is a main snapshot, not xcode). It must not be tracked because `xcode` is a macOS-only swiftly selector: on Linux a committed copy breaks every swiftly-proxied invocation (`ABBEY_SWIFT=swiftly bash Scripts/run-abbey.sh` → "version xcode ... doesn't match any of the installed toolchains"). Linux checkouts simply have no `.swift-version` and fall back to that machine's swiftly default; CI uses the Docker image and never consults swiftly. `check-server-snapshot.sh` is unaffected either way — its explicit `+toolchain` selector overrides `.swift-version`. If a branch has committed `.swift-version` (e.g. the phase-4 voice branch), drop it at reconcile with `git rm --cached .swift-version` — the local file stays on disk.
 
