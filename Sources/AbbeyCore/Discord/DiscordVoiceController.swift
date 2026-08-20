@@ -913,12 +913,18 @@ public actor DiscordVoiceController {
     /// of being discarded; discarding it let `setMicrophoneEnabled` go on to
     /// publish an enabled microphone over an already-failed loop.
     private func handleCaptureLoopTerminal(generation localGeneration: UInt64) {
-        guard generation == localGeneration else { return }
-        guard microphoneEnabled else {
-            if captureStartInFlightGeneration == localGeneration {
-                captureTerminalDuringStart = true
-            }
+        switch terminalDisposition(
+            generation: localGeneration,
+            laneIsActive: microphoneEnabled,
+            startInFlightGeneration: captureStartInFlightGeneration
+        ) {
+        case .ignore:
             return
+        case .recordForResumingStart:
+            captureTerminalDuringStart = true
+            return
+        case .settle:
+            break
         }
         microphoneEnabled = false
         failure = .captureUnavailable
@@ -991,16 +997,66 @@ public actor DiscordVoiceController {
     /// drops to inactive and the failure is operator-visible; the established
     /// signaling session is left up.
     private func handleReceiveLoopTerminal(generation localGeneration: UInt64) {
-        guard generation == localGeneration else { return }
-        guard receiveActive else {
-            if receiveStartInFlightGeneration == localGeneration {
-                receiveTerminalDuringStart = true
-            }
+        switch terminalDisposition(
+            generation: localGeneration,
+            laneIsActive: receiveActive,
+            startInFlightGeneration: receiveStartInFlightGeneration
+        ) {
+        case .ignore:
             return
+        case .recordForResumingStart:
+            receiveTerminalDuringStart = true
+            return
+        case .settle:
+            break
         }
         receiveActive = false
         failure = .receiveUnavailable
         publishUnlessSuperseded()
+    }
+
+    /// What a lane must do with a terminal event that just arrived.
+    private enum TerminalDisposition {
+        /// A superseded generation, or a lane that is neither active nor
+        /// starting. Nothing to record, nothing to settle.
+        case ignore
+        /// The lane has not finished starting, so settling now would be
+        /// overwritten by the start that is still in flight. The caller records
+        /// the verdict in its own `…TerminalDuringStart` flag and the resuming
+        /// start honors it.
+        case recordForResumingStart
+        /// The lane is live: fail it closed and publish.
+        case settle
+    }
+
+    /// The half of terminal handling that capture and receive genuinely share:
+    /// deciding whether a terminal event can be acted on yet.
+    ///
+    /// This exists to stop a third lane from re-deriving it. Receive's handler
+    /// was written by copying capture's by eye, and that copy-by-eye habit is
+    /// what reintroduced two already-fixed bugs in the video send path on
+    /// 2026-08-20. The subtle part is the middle case: a terminal event can beat
+    /// the controller's own `start` continuation — a source may hand back an
+    /// already-finished stream, or a first send may fail immediately — and at
+    /// that moment the lane still reads inactive. Discarding the event there let
+    /// the resuming start publish an enabled lane over an already-failed loop.
+    ///
+    /// Deliberately synchronous and non-mutating: a suspension point here would
+    /// reopen the exact race `…TerminalDuringStart` exists to close, and leaving
+    /// the mutation at the call sites keeps each lane's state changes visible
+    /// where they happen rather than hidden behind this helper.
+    private func terminalDisposition(
+        generation localGeneration: UInt64,
+        laneIsActive: Bool,
+        startInFlightGeneration: UInt64?
+    ) -> TerminalDisposition {
+        guard generation == localGeneration else { return .ignore }
+        guard laneIsActive else {
+            return startInFlightGeneration == localGeneration
+                ? .recordForResumingStart
+                : .ignore
+        }
+        return .settle
     }
 
     /// Watches the live gateway session and drives the bounded full-reconnect
