@@ -136,6 +136,76 @@ struct DiscordVoiceUDPDiscoveryTests {
         await server.stop()
     }
 
+    @Test func realLoopbackDroppedResponseTimesOutAndCallerRetrySucceeds() async throws {
+        let ssrc: UInt32 = 93
+        let drops = UDPFirstRequestDropper()
+        let server = try await LoopbackUDPServer.start { request in
+            #expect(request == DiscordVoiceUDPDiscoveryCodec.encodeRequest(ssrc: ssrc))
+            guard await drops.shouldRespond() else { return nil }
+            return makeResponse(
+                ssrc: ssrc,
+                address: Array("198.51.100.7".utf8),
+                port: 40_000
+            )
+        }
+        defer { server.stopEventually() }
+
+        // Induced loss: the one-shot client has no in-call retransmit; the lost response
+        // surfaces as a bounded timeout and retry is the caller's decision.
+        await expectDiscoveryError(.timeout) {
+            try await DiscordVoiceUDPDiscoveryClient(
+                configuration: .init(timeout: .milliseconds(100))
+            ).discover(serverAddress: "127.0.0.1", serverPort: server.port, ssrc: ssrc)
+        }
+
+        let result = try await DiscordVoiceUDPDiscoveryClient(
+            configuration: .init(timeout: .seconds(2))
+        ).discover(serverAddress: "127.0.0.1", serverPort: server.port, ssrc: ssrc)
+        #expect(result == .init(address: "198.51.100.7", port: 40_000))
+        #expect(await drops.requestCount() == 2)
+        await server.stop()
+    }
+
+    @Test func realLoopbackTruncatedResponseFailsClosed() async throws {
+        let ssrc: UInt32 = 94
+        let server = try await LoopbackUDPServer.start { _ in
+            Array(
+                makeResponse(
+                    ssrc: ssrc,
+                    address: Array("127.0.0.1".utf8),
+                    port: 50_000
+                ).dropLast()
+            )
+        }
+        defer { server.stopEventually() }
+
+        await expectDiscoveryError(.invalidPacketSize) {
+            try await DiscordVoiceUDPDiscoveryClient(
+                configuration: .init(timeout: .seconds(2))
+            ).discover(serverAddress: "127.0.0.1", serverPort: server.port, ssrc: ssrc)
+        }
+        await server.stop()
+    }
+
+    @Test func realLoopbackMismatchedSSRCResponseFailsClosed() async throws {
+        let ssrc: UInt32 = 95
+        let server = try await LoopbackUDPServer.start { _ in
+            makeResponse(
+                ssrc: ssrc &+ 1,
+                address: Array("127.0.0.1".utf8),
+                port: 50_000
+            )
+        }
+        defer { server.stopEventually() }
+
+        await expectDiscoveryError(.ssrcMismatch) {
+            try await DiscordVoiceUDPDiscoveryClient(
+                configuration: .init(timeout: .seconds(2))
+            ).discover(serverAddress: "127.0.0.1", serverPort: server.port, ssrc: ssrc)
+        }
+        await server.stop()
+    }
+
     @Test func realLoopbackCancellationClosesOwnedResources() async throws {
         let requestSeen = UDPRequestGate()
         let server = try await LoopbackUDPServer.start { _ in
@@ -312,6 +382,19 @@ private actor UDPServerStopGate {
         guard !stopping else { return false }
         stopping = true
         return true
+    }
+}
+
+private actor UDPFirstRequestDropper {
+    private var requestsSeen = 0
+
+    func shouldRespond() -> Bool {
+        requestsSeen += 1
+        return requestsSeen > 1
+    }
+
+    func requestCount() -> Int {
+        requestsSeen
     }
 }
 

@@ -90,8 +90,25 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       scripted transports (`DiscordVoiceGatewayResumeHarness`); full `AbbeyCoreTests` 312 green.
       Still open in this bullet: controller-level full-reconnect fallback is NOT auto-triggered —
       `DiscordVoiceController.reconnect()` exists and is tested but nothing invokes it on session
-      failure; induced UDP loss/reorder, invalid-session, channel-move, and process-shutdown
+      failure; invalid-session, channel-move, and process-shutdown
       verification remain unattempted; live-network resume evidence stays operator-blocked.)*
+      *(PARTIAL 2026-08-20 — induced UDP loss/reorder verified at the UDP layer only, via
+      hermetic 127.0.0.1 loopback fault injection — this is LOCAL loopback evidence, not
+      live-network evidence. Six new tests in `DiscordVoiceUDPSessionTests` /
+      `DiscordVoiceUDPDiscoveryTests`: (1) dropped discovery response → bounded timeout, no
+      in-call retransmit, session returns to `.open`, and a caller-driven retry completes on the
+      SAME socket/source port (NAT-mapping invariant), plus the one-shot client equivalent;
+      (2) truncated (73-byte) and SSRC-mismatched discovery responses fail closed
+      (`invalidPacketSize` / `ssrcMismatch`) while preserving the socket for a later intact
+      response, in both session and client; (3) duplicated + reordered media datagrams are
+      delivered exactly as received — the session deliberately does no dedupe/reorder/replay
+      handling (RTP sequence numbers and SRTP replay protection above it own that), and a late
+      duplicate discovery response after readiness is opaque media-path bytes that do not disturb
+      state. No production code changes were needed — existing behavior held under all injected
+      faults. NOT covered here: loss/reorder during active encrypted RTP flow end-to-end through
+      the controller/media plane (owned by PR #61's layer), gateway-driven re-discovery after
+      loss, and any live-network UDP evidence. Gate: full `AbbeyCoreTests` 320 green +
+      `check-static-security.sh` STATIC_SECURITY_GREEN.)*
 - [ ] Expand `/voice` and the Discord SwiftUI surface with honest connection phases, guild/channel
       selection, join/leave/status, mute/deafen, PTT/VAD, device/volume controls, speaking meters,
       reconnect/error visibility, stage-channel state, permission preflight, privacy policy, and an
