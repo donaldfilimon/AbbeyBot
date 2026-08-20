@@ -279,7 +279,7 @@ status: in_progress
   packetization, rendering, or live evidence; no capability advertisement changed.
 
 ## Cross-platform server-graph toolchain parity (swiftly snapshot)
-status: in_progress
+status: done
 - Goal: local development gets a first-class swiftly-managed Swift 6.4/6.5 development-snapshot
   path for the server graph (AbbeyCore/AbbeyServerKit/AbbeyServer/AbbeyCLI under
   `ABBEY_PACKAGE_ROLE=server`), matching CI's `swiftlang/swift:nightly-6.4.x-bookworm` Linux image
@@ -301,6 +301,12 @@ status: in_progress
   platform parity, and it cannot catch Linux-only breakage. The very next CI run proved that: the
   `FoundationNetworking` failure was invisible to this gate. Docker/Linux remains the only real
   check for that class.
+- **Closed 2026-08-20.** Every acceptance criterion is met and verified on `main`:
+  `Scripts/check-server-snapshot.sh` present and executable, AGENTS.md documents the path,
+  `.swift-version` gitignored and untracked, Xcode desktop build still green (3622/3622 targets).
+  Scope note so this is not over-read later: this goal was always *toolchain* parity and delivered
+  exactly that. It is explicitly NOT platform parity and cannot catch Linux-only breakage — which
+  is why "Make the Linux CI job actually pass" is a separate, still-open goal.
 
 ## Make the Linux CI job actually pass
 status: in_progress
