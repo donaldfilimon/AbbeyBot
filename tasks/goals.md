@@ -209,6 +209,22 @@ status: in_progress
   terminal" would have killed receive on the first normal RTCP receiver report, because Discord
   multiplexes RTP/RTX/RTCP on one socket. Corrected to: terminal only for unparseable framing
   claiming the audio payload type.
+- **SSRC ownership landed 2026-08-20 (`a3635ba`) — half the receive wiring.** The receive path
+  needs a `senderID` for DAVE's per-participant ratchet, and inbound Speaking (opcode 5) is the
+  only place Discord sends `ssrc` and `user_id` together. The model already carried both fields;
+  the session's inbound switch was dropping `.speaking` through `default: break`, decoding the
+  information and discarding it. The session now records it, bounded at 256 and refusing new
+  SSRCs when full rather than evicting arbitrarily, evicted per-user on Client Disconnect, and
+  cleared in `clearEphemeralState` so no attribution survives into a later connection.
+  Looking the SSRC up from an *unauthenticated* header is safe: a wrong answer cannot leak audio,
+  it just fails that participant's ratchet and counts a drop. Both tests red-proved; restored
+  source byte-identical by sha256. AbbeyCoreTests 405/405.
+  **Gotcha worth remembering:** `senderID(forSSRC:)` must stay `async`. A non-`async` method does
+  not win as the witness for an `async` protocol requirement, so the extension's nil default
+  silently shadows it — no compile error, receive simply never learns a sender.
+  **Still not end to end:** the adapter conforming the media plane to
+  `DiscordVoiceAudioFrameDecoder` is the remaining seam. Nothing calls receive in production and
+  no audio is heard.
 
 ## Complete Discord video and Go Live
 status: in_progress
