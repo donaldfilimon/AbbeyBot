@@ -278,6 +278,126 @@ struct DiscordVoiceUDPSessionTests {
         await server.stop()
     }
 
+    @Test("A dropped discovery response times out and a caller retry reuses the same socket")
+    func discoveryLossRetryReusesSocket() async throws {
+        let ssrc: UInt32 = 61
+        let server = try await PersistentUDPTestServer.start(
+            discoverySSRC: ssrc,
+            respondToDiscovery: false
+        )
+        defer { server.stopEventually() }
+        let session = makeSession(serverPort: server.port)
+
+        try await session.open()
+        // Induced loss: the server receives the request and drops the response. The session
+        // performs no in-call retransmit; it fails closed on the deadline and returns to .open.
+        let firstDeadline = ContinuousClock().now.advanced(by: .milliseconds(100))
+        await expectDiscoveryError(.timeout) {
+            try await session.discover(ssrc: ssrc, deadline: firstDeadline)
+        }
+        #expect(await session.snapshot().state == .open)
+        await server.observation.waitForDiscovery()
+        let portAfterLoss = await server.observation.observedSourcePorts().discovery
+
+        // Caller-driven retry must reuse the identical socket: the NAT mapping Discord reports
+        // belongs to this source port, so a rebind would invalidate the discovery result.
+        await server.setRespondToDiscovery(true)
+        let discovery = try await session.discover(ssrc: ssrc)
+        #expect(portAfterLoss != nil)
+        #expect(discovery.port == UInt16(portAfterLoss ?? 0))
+        #expect(await session.snapshot().state == .ready)
+
+        await session.close()
+        await server.stop()
+    }
+
+    @Test("Truncated and SSRC-corrupted discovery responses fail closed and keep the socket")
+    func discoveryCorruptionFailsClosed() async throws {
+        let ssrc: UInt32 = 62
+        let server = try await PersistentUDPTestServer.start(
+            discoverySSRC: ssrc,
+            respondToDiscovery: false
+        )
+        defer { server.stopEventually() }
+        let session = makeSession(serverPort: server.port)
+
+        try await session.open()
+        // This first, deliberately dropped attempt teaches the server the client's address so
+        // fault datagrams can be injected from the configured remote below.
+        let firstDeadline = ContinuousClock().now.advanced(by: .milliseconds(100))
+        await expectDiscoveryError(.timeout) {
+            try await session.discover(ssrc: ssrc, deadline: firstDeadline)
+        }
+
+        // Truncation: one byte short of the fixed 74-byte packet is rejected outright.
+        let truncated = Array(
+            makePersistentDiscoveryResponse(ssrc: ssrc, observedPort: 50_000).dropLast()
+        )
+        try await server.sendFromConfiguredSocket(truncated)
+        try await waitUntil { await session.snapshot().queuedDatagrams == 1 }
+        await expectDiscoveryError(.invalidPacketSize) {
+            try await session.discover(ssrc: ssrc)
+        }
+        #expect(await session.snapshot().state == .open)
+
+        // Corruption: a well-formed response for the wrong SSRC is rejected, not adopted.
+        try await server.sendFromConfiguredSocket(
+            makePersistentDiscoveryResponse(ssrc: ssrc &+ 1, observedPort: 50_000)
+        )
+        try await waitUntil { await session.snapshot().queuedDatagrams == 1 }
+        await expectDiscoveryError(.ssrcMismatch) {
+            try await session.discover(ssrc: ssrc)
+        }
+        #expect(await session.snapshot().state == .open)
+
+        // The preserved socket still completes discovery once an intact response arrives.
+        await server.setRespondToDiscovery(true)
+        _ = try await session.discover(ssrc: ssrc)
+        #expect(await session.snapshot().state == .ready)
+
+        await session.close()
+        await server.stop()
+    }
+
+    @Test("Duplicated and reordered datagrams are delivered exactly as received")
+    func duplicatedAndReorderedReceivePath() async throws {
+        let ssrc: UInt32 = 63
+        let server = try await PersistentUDPTestServer.start(discoverySSRC: ssrc)
+        defer { server.stopEventually() }
+        let session = makeSession(serverPort: server.port)
+
+        try await session.open()
+        _ = try await session.discover(ssrc: ssrc)
+
+        // The UDP session must not mask network reordering or duplication: RTP sequence numbers
+        // and SRTP replay protection above this layer own dedupe/reorder, so delivery order must
+        // equal arrival order with duplicates intact.
+        let arrivalOrder: [[UInt8]] = [
+            [0x80, 0x02], // second packet arrives first
+            [0x80, 0x01], // first packet arrives late
+            [0x80, 0x01], // then a duplicate of it
+            [0x80, 0x03],
+        ]
+        for datagram in arrivalOrder {
+            try await server.sendFromConfiguredSocket(datagram)
+        }
+        var delivered: [[UInt8]] = []
+        for _ in arrivalOrder {
+            delivered.append(try await session.receiveProtectedPacket())
+        }
+        #expect(delivered == arrivalOrder)
+
+        // A duplicated discovery response arriving after readiness is opaque media-path bytes;
+        // rejecting it belongs to the RTP/crypto layer, and it must not disturb session state.
+        let lateDiscovery = makePersistentDiscoveryResponse(ssrc: ssrc, observedPort: 50_000)
+        try await server.sendFromConfiguredSocket(lateDiscovery)
+        #expect(try await session.receiveProtectedPacket() == lateDiscovery)
+        #expect(await session.snapshot().state == .ready)
+
+        await session.close()
+        await server.stop()
+    }
+
     private func makeSession(
         serverPort: Int,
         timeout: Duration = .seconds(2)
