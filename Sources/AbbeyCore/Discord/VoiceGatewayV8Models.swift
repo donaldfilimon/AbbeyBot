@@ -502,7 +502,9 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
     case heartbeat(VoiceGatewayV8Heartbeat)
     case speaking(VoiceGatewayV8Speaking)
     case resume(VoiceGatewayV8Resume)
-    /// Video state announcement (signaling only; no media path exists).
+    /// Video state announcement. Sent by the native media plane's
+    /// announcement-before-send obligation ahead of outbound video packets;
+    /// no capture, encoder, or receive path exists behind it.
     case video(VoiceGatewayV8Video)
     /// Desired remote media stream quality (signaling only).
     case mediaSinkWants(VoiceGatewayV8MediaSinkWants)

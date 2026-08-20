@@ -141,6 +141,26 @@ status: in_progress
   This is signaling and local-preview proof only: source selection UX, negotiated codec/RTP,
   remote rendering, DAVE video-frame transport, fault/performance coverage, and live camera plus
   Go Live evidence remain open, so this goal remains `in_progress`.
+- **Video send-boundary composition 2026-08-20 (extends audio Phase 5 to `.video`):**
+  `DiscordVoiceNativeMediaPlane.sendVideoFrame(encodedFrame:)` now composes the same protected
+  send path the audio Phase 5 slice proved, for one already-encoded video frame: the installed
+  `NativeDAVESession.protect(...)` with the video frame type and negotiated codec label, a
+  90 kHz `DiscordVoiceVideoRTPClock`, the negotiated video RTP payload type with the marker bit
+  set on the frame boundary, the shared single-owner `DiscordVoiceTransportEncryption` AEAD
+  counter, and the retained UDP transport. `installVideoSource(...)` binds a video SSRC only
+  from the existing bounded Ready allocation models (`VoiceGatewayV8VideoSSRCAllocation`) —
+  clients never invent SSRCs — and `DiscordVoiceGatewaySession` now sends the real Opcode 12
+  announcement through `machine.videoAnnouncement(_:)` (validated against Ready) exactly once
+  before the first video packet, the announcement-before-media analogue of Speaking. Fail-closed
+  everywhere: no DAVE attestation → no video source and no send; missing/failed announcement
+  callback, empty frames, foreign allocations, unmapped codecs (Opus/H.265), protect failures,
+  and reset-mid-send all throw with nothing reaching the socket, proven by one composition test
+  and eight dedicated fail-closed tests mirroring the audio Phase 5 style. **This closes the
+  outbound video send-path composition boundary only.** Nothing in production calls
+  `sendVideoFrame`; there is no camera/screen capture wiring into it, no video encoder, no
+  completed codec negotiation, no packetization/pacing/RTX, no receive/render path, no
+  congestion/fault/perf coverage, and no live camera or Go Live evidence — no capability
+  advertisement changed. The goal remains `in_progress`.
 - **`/goal continue` 2026-08-04: deliberately deferred, not stopped.** This pass's audio-side
   Phase 5 slice (see the voice-audio goal above) is actively composing the production call site for
   `NativeDAVESession.protect(...)` and the AEAD/RTP send path in the same files this goal's DAVE

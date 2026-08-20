@@ -395,6 +395,410 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await plane.snapshot().isInstalled == false)
     }
 
+    // MARK: - Video send boundary (Phase 5 pattern extended to .video)
+
+    @Test(
+        "sendVideoFrame threads real DAVE video protection, 90 kHz RTP framing with the negotiated payload type and marker, and the shared AEAD counter through the retained transport, after the Opcode 12 announcement"
+    )
+    func sendVideoFrameComposesTheFullSendPath() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let speaking = SpeakingSignalRecorder()
+        let announcements = VideoAnnouncementRecorder()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log,
+            // Fixed seed: install() consumes it for the audio clock and
+            // installVideoSource() for the video clock, so every packet's
+            // sequence/timestamp in this test is deterministic.
+            makeRTPClockSeed: { (5_000, 90_000) }
+        )
+        await plane.attachSpeakingSignal { try await speaking.signal() }
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 40, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        let receiver = try receiverTransport()
+        let rtpCodec = try DiscordVoiceRTPCodec()
+
+        // One audio frame first: audio and video share one transport
+        // encryption instance, so their AEAD nonce counters must come from
+        // the same never-reused sequence.
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 9))
+        #expect(trailingCounter(await log.sentPackets[0]) == 0)
+
+        for frameIndex in 0..<3 {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: frameIndex))
+
+            // The Opcode 12 announcement fired exactly once, before the first
+            // video packet, carrying the server-assigned allocation.
+            #expect(await announcements.callCount == 1)
+            let announced = try #require(await announcements.announcements.first)
+            #expect(announced.audioSSRC == 0x1111_1111)
+            #expect(announced.videoSSRC == 0x2222_2222)
+            #expect(announced.streams.count == 1)
+            #expect(await speaking.callCount == 1)
+
+            let sent = await log.sentPackets
+            #expect(sent.count == frameIndex + 2)
+            let wirePacket = sent[frameIndex + 1]
+
+            // Shared transport: video counters continue after the audio one.
+            #expect(trailingCounter(wirePacket) == UInt32(frameIndex + 1))
+
+            let opened = try await receiver.open(wirePacket)
+            let header = try rtpCodec.decodeHeader(from: opened)
+            #expect(header.ssrc == 0x2222_2222)
+            #expect(header.payloadType == DiscordVoiceRTPHeader.discordVideoVP8PayloadType)
+            #expect(header.marker == true)
+            #expect(header.sequence == 5_000 &+ UInt16(frameIndex))
+            #expect(header.timestamp == 90_000 &+ UInt32(frameIndex) &* 3_000)
+
+            let layout = try rtpCodec.plaintextLayout(in: opened)
+            let payload = Array(opened[layout.payloadRange])
+            let expected = await daveSession.lastProtectedFrame
+            let rawInput = await daveSession.lastProtectInputFrame
+            #expect(await daveSession.protectCallCount == frameIndex + 2)
+            #expect(await daveSession.lastProtectedSSRC == 0x2222_2222)
+            #expect(await daveSession.lastProtectedMediaType == .video)
+            #expect(await daveSession.lastProtectedCodec == .vp8)
+            #expect(payload == Array(expected ?? Data()))
+            // The wire payload is DAVE's output, never the raw encoded frame
+            // a bypass would have sent instead.
+            #expect(!(rawInput ?? Data()).isEmpty)
+            #expect(payload != Array(rawInput ?? Data()))
+        }
+
+        // Teardown drops the video source with the generation; nothing more
+        // can reach the socket.
+        await plane.reset()
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.mediaNotInstalled) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 9))
+        }
+        #expect(await log.sentPackets.count == 4)
+        #expect(await announcements.callCount == 1)
+    }
+
+    @Test("sendVideoFrame fails closed and sends nothing without an installed generation")
+    func sendVideoFrameFailsClosedWithoutInstall() async throws {
+        let log = NativeMediaDatagramDouble()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { nil },
+            datagramTransport: log
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.mediaNotInstalled) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+    }
+
+    @Test("sendVideoFrame fails closed and sends nothing without an installed video source")
+    func sendVideoFrameFailsClosedWithoutVideoSource() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 41, daveProtocolVersion: 1)
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceNotInstalled) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await daveSession.protectCallCount == 0)
+    }
+
+    @Test("video source install and send both fail closed when DAVE was never attested — no transport-only video path exists")
+    func videoSourceRequiresDAVE() async throws {
+        let log = NativeMediaDatagramDouble()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { nil },
+            datagramTransport: log
+        )
+        let capabilities = try await plane.install(
+            makeCapability(generation: 42, daveProtocolVersion: 0)
+        )
+        #expect(capabilities.dave == false)
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.daveProtectionRequired) {
+            try await plane.installVideoSource(
+                allocation: makeVideoAllocation(),
+                activeRIDs: ["100"],
+                codec: .vp8
+            )
+        }
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.daveProtectionRequired) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+    }
+
+    @Test("installVideoSource rejects foreign allocations and non-video codecs")
+    func installVideoSourceRejectsInvalidSources() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 43, daveProtocolVersion: 1)
+        )
+
+        // An allocation whose audio SSRC is not this connection's cannot bind.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceInvalid) {
+            try await plane.installVideoSource(
+                allocation: makeVideoAllocation(audioSSRC: 0x9999_9999),
+                activeRIDs: ["100"],
+                codec: .vp8
+            )
+        }
+        // Opus is not a video codec; H.265 has no modeled payload type.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceInvalid) {
+            try await plane.installVideoSource(
+                allocation: makeVideoAllocation(),
+                activeRIDs: ["100"],
+                codec: .opus
+            )
+        }
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceInvalid) {
+            try await plane.installVideoSource(
+                allocation: makeVideoAllocation(),
+                activeRIDs: ["100"],
+                codec: .h265
+            )
+        }
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceNotInstalled) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+    }
+
+    @Test("sendVideoFrame rejects an empty frame before reserving any state")
+    func sendVideoFrameRejectsEmptyFrame() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 44, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoFrameInvalid) {
+            try await plane.sendVideoFrame(encodedFrame: Data())
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await announcements.callCount == 0)
+        #expect(await daveSession.protectCallCount == 0)
+    }
+
+    @Test("sendVideoFrame fails closed and sends nothing when the Opcode 12 announcement fails")
+    func sendVideoFrameFailsClosedWhenAnnouncementFails() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        await announcements.markShouldFail()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 45, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoAnnouncementSignalFailed) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await daveSession.protectCallCount == 0)
+        #expect(await announcements.callCount == 1)
+    }
+
+    @Test("sendVideoFrame fails closed without an attached announcement callback — the Opcode 12 obligation cannot be skipped")
+    func sendVideoFrameFailsClosedWithoutAnnouncementSignal() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 46, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoAnnouncementSignalFailed) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await daveSession.protectCallCount == 0)
+    }
+
+    @Test("sendVideoFrame fails closed and sends nothing when DAVE protection itself fails")
+    func sendVideoFrameFailsClosedWhenProtectionFails() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 47, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+        await daveSession.failNextProtect(with: TestDAVEProtectionFailure.injected)
+
+        await #expect(throws: TestDAVEProtectionFailure.injected) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+    }
+
+    @Test("sendVideoFrame calls the real native protect boundary and fails closed when it is not ready")
+    func sendVideoFrameFailsClosedOnRealUnreadyDAVESession() async throws {
+        let log = NativeMediaDatagramDouble()
+        let readyDouble = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let source = NativeDAVEMediaSessionSource(current: readyDouble)
+        let announcements = VideoAnnouncementRecorder()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { await source.provide() },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 48, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        // Swap in the genuine pinned-libdave binding, never activated. Its
+        // real `protect()` must fail closed on its own terms; nothing in the
+        // video send path may substitute a plaintext or double-supplied result.
+        let realUnreadySession = try NativeDAVESession(
+            protocolVersion: 1,
+            groupID: 91_001,
+            selfUserID: "91002"
+        )
+        await source.replace(with: realUnreadySession)
+
+        await #expect(throws: NativeMediaError.daveParticipantUnavailable) {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+    }
+
+    @Test("reset() during a suspended video send interrupts it and nothing reaches the retained transport")
+    func sendVideoFrameInterruptedByResetSendsNothing() async throws {
+        let log = NativeMediaDatagramDouble()
+        let bootstrapSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let sendSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let announcements = VideoAnnouncementRecorder()
+        // install() and sendVideoFrame() each call the provider once; only
+        // the second (send-time) call is gated, so install() itself never
+        // blocks on the gate.
+        let gate = SendPathGate(bootstrapSession: bootstrapSession, sendSession: sendSession)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { await gate.provide() },
+            datagramTransport: log
+        )
+        await plane.attachVideoAnnouncementSignal { try await announcements.signal($0) }
+        _ = try await plane.install(
+            makeCapability(generation: 49, daveProtocolVersion: 1)
+        )
+        try await plane.installVideoSource(
+            allocation: makeVideoAllocation(),
+            activeRIDs: ["100"],
+            codec: .vp8
+        )
+
+        let send = Task {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 0))
+        }
+        await gate.waitUntilRequested()
+        await plane.reset()
+        await gate.release()
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await send.value
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await sendSession.protectCallCount == 0)
+        #expect(await plane.snapshot().isInstalled == false)
+    }
+
+    private func fixedEncodedVideoFrame(seed: Int) -> Data {
+        Data((0..<321).map { index in
+            UInt8(truncatingIfNeeded: (index &* 31) &+ (seed &* 97) &+ 5)
+        })
+    }
+
+    private func makeVideoAllocation(
+        audioSSRC: UInt32 = 0x1111_1111,
+        videoSSRC: UInt32 = 0x2222_2222
+    ) throws -> VoiceGatewayV8VideoSSRCAllocation {
+        try VoiceGatewayV8VideoSSRCAllocation(
+            audioSSRC: audioSSRC,
+            streams: [
+                try VoiceGatewayV8Stream(
+                    type: "video",
+                    rid: "100",
+                    quality: 100,
+                    ssrc: videoSSRC,
+                    rtxSSRC: videoSSRC &+ 1
+                )
+            ]
+        )
+    }
+
     private func fixedPCMFrame(seed: Int) -> [Int16] {
         (0..<Opus20msCodec.interleavedSampleCount).map { index in
             Int16(truncatingIfNeeded: (index * 37) + (seed * 911) + 1)
@@ -507,6 +911,28 @@ private actor SpeakingSignalRecorder {
 }
 
 private enum TestSpeakingFailure: Error, Equatable {
+    case injected
+}
+
+private actor VideoAnnouncementRecorder {
+    private(set) var callCount = 0
+    private(set) var announcements: [VoiceGatewayV8Video] = []
+    private var shouldFail = false
+
+    func markShouldFail() {
+        shouldFail = true
+    }
+
+    func signal(_ announcement: VoiceGatewayV8Video) throws {
+        callCount += 1
+        announcements.append(announcement)
+        if shouldFail {
+            throw TestVideoAnnouncementFailure.injected
+        }
+    }
+}
+
+private enum TestVideoAnnouncementFailure: Error, Equatable {
     case injected
 }
 
