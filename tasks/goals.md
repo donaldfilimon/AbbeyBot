@@ -110,9 +110,12 @@ status: in_progress
   to stay clear of the three in-flight parallel agents. `awaitTermination()` on the session-client
   seam (default-inert for unaware clients), a generation-scoped post-ready monitor, and a bounded
   auto-rejoin budget (default 2, refilled only by a fresh operator join, exhaustion fails closed
-  as `.gatewayUnavailable`). Kick/move policy is structural, not close-code guessing: Discord-
-  authoritative removal clears the target and advances the generation through the bridge's leave
-  barrier, which inertly retires the monitor. Two real races were caught and fixed during
+  as `.gatewayUnavailable`). Kick/move policy: before any rejoin the fallback consults the pair
+  bridge's main-gateway presence evidence (`voicePresenceHeld()`, wired to
+  `DiscordBridge.voicePresenceState().confirmedInChannel`); a Discord-authoritative removal reads
+  as presence lost and fails closed instead of rejoining. (Review corrected an earlier claim that
+  the bridge clears the controller's target on removal — no such wiring exists; the presence gate
+  is the real mechanism.) Two real races were caught and fixed during
   verification: an actor-reentrancy stomp of `.failed` by the join tail (monitor now starts
   strictly after the ready transition) and a test-harness sleeper collision (credential-timeout
   race vs. backoff on one injected sleeper). Controller suite 22/22 ×10, AbbeyCoreTests 317

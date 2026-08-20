@@ -309,14 +309,25 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 case .resumeAfterBackoff(let attempt):
                     do {
                         try await self.resumeBackoff.wait(attempt: attempt)
-                    } catch {
-                        // The only expected throw is cancellation from
-                        // `disconnect()`, which owns the remaining teardown.
-                        // Route through the cancellation branch so a spurious
-                        // backoff failure still leaves a coherent final state.
+                    } catch is CancellationError {
+                        // Cancellation comes from `disconnect()`, which owns
+                        // the remaining teardown; route through the
+                        // cancellation branch for a coherent final state.
                         _ = await self.transportDidFinish(
                             close: nil,
                             error: CancellationError(),
+                            generation: connectionGeneration
+                        )
+                        return
+                    } catch {
+                        // A non-cancellation backoff failure is a terminal
+                        // transport fault, NOT an operator disconnect — route
+                        // it through the credential-dropping teardown so
+                        // `awaitTermination()` reports it truthfully and the
+                        // controller's fallback can react.
+                        _ = await self.transportDidFinish(
+                            close: nil,
+                            error: error,
                             generation: connectionGeneration
                         )
                         return
@@ -452,6 +463,14 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         let failure = DiscordVoiceGatewaySessionError.disconnected
         await readySignal?.resolve(.failure(failure))
         await descriptionSignal?.resolve(.failure(failure))
+        // Resolve directly: the generation bump above means the cancelled
+        // transport loop's own `transportDidFinish` call fails its stale-
+        // generation guard and can never reach the resolving branch. Without
+        // this, every live-session operator disconnect left the signal
+        // pending forever — permanently suspending any `awaitTermination()`
+        // monitor and retaining this actor. `resolve` is idempotent, so the
+        // loop's own resolve (when it does run) stays a safe no-op.
+        await terminationSignal?.resolve(.success(false))
 
         let task = transportTask
         daveHandlingTask?.cancel()

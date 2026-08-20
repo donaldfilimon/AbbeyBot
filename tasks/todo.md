@@ -102,11 +102,14 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       test caught live). Unexpected termination triggers the existing `reconnect()` full rejoin
       through a bounded budget (`maximumAutoReconnectAttempts`, default 2, refilled only by a
       fresh operator join) with deterministic 1/2/4/8s-capped delays via the injected sleeper;
-      exhaustion fails closed as `.gatewayUnavailable`. Kick/move policy: Discord-authoritative
-      removal tears down through the bridge's leave barrier, clearing `target` and advancing the
-      generation, so the stale monitor's guards keep the fallback from ever fighting a
-      server-initiated removal — 4014 close-code discrimination is deliberately NOT attempted at
-      the session layer. Five controller tests (rejoin, operator-cause inertness, bounded
+      exhaustion fails closed as `.gatewayUnavailable`. Kick/move policy: before any rejoin the
+      fallback consults `voicePresenceHeld()` on the pair bridge (production adapter reads
+      `DiscordBridge.voicePresenceState().confirmedInChannel`); presence lost = Discord-initiated
+      removal = fail closed, never rejoin — 4014 close-code discrimination is deliberately NOT
+      attempted at the session layer. (Review pass corrected the original claim that the bridge
+      clears the controller target on removal; no such wiring exists, and the review also fixed a
+      live-disconnect leak where `terminationSignal` was never resolved because `disconnect()`
+      bumps the generation before the cancelled transport loop reports back.) Five controller tests (rejoin, operator-cause inertness, bounded
       exhaustion, budget refill, stale-monitor immunity), suite 22/22 stable across 10 runs after
       fixing a test-harness race (one injected sleeper drives both the credential-timeout race and
       the backoff — park timeout-sized sleeps, instant backoff sleeps). AbbeyCoreTests 317 green.

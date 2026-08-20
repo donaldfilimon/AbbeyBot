@@ -78,6 +78,9 @@ public protocol DiscordVoiceGatewayPairBridge: Sendable {
     func requestGatewayState(guildID: String, channelID: String) async throws
     func awaitGatewayPair() async throws -> DiscordVoiceGatewayPair
     func leaveVoice(guildID: String) async
+    /// See the protocol extension's default: main-gateway presence evidence
+    /// gating the controller's full-reconnect fallback.
+    func voicePresenceHeld() async -> Bool
 }
 
 public protocol DiscordVoiceGatewaySessionClient: Sendable {
@@ -96,6 +99,15 @@ public protocol DiscordVoiceGatewaySessionClient: Sendable {
 
 extension DiscordVoiceGatewaySessionClient {
     public func awaitTermination() async -> Bool { false }
+}
+
+extension DiscordVoiceGatewayPairBridge {
+    /// Whether the main gateway's authoritative self VOICE_STATE_UPDATE
+    /// evidence still shows the bot present in its voice channel. The
+    /// full-reconnect fallback consults this before any rejoin so it never
+    /// fights a Discord-initiated removal. The default reports `true`, which
+    /// preserves the fallback for bridges that carry no presence evidence.
+    public func voicePresenceHeld() async -> Bool { true }
 }
 
 public protocol DiscordVoiceUDPDiscoverySession: Sendable {
@@ -572,13 +584,16 @@ public actor DiscordVoiceController {
     }
 
     /// Watches the live gateway session and drives the bounded full-reconnect
-    /// fallback. Kick/move policy: Discord-authoritative removal reaches the
-    /// bridge as a self VOICE_STATE_UPDATE and tears the controller down
-    /// through its leave barrier, which clears `target` and advances the
-    /// generation — both guards in `sessionDidTerminate` then keep the stale
-    /// monitor inert, so this fallback can never fight a server-initiated
-    /// removal. Replaced monitors likewise exit through the same guards once
-    /// their session's teardown resolves.
+    /// fallback. Kick/move policy: before any rejoin, `sessionDidTerminate`
+    /// consults the pair bridge's main-gateway presence evidence
+    /// (`voicePresenceHeld()`). A Discord-authoritative removal — the bot's
+    /// own null-channel VOICE_STATE_UPDATE — reads as presence lost and the
+    /// fallback fails closed instead of rejoining, so it never fights a
+    /// server-initiated removal. (Nothing external mutates the controller's
+    /// `target`/`generation`; the presence gate, not any bridge-driven
+    /// teardown, is what makes kicks safe.) Replaced monitors retire inertly
+    /// through the generation and target guards once their session's
+    /// teardown resolves.
     private func startSessionMonitor(
         gateway: any DiscordVoiceGatewaySessionClient,
         generation localGeneration: UInt64
@@ -606,6 +621,14 @@ public actor DiscordVoiceController {
         // Deterministic bounded delay (1s, 2s, 4s, capped at 8s). A single
         // client needs no jitter; the budget cap prevents rejoin loops.
         try? await sleeper(.seconds(min(8, 1 << (attempt - 1))))
+        guard generation == localGeneration, target != nil else { return }
+        // Kick/move gate: if the main gateway no longer shows the bot in its
+        // channel, this termination was a Discord-initiated removal — never
+        // rejoin over the server's decision; surface it as a failure instead.
+        guard await bridge.voicePresenceHeld() else {
+            _ = await fail(.gatewayUnavailable, ifCurrent: localGeneration)
+            return
+        }
         guard generation == localGeneration, target != nil else { return }
         _ = await reconnect()
     }
@@ -656,6 +679,13 @@ public actor DiscordVoiceController {
     }
 
     private func invalidateAndDetach(clearTarget: Bool) -> DiscordVoiceDetachedSession {
+        // The monitor holds no teardown-bearing resources — it self-retires
+        // when its session's teardown resolves the termination signal, and
+        // the generation guard below makes any late verdict inert. Cancel is
+        // ownership hygiene, keeping the generation-scoped-task invariant
+        // visible rather than load-bearing.
+        sessionMonitorTask?.cancel()
+        sessionMonitorTask = nil
         generation &+= 1
         acceptsFrames = false
         microphoneEnabled = false

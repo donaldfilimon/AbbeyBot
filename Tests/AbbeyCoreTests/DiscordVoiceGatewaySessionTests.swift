@@ -1287,6 +1287,26 @@ struct DiscordVoiceGatewaySessionTests {
         await gateway.disconnect()
     }
 
+    @Test("operator disconnect of a LIVE session resolves awaitTermination as false")
+    func liveDisconnectResolvesTermination() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness)
+
+        // Regression guard: disconnect() bumps the generation before the
+        // cancelled transport loop reports back, so the loop's own
+        // transportDidFinish resolve can never run — disconnect() must
+        // resolve the termination signal itself or this await hangs forever.
+        let monitor = Task { await gateway.awaitTermination() }
+        await gateway.disconnect()
+        #expect(await monitor.value == false)
+        #expect(await gateway.snapshot().phase == .disconnected)
+    }
+
     @Test("explicit disconnect during the resume backoff wins and lands disconnected")
     func disconnectDuringResumeBackoff() async throws {
         let harness = DiscordVoiceGatewayResumeHarness()

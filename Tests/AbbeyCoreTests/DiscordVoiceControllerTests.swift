@@ -26,11 +26,16 @@ private actor VoiceControllerTestBridge: DiscordVoiceGatewayPairBridge {
     private(set) var requestCount = 0
     private(set) var pairCount = 0
     private(set) var leaveCount = 0
+    private var presenceHeld = true
 
     init(pairBehavior: PairBehavior = .immediate, failRequest: Bool = false) {
         self.pairBehavior = pairBehavior
         self.failRequest = failRequest
     }
+
+    func setPresenceHeld(_ held: Bool) { presenceHeld = held }
+
+    func voicePresenceHeld() async -> Bool { presenceHeld }
 
     func requestGatewayState(guildID: String, channelID: String) async throws {
         requestCount += 1
@@ -506,6 +511,19 @@ struct DiscordVoiceControllerTests {
         await gateway.terminate(unexpected: true)
         try await eventually { await gateway.connectCount == 4 }
         try await eventually { await controller.currentSnapshot().phase == .readyMuted }
+        await controller.shutdown()
+    }
+
+    @Test("Discord-authoritative removal (presence lost) is never fought — fallback fails closed")
+    func kickedRemovalDoesNotRejoin() async throws {
+        let (controller, gateway, bridge) = try makeTerminatingController()
+
+        _ = await controller.join(guildID: "guild", channelID: "channel")
+        await bridge.setPresenceHeld(false)
+        await gateway.terminate(unexpected: true)
+        try await eventually("kick fails closed") { await controller.currentSnapshot().phase == .failed }
+        #expect(await controller.currentSnapshot().failure == .gatewayUnavailable)
+        #expect(await gateway.connectCount == 1)
         await controller.shutdown()
     }
 

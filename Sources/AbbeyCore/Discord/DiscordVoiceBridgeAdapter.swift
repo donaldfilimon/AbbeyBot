@@ -26,6 +26,7 @@ public struct DiscordVoiceBridgeAdapter: DiscordVoiceGatewayPairBridge, Sendable
     private let requestImpl: @Sendable (String, String) async -> DiscordVoiceGatewayPairRequestOutcome
     private let consumeImpl: @Sendable (VoiceGatewayHandshake.Generation) async -> VoiceGatewayHandshake.Credentials?
     private let leaveImpl: @Sendable (String) async -> Void
+    private let presenceImpl: @Sendable () async -> Bool
     private let pollInterval: Duration
     private let sleeper: Sleeper
     private let attempts: DiscordVoiceJoinAttemptBroker
@@ -43,6 +44,13 @@ public struct DiscordVoiceBridgeAdapter: DiscordVoiceGatewayPairBridge, Sendable
         self.leaveImpl = { guildID in
             _ = await bridge.leaveVoiceAndWaitForAcknowledgement(guildId: guildID)
         }
+        self.presenceImpl = {
+            // Discord's own self VOICE_STATE_UPDATE echo is the authority:
+            // a kick or channel removal clears the bridge's confirmed
+            // presence, which the controller's reconnect fallback reads as
+            // "do not rejoin".
+            await bridge.voicePresenceState().confirmedInChannel
+        }
         self.pollInterval = max(.milliseconds(1), pollInterval)
         self.sleeper = { duration in
             try await Task.sleep(for: duration)
@@ -55,14 +63,20 @@ public struct DiscordVoiceBridgeAdapter: DiscordVoiceGatewayPairBridge, Sendable
         sleeper: @escaping Sleeper = { duration in try await Task.sleep(for: duration) },
         request: @escaping @Sendable (String, String) async -> DiscordVoiceGatewayPairRequestOutcome,
         consume: @escaping @Sendable (VoiceGatewayHandshake.Generation) async -> VoiceGatewayHandshake.Credentials?,
-        leave: @escaping @Sendable (String) async -> Void
+        leave: @escaping @Sendable (String) async -> Void,
+        presence: @escaping @Sendable () async -> Bool = { true }
     ) {
         self.requestImpl = request
         self.consumeImpl = consume
         self.leaveImpl = leave
+        self.presenceImpl = presence
         self.pollInterval = max(.milliseconds(1), pollInterval)
         self.sleeper = sleeper
         self.attempts = DiscordVoiceJoinAttemptBroker()
+    }
+
+    public func voicePresenceHeld() async -> Bool {
+        await presenceImpl()
     }
 
     public func requestGatewayState(guildID: String, channelID: String) async throws {
