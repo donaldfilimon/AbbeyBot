@@ -330,20 +330,200 @@ private struct VoiceControllerTestFactory: DiscordVoiceSessionFactory {
     func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession { udp }
 }
 
+/// Gateway whose `awaitTermination` is driven by the test: each join's monitor
+/// takes one waiter, and `terminate(unexpected:)` resolves the oldest waiter
+/// (or queues the verdict if the monitor has not registered yet).
+private actor VoiceControllerTerminatingGateway: DiscordVoiceGatewaySessionClient {
+    private(set) var connectCount = 0
+    private(set) var disconnectCount = 0
+    private var terminationWaiters: [CheckedContinuation<Bool, Never>] = []
+    private var pendingTerminations: [Bool] = []
+
+    func connect(using pair: DiscordVoiceGatewayPair) async throws -> DiscordVoiceGatewayTransportReady {
+        connectCount += 1
+        return .init(
+            address: "127.0.0.1",
+            port: 5_000,
+            ssrc: 42,
+            encryptionModes: ["aead_xchacha20_poly1305_rtpsize"]
+        )
+    }
+
+    func selectTransport(_ endpoint: DiscordVoiceDiscoveredEndpoint) async throws {}
+
+    func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities {
+        .init(dave: true, aead: true, opus: true)
+    }
+
+    func disconnect() async {
+        disconnectCount += 1
+    }
+
+    func awaitTermination() async -> Bool {
+        if !pendingTerminations.isEmpty { return pendingTerminations.removeFirst() }
+        return await withCheckedContinuation { continuation in
+            terminationWaiters.append(continuation)
+        }
+    }
+
+    func terminate(unexpected: Bool) {
+        if terminationWaiters.isEmpty {
+            pendingTerminations.append(unexpected)
+        } else {
+            terminationWaiters.removeFirst().resume(returning: unexpected)
+        }
+    }
+}
+
+private struct VoiceControllerTerminatingFactory: DiscordVoiceSessionFactory {
+    let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability = .fullyWired
+    let gateway: VoiceControllerTerminatingGateway
+    let udp: VoiceControllerTestUDP
+
+    func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient { gateway }
+    func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession { udp }
+}
+
 @Suite("Discord Voice Controller")
 struct DiscordVoiceControllerTests {
     private func configuration(
         timeout: Duration = .seconds(5),
         snapshotLimit: Int = 8,
         audioCapacity: Int = 2,
-        videoCapacity: Int = 2
+        videoCapacity: Int = 2,
+        maxAutoReconnectAttempts: Int = 2
     ) throws -> DiscordVoiceControllerConfiguration {
         try .init(
             credentialTimeout: timeout,
             snapshotBufferLimit: snapshotLimit,
             audioQueueCapacity: audioCapacity,
-            videoQueueCapacity: videoCapacity
+            videoQueueCapacity: videoCapacity,
+            maximumAutoReconnectAttempts: maxAutoReconnectAttempts
         )
+    }
+
+    private func eventually(
+        attempts: Int = 1_000,
+        _ label: String = "condition",
+        _ predicate: @escaping @Sendable () async -> Bool
+    ) async throws {
+        for _ in 0..<attempts {
+            if await predicate() { return }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        Issue.record("Not satisfied before timeout: \(label)")
+        throw VoiceControllerTestError.failed
+    }
+
+    private func makeTerminatingController(
+        maxAutoReconnectAttempts: Int = 2
+    ) throws -> (DiscordVoiceController, VoiceControllerTerminatingGateway, VoiceControllerTestBridge) {
+        let bridge = VoiceControllerTestBridge()
+        let gateway = VoiceControllerTerminatingGateway()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: VoiceControllerTerminatingFactory(
+                gateway: gateway,
+                udp: VoiceControllerTestUDP()
+            ),
+            configuration: configuration(
+                timeout: .seconds(60),
+                maxAutoReconnectAttempts: maxAutoReconnectAttempts
+            ),
+            // The controller threads ONE sleeper through both the credential
+            // timeout and the reconnect backoff. Park timeout-sized sleeps so
+            // the immediate pair always wins its race; let backoff-sized
+            // sleeps (≤ 8s) return instantly so reconnects run without delay.
+            sleeper: { duration in
+                if duration >= .seconds(60) {
+                    try await Task.sleep(for: .seconds(3_600))
+                }
+            }
+        )
+        return (controller, gateway, bridge)
+    }
+
+    @Test("Unexpected session termination triggers a full rejoin of the same target")
+    func unexpectedTerminationReconnects() async throws {
+        let (controller, gateway, bridge) = try makeTerminatingController()
+
+        let joined = await controller.join(guildID: "guild", channelID: "channel")
+        #expect(joined.phase == .readyMuted)
+        #expect(await gateway.connectCount == 1)
+
+        await gateway.terminate(unexpected: true)
+        try await eventually { await gateway.connectCount == 2 }
+        try await eventually { await controller.currentSnapshot().phase == .readyMuted }
+        #expect(await bridge.requestCount == 2)
+        #expect(await controller.currentSnapshot().generation > joined.generation)
+        await controller.shutdown()
+    }
+
+    @Test("Operator-caused termination never triggers the fallback")
+    func explicitTerminationDoesNotReconnect() async throws {
+        let (controller, gateway, _) = try makeTerminatingController()
+
+        _ = await controller.join(guildID: "guild", channelID: "channel")
+        await gateway.terminate(unexpected: false)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(await gateway.connectCount == 1)
+        #expect(await controller.currentSnapshot().phase == .readyMuted)
+        await controller.shutdown()
+    }
+
+    @Test("Auto-reconnect budget is bounded; exhaustion fails closed as gatewayUnavailable")
+    func reconnectBudgetExhaustionFailsClosed() async throws {
+        let (controller, gateway, _) = try makeTerminatingController(maxAutoReconnectAttempts: 1)
+
+        _ = await controller.join(guildID: "guild", channelID: "channel")
+        await gateway.terminate(unexpected: true)
+        try await eventually("first rejoin connect") { await gateway.connectCount == 2 }
+        try await eventually("first rejoin ready") { await controller.currentSnapshot().phase == .readyMuted }
+
+        await gateway.terminate(unexpected: true)
+        try await eventually("exhaustion fails closed") { await controller.currentSnapshot().phase == .failed }
+        #expect(await controller.currentSnapshot().failure == .gatewayUnavailable)
+        #expect(await gateway.connectCount == 2)
+        await controller.shutdown()
+    }
+
+    @Test("A fresh operator join refills the auto-reconnect budget")
+    func freshJoinRefillsReconnectBudget() async throws {
+        let (controller, gateway, _) = try makeTerminatingController(maxAutoReconnectAttempts: 1)
+
+        _ = await controller.join(guildID: "guild", channelID: "channel")
+        await gateway.terminate(unexpected: true)
+        try await eventually { await gateway.connectCount == 2 }
+        try await eventually { await controller.currentSnapshot().phase == .readyMuted }
+
+        _ = await controller.join(guildID: "guild", channelID: "channel")
+        try await eventually { await gateway.connectCount == 3 }
+        // The replaced generation's monitor resolves during that join's
+        // teardown; drain it as the explicit disconnect it is before driving
+        // the fresh generation's monitor.
+        await gateway.terminate(unexpected: false)
+
+        await gateway.terminate(unexpected: true)
+        try await eventually { await gateway.connectCount == 4 }
+        try await eventually { await controller.currentSnapshot().phase == .readyMuted }
+        await controller.shutdown()
+    }
+
+    @Test("A stale monitor from a replaced generation cannot reconnect or fail the new session")
+    func staleMonitorIsIgnored() async throws {
+        let (controller, gateway, _) = try makeTerminatingController()
+
+        _ = await controller.join(guildID: "guild", channelID: "channel")
+        _ = await controller.join(guildID: "guild", channelID: "other-channel")
+        try await eventually { await gateway.connectCount == 2 }
+
+        // Resolves the FIRST join's monitor: its generation is stale, so the
+        // unexpected verdict must be ignored outright.
+        await gateway.terminate(unexpected: true)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(await gateway.connectCount == 2)
+        #expect(await controller.currentSnapshot().phase == .readyMuted)
+        await controller.shutdown()
     }
 
     @Test("Unavailable production adapter stops honestly at media unavailable")

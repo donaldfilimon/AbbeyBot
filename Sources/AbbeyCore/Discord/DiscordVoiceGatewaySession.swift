@@ -146,6 +146,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private var daveMembershipTask: Task<Void, Never>?
     private var readySignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceGatewayTransportReady>?
     private var descriptionSignal: DiscordVoiceGatewaySessionSignal<DiscordVoiceMediaCapabilities>?
+    private var terminationSignal: DiscordVoiceGatewaySessionSignal<Bool>?
     private var selectedMode: DiscordVoiceTransportMode?
     private var negotiatedDAVEProtocolVersion: Int?
     private var daveTransitionState: VoiceGatewayDAVETransitionStateMachine
@@ -253,6 +254,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         let descriptionSignal = DiscordVoiceGatewaySessionSignal<DiscordVoiceMediaCapabilities>()
         self.readySignal = readySignal
         self.descriptionSignal = descriptionSignal
+        terminationSignal = DiscordVoiceGatewaySessionSignal<Bool>()
         machine = VoiceGatewayV8StateMachine(identity: identity)
         // Re-attach every connect() so a reused session's callback always
         // closes over the current generation rather than a stale one.
@@ -420,6 +422,14 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         return lastCapabilities
     }
 
+    /// Suspends until the current connection leaves service. `true` = terminal
+    /// transport failure after the buffered-resume budget is spent; `false` =
+    /// operator disconnect (or no connection was ever started).
+    public func awaitTermination() async -> Bool {
+        guard let terminationSignal else { return false }
+        return (try? await terminationSignal.value()) ?? false
+    }
+
     public func disconnect() async {
         if transportTask == nil {
             generation &+= 1
@@ -429,6 +439,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             let failure = DiscordVoiceGatewaySessionError.disconnected
             await readySignal?.resolve(.failure(failure))
             await descriptionSignal?.resolve(.failure(failure))
+            await terminationSignal?.resolve(.success(false))
             await mediaPlane.reset()
             await cancelDAVEHandling()
             clearEphemeralState(finalPhase: .disconnected)
@@ -1146,6 +1157,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             let failure = DiscordVoiceGatewaySessionError.disconnected
             await readySignal?.resolve(.failure(failure))
             await descriptionSignal?.resolve(.failure(failure))
+            await terminationSignal?.resolve(.success(false))
             phase = .disconnected
             return .stop
         }
@@ -1202,6 +1214,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         }
         await readySignal?.resolve(.failure(failure))
         await descriptionSignal?.resolve(.failure(failure))
+        await terminationSignal?.resolve(.success(true))
         // Drop credentials, transport key material, and completed signals as
         // soon as the socket is no longer usable. Callers already waiting on a
         // signal retain only their resolved result long enough to observe the

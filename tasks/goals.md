@@ -105,6 +105,20 @@ status: in_progress
   in-log evidence). Explicitly NOT closed: automatic controller-level full-reconnect
   (`DiscordVoiceController.reconnect()` remains production-uninvoked), induced UDP/invalid-session/
   channel-move/shutdown verification, and live-network resume evidence (operator-blocked).
+- **`/goal continue` 2026-08-20 ~03:00 (third pass): controller full-reconnect fallback landed** —
+  the reconnect/resume residual's second half, in worktree `codex/voice-reconnect-fallback-20260820`
+  to stay clear of the three in-flight parallel agents. `awaitTermination()` on the session-client
+  seam (default-inert for unaware clients), a generation-scoped post-ready monitor, and a bounded
+  auto-rejoin budget (default 2, refilled only by a fresh operator join, exhaustion fails closed
+  as `.gatewayUnavailable`). Kick/move policy is structural, not close-code guessing: Discord-
+  authoritative removal clears the target and advances the generation through the bridge's leave
+  barrier, which inertly retires the monitor. Two real races were caught and fixed during
+  verification: an actor-reentrancy stomp of `.failed` by the join tail (monitor now starts
+  strictly after the ready transition) and a test-harness sleeper collision (credential-timeout
+  race vs. backoff on one injected sleeper). Controller suite 22/22 ×10, AbbeyCoreTests 317
+  green. Reconnect/resume is now Current at both layers (in-session buffered resume + controller
+  full rejoin); still open in that todo bullet: induced UDP loss/reorder, invalid-session,
+  channel-move, process-shutdown verification, and operator-blocked live evidence.
 - **`/goal continue` 2026-08-20 ~02:55 (second pass, parallel dispatch):** unbroke the red linux CI
   job first — `web/bun.lock` is lockfileVersion 2 (bun 1.4.0) while CI pinned bun 1.2.19, and the
   "Test dashboard SPA" step ran `bun test` (bun's own runner, no `vi.stubGlobal`/DOM) against vitest

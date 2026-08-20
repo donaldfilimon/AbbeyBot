@@ -85,6 +85,17 @@ public protocol DiscordVoiceGatewaySessionClient: Sendable {
     func selectTransport(_ endpoint: DiscordVoiceDiscoveredEndpoint) async throws
     func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities
     func disconnect() async
+    /// Suspends until the session leaves service. `true` means the session
+    /// terminated unexpectedly (terminal transport failure after its own
+    /// buffered-resume budget is spent); `false` means an operator-requested
+    /// disconnect. The default reports `false` immediately, which keeps the
+    /// controller's full-reconnect fallback inert for clients that cannot
+    /// distinguish termination causes.
+    func awaitTermination() async -> Bool
+}
+
+extension DiscordVoiceGatewaySessionClient {
+    public func awaitTermination() async -> Bool { false }
 }
 
 public protocol DiscordVoiceUDPDiscoverySession: Sendable {
@@ -177,16 +188,27 @@ public struct DiscordVoiceControllerConfiguration: Equatable, Sendable {
     public let snapshotBufferLimit: Int
     public let audioQueueCapacity: Int
     public let videoQueueCapacity: Int
+    /// Full-rejoin budget per operator-initiated join. Spent only by
+    /// unexpected session terminations; zero disables the fallback so every
+    /// unexpected termination fails closed immediately.
+    public let maximumAutoReconnectAttempts: Int
 
     public init(
         credentialTimeout: Duration = .seconds(10),
         snapshotBufferLimit: Int = 32,
         audioQueueCapacity: Int = 64,
-        videoQueueCapacity: Int = 4
+        videoQueueCapacity: Int = 4,
+        maximumAutoReconnectAttempts: Int = 2
     ) throws {
         guard credentialTimeout > .zero else {
             throw DiscordVoiceMediaContractError.invalidCredentialTimeout
         }
+        guard (0...10).contains(maximumAutoReconnectAttempts) else {
+            throw DiscordVoiceMediaContractError.invalidAutoReconnectAttempts(
+                maximumAutoReconnectAttempts
+            )
+        }
+        self.maximumAutoReconnectAttempts = maximumAutoReconnectAttempts
         guard snapshotBufferLimit > 0 else {
             throw DiscordVoiceMediaContractError.invalidQueueCapacity(snapshotBufferLimit)
         }
@@ -285,6 +307,8 @@ public actor DiscordVoiceController {
     private var acceptsFrames = false
     private var nextTeardownID: UInt64 = 0
     private var teardownTasks: [UInt64: Task<Void, Never>] = [:]
+    private var autoReconnectAttempts = 0
+    private var sessionMonitorTask: Task<Void, Never>?
 
     private var microphoneEnabled = false
     private var cameraEnabled = false
@@ -338,6 +362,9 @@ public actor DiscordVoiceController {
         let prior = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
         enqueueTeardown(prior)
+        // A fresh operator-initiated join refills the full-reconnect budget;
+        // reconnect() deliberately does not.
+        autoReconnectAttempts = 0
         let localGeneration = beginGeneration(
             target: DiscordVoiceJoinTarget(guildID: guildID, channelID: channelID),
             initialPhase: .requestingGatewayState
@@ -534,7 +561,53 @@ public actor DiscordVoiceController {
         cameraEnabled = false
         screenShareEnabled = false
         transition(to: .readyMuted)
+        // Started strictly AFTER the ready transition, with no suspension
+        // point between: a termination verdict that is already pending can
+        // therefore only be acted on once this join has fully returned, and
+        // can never be overwritten by this method's own tail. (Starting the
+        // monitor earlier let an interleaved `fail()` be stomped back to
+        // `.readyMuted` — caught by the budget-exhaustion test.)
+        startSessionMonitor(gateway: gateway, generation: localGeneration)
         return makeSnapshot()
+    }
+
+    /// Watches the live gateway session and drives the bounded full-reconnect
+    /// fallback. Kick/move policy: Discord-authoritative removal reaches the
+    /// bridge as a self VOICE_STATE_UPDATE and tears the controller down
+    /// through its leave barrier, which clears `target` and advances the
+    /// generation — both guards in `sessionDidTerminate` then keep the stale
+    /// monitor inert, so this fallback can never fight a server-initiated
+    /// removal. Replaced monitors likewise exit through the same guards once
+    /// their session's teardown resolves.
+    private func startSessionMonitor(
+        gateway: any DiscordVoiceGatewaySessionClient,
+        generation localGeneration: UInt64
+    ) {
+        sessionMonitorTask = Task { [weak self] in
+            let unexpected = await gateway.awaitTermination()
+            await self?.sessionDidTerminate(
+                unexpected: unexpected,
+                generation: localGeneration
+            )
+        }
+    }
+
+    private func sessionDidTerminate(
+        unexpected: Bool,
+        generation localGeneration: UInt64
+    ) async {
+        guard generation == localGeneration, unexpected, target != nil else { return }
+        guard autoReconnectAttempts < configuration.maximumAutoReconnectAttempts else {
+            _ = await fail(.gatewayUnavailable, ifCurrent: localGeneration)
+            return
+        }
+        autoReconnectAttempts += 1
+        let attempt = autoReconnectAttempts
+        // Deterministic bounded delay (1s, 2s, 4s, capped at 8s). A single
+        // client needs no jitter; the budget cap prevents rejoin loops.
+        try? await sleeper(.seconds(min(8, 1 << (attempt - 1))))
+        guard generation == localGeneration, target != nil else { return }
+        _ = await reconnect()
     }
 
     private func awaitPairWithTimeout() async -> DiscordVoicePairRaceResult {
