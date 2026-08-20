@@ -241,6 +241,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         self.readySignal = readySignal
         self.descriptionSignal = descriptionSignal
         machine = VoiceGatewayV8StateMachine(identity: identity)
+        // Re-attach every connect() so a reused session's callback always
+        // closes over the current generation rather than a stale one.
+        await mediaPlane.attachSpeakingSignal { [weak self] in
+            guard let self else { throw DiscordVoiceGatewaySessionError.disconnected }
+            try await self.sendSpeakingSignal(generation: connectionGeneration)
+        }
         selectedMode = nil
         negotiatedDAVEProtocolVersion = nil
         daveTransitionState.reset()
@@ -1014,6 +1020,21 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             }
             try await clock.sleep(milliseconds: delay)
         }
+    }
+
+    /// Invoked by the media plane immediately before its first protected
+    /// packet of a generation. A stale generation, disconnect, or missing
+    /// session fails closed so a superseded connection cannot emit Speaking
+    /// on behalf of a newer (or torn-down) one.
+    private func sendSpeakingSignal(generation connectionGeneration: UInt64) async throws {
+        guard generation == connectionGeneration,
+              !disconnectRequested,
+              phase == .established,
+              let activeSession,
+              let machine
+        else { throw DiscordVoiceGatewaySessionError.staleConnection }
+        let outbound = try machine.speaking(flags: 1)
+        try await send(outbound, through: activeSession)
     }
 
     private func send(

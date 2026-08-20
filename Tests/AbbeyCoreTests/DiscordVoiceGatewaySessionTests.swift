@@ -1183,6 +1183,39 @@ struct DiscordVoiceGatewaySessionTests {
         }
     }
 
+    @Test("an established session sends Speaking through the media plane's callback, and a stale callback fails closed")
+    func speakingSignalSendsThroughGatewayAndFailsClosedWhenStale() async throws {
+        let plane = DiscordVoiceGatewaySpeakingSignalCapturingPlane()
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            mediaPlane: plane
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 0)
+
+        // Nothing sends Speaking on its own; only the media plane's send path
+        // (not exercised by signaling alone) triggers it.
+        #expect(await harness.sentOpcodes() == [0, 1])
+
+        let signal = try #require(await plane.capturedSignal())
+        try await signal()
+
+        #expect(await harness.sentOpcodes() == [0, 1, 5])
+        #expect(await harness.sentInteger(opcode: 5, key: "ssrc") == 44)
+        #expect(await harness.sentInteger(opcode: 5, key: "speaking") == 1)
+
+        // A second, later call is not itself deduplicated by the gateway (the
+        // media plane's own one-shot-per-generation gate owns that); what the
+        // gateway must guarantee is that it never emits Speaking on behalf of
+        // a torn-down or superseded connection.
+        await gateway.disconnect()
+        await #expect(throws: (any Error).self) {
+            try await signal()
+        }
+        #expect(await harness.sentOpcodes() == [0, 1, 5])
+    }
+
     private func pair(token: String = "ephemeral-voice-token") -> DiscordVoiceGatewayPair {
         DiscordVoiceGatewayPair(
             endpoint: "voice.example.test",
@@ -1553,6 +1586,30 @@ private actor DiscordVoiceGatewayMediaPlaneRecorder: DiscordVoiceMediaPlane {
     }
 
     func installation() -> DiscordVoiceGatewayMediaInstallation? { installed }
+}
+
+/// Captures the Speaking callback `connect()` attaches instead of exercising
+/// it, so a test can invoke it directly and assert what the gateway does
+/// with it — independent of any native media-plane send path.
+private actor DiscordVoiceGatewaySpeakingSignalCapturingPlane: DiscordVoiceMediaPlane {
+    nonisolated let aes256GCMAvailable = false
+    private var signal: (@Sendable () async throws -> Void)?
+
+    func install(
+        _ capability: DiscordVoiceNegotiatedMediaCapability
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        DiscordVoiceMediaCapabilities(dave: false, aead: true, opus: true)
+    }
+
+    func reset() async {}
+
+    func attachSpeakingSignal(
+        _ signal: @escaping @Sendable () async throws -> Void
+    ) async {
+        self.signal = signal
+    }
+
+    func capturedSignal() -> (@Sendable () async throws -> Void)? { signal }
 }
 
 private actor DiscordVoiceGatewaySuspendedMediaPlane: DiscordVoiceMediaPlane {
