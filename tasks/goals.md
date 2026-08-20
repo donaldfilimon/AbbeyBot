@@ -179,6 +179,18 @@ status: in_progress
   its owner — note it independently landed the same `import Observation` fix, so it will conflict
   trivially on that file.
 
+- **Landed on `main` 2026-08-20 as `198e0a1`.** Everything from this session's branch plus the
+  sibling reconnect-fallback branch is now in `main`, verified together on the merge commit:
+  AbbeyCoreTests 340/340, AbbeyBotAppTests 74/74, AbbeyServerKitTests 117/117, native media gate
+  75 tests in 8 suites in debug AND release, `STATIC_SECURITY_GREEN`, `NATIVE_MEDIA_SMOKE_GREEN`,
+  all EXIT:0. Merging the two reconnect halves surfaced one real defect that neither branch hit
+  alone: the capture loop incremented `sentFrameCount` only after a post-send revision check, so a
+  `stop()` landing in that window un-counted a frame that had genuinely reached the wire (a flaky
+  native composition test, now fixed by counting on send success).
+  **Still open on this goal:** receive/playback, and the live join/speak/hear/reconnect/leave
+  evidence that remains operator-blocked. `mediaAdapterAvailability` is still `.unavailable` and
+  the advertised DAVE version is still 0 — composition is not interoperability.
+
 ## Complete Discord video and Go Live
 status: in_progress
 - Discord camera video and Go Live screen sharing are separate from the audio completion claim and
