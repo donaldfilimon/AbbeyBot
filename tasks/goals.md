@@ -389,7 +389,7 @@ status: done
   is why "Make the Linux CI job actually pass" is a separate, still-open goal.
 
 ## Make the Linux CI job actually pass
-status: in_progress
+status: done
 - **Discovered 2026-08-20:** the `Abbey CI` linux job has **not succeeded in any of the last 30
   runs, on any branch, including `main`.** It is not a regression from any one PR — the server
   graph (`ABBEY_PACKAGE_ROLE=server`: AbbeyCore/AbbeyServerKit/AbbeyServer/AbbeyCLI) simply does
@@ -414,6 +414,21 @@ status: in_progress
   visible `// glibc-divergence:ok` opt-out for deliberate non-Glibc branches.
   **The standing lesson:** a green musl cross-build is evidence about *musl*. Treat every new
   libc-adjacent construct as unproven for glibc until either the lint covers it or CI says so.
+- **DONE 2026-08-20 — acceptance met and OBSERVED, not inferred.** Run `32415037815` on
+  `caa1697` is `success`: AbbeyCoreTests 406/406, AbbeyCLITests 30/30, AbbeyServerKitTests
+  117/117, AbbeyServerTests 22/22, all on Linux. First green in this job's recorded history.
+  The last blocker was not the missing Leaf route (that was `252c08c`, which fixed macOS only
+  and left Linux red — a macOS-green result mistakenly reported as done). The real cause was
+  bundle-path resolution: every server path came from
+  `Bundle.module.resourceURL ?? bundleURL` + "Resources", a claim never tested on Linux, and
+  three things hid a wrong answer — `configure.swift` CREATED the missing public directory,
+  Leaf failed only at render time as a bare 500, and CI asserted `index.html` in the SOURCE
+  tree rather than the built bundle. Now the resources root is found by probing candidates for
+  one that exists, startup throws `AbbeyServerResourceError` naming every path it looked in,
+  and the failing assertion carries the status and body so the CI log can diagnose itself.
+- **Standing caveat, unchanged:** a green musl cross-build is evidence about musl only. Twice
+  this session it was green while a real glibc break was live. `check-server-linux.sh` covers
+  the product graph and cannot compile tests at all; CI remains the only authority.
 - **Acceptance:** one green linux run. Not claimable until observed — a clean audit is not a
   passing build, and this job has proven it hides breakage one file at a time.
 - **Known gap in local tooling:** `Scripts/check-server-snapshot.sh` gives toolchain parity on
