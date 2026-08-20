@@ -19,3 +19,8 @@ Sources/AbbeyServer/Resources/Public/
 .cursor/hooks/
 # Local deps (web/node_modules also in web/.gitignore; functions/ via functions/.gitignore)
 node_modules/
+# Machine-local swiftly pin. `xcode` is a macOS-only selector: committing it breaks every
+# swiftly-proxied swift invocation on Linux ("version xcode ... doesn't match any of the
+# installed toolchains"). Keep a local `.swift-version` containing `xcode` on macOS dev
+# machines (the desktop target requires the Xcode toolchain); never track it.
+.swift-version
