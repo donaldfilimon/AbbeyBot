@@ -792,6 +792,159 @@ struct VoiceGatewayV8VideoModelsTests {
         #expect(map.userID(forSSRC: 301) == "c")
     }
 
+    @Test(
+        "the Opcode 12 allocation gate compares both the primary and the RTX SSRC against Ready, so an explicit foreign rtx_ssrc never reaches the wire"
+    )
+    func videoAnnouncementValidatesRTXSSRCAgainstReady() throws {
+        let mode = "aead_xchacha20_poly1305_rtpsize"
+        // Ready assigns exactly one stream: primary 45, RTX 46.
+        let machine = try establishedMachine(
+            mode: mode,
+            readyStreams: [
+                try VoiceGatewayV8Stream(
+                    type: "video",
+                    rid: "100",
+                    quality: 100,
+                    ssrc: 45,
+                    rtxSSRC: 46
+                )
+            ]
+        )
+
+        // The server-assigned pair announces normally.
+        let assigned = try VoiceGatewayV8Video(
+            audioSSRC: 44,
+            videoSSRC: 45,
+            rtxSSRC: 46,
+            streams: [
+                try VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100, ssrc: 45, rtxSSRC: 46)
+            ]
+        )
+        guard case .video(let outbound) = try machine.videoAnnouncement(assigned) else {
+            Issue.record("Expected the assigned announcement to be accepted")
+            return
+        }
+        #expect(outbound.videoSSRC == 45)
+        #expect(outbound.rtxSSRC == 46)
+
+        // A Ready-assigned PRIMARY paired with an explicit RTX SSRC the voice
+        // server never assigned is rejected before Opcode 12 is emitted. This
+        // payload is well-formed on its own terms — `VoiceGatewayV8Video`
+        // accepts any self-consistent explicit `rtx_ssrc` — so only the
+        // Ready comparison can catch it.
+        let foreignRTX = try VoiceGatewayV8Video(
+            audioSSRC: 44,
+            videoSSRC: 45,
+            rtxSSRC: 900,
+            streams: [
+                try VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100, ssrc: 45, rtxSSRC: 900)
+            ]
+        )
+        #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            _ = try machine.videoAnnouncement(foreignRTX)
+        }
+
+        // Same smuggling attempt with only the per-stream RTX diverging while
+        // the top-level pair stays the assigned one.
+        let foreignStreamRTX = try VoiceGatewayV8Video(
+            audioSSRC: 44,
+            videoSSRC: 45,
+            rtxSSRC: nil,
+            streams: [
+                try VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100, ssrc: 45, rtxSSRC: 901)
+            ]
+        )
+        #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            _ = try machine.videoAnnouncement(foreignStreamRTX)
+        }
+
+        // A second Ready stream whose RTX SSRC is derived (ssrc + 1) rather
+        // than explicit is matched by the same rule: 47/48 is assigned, 47/99
+        // is not.
+        let derived = try establishedMachine(
+            mode: mode,
+            readyStreams: [
+                try VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100, ssrc: 47)
+            ]
+        )
+        let derivedMatch = try VoiceGatewayV8Video(
+            audioSSRC: 44,
+            videoSSRC: 47,
+            rtxSSRC: 48,
+            streams: [
+                try VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100, ssrc: 47, rtxSSRC: 48)
+            ]
+        )
+        _ = try derived.videoAnnouncement(derivedMatch)
+        let derivedMismatch = try VoiceGatewayV8Video(
+            audioSSRC: 44,
+            videoSSRC: 47,
+            rtxSSRC: 99,
+            streams: [
+                try VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100, ssrc: 47, rtxSSRC: 99)
+            ]
+        )
+        #expect(throws: VoiceGatewayV8Error.malformedPayload) {
+            _ = try derived.videoAnnouncement(derivedMismatch)
+        }
+
+        // Clearing video still needs no stream allocation.
+        let clearing = try VoiceGatewayV8Video(audioSSRC: 44, videoSSRC: 0, rtxSSRC: 0, streams: [])
+        _ = try machine.videoAnnouncement(clearing)
+    }
+
+    /// Drives a machine to `.established` with the given Ready stream
+    /// allocation so Opcode 12 validation can be exercised directly.
+    private func establishedMachine(
+        mode: String,
+        readyStreams: [VoiceGatewayV8Stream]
+    ) throws -> VoiceGatewayV8StateMachine {
+        let identity = try VoiceGatewayV8Identify(
+            serverID: "guild",
+            userID: "bot",
+            sessionID: "session",
+            token: "ephemeral-token",
+            video: true,
+            streams: [try VoiceGatewayV8Stream(type: "video", rid: "100")]
+        )
+        var machine = VoiceGatewayV8StateMachine(identity: identity)
+        try machine.opened()
+        _ = try machine.receive(
+            VoiceGatewayV8Inbound(
+                sequence: 1,
+                payload: .hello(try VoiceGatewayV8Hello(heartbeatInterval: 1_000))
+            ),
+            nowMilliseconds: 0
+        )
+        try machine.receive(
+            VoiceGatewayV8Inbound(
+                sequence: 2,
+                payload: .ready(try VoiceGatewayV8Ready(
+                    ssrc: 44,
+                    ip: "203.0.113.4",
+                    port: 50_000,
+                    modes: [mode],
+                    streams: readyStreams
+                ))
+            ),
+            nowMilliseconds: 1
+        )
+        _ = try machine.selectProtocol(address: "198.51.100.40", port: 63_040, mode: mode)
+        try machine.receive(
+            VoiceGatewayV8Inbound(
+                sequence: 3,
+                payload: .sessionDescription(try VoiceGatewayV8SessionDescription(
+                    mode: mode,
+                    secretKey: [UInt8](repeating: 7, count: 32),
+                    daveProtocolVersion: 0
+                ))
+            ),
+            nowMilliseconds: 2
+        )
+        #expect(machine.phase == .established)
+        return machine
+    }
+
     @Test("state machine applies video ownership and disconnect teardown")
     func stateMachineParticipantOwnershipLifecycle() throws {
         let identity = try VoiceGatewayV8Identify(

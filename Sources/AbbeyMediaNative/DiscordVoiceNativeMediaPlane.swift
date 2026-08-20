@@ -22,8 +22,10 @@ public enum DiscordVoiceNativeMediaPlaneError: Error, Equatable, Sendable,
     /// The Voice Gateway session's Speaking callback failed or was rejected;
     /// no packet is sent without a preceding Speaking signal.
     case speakingSignalFailed
-    /// The installed generation was superseded (reset or a new install) while
-    /// a send was suspended on native or transport work.
+    /// The installed generation was superseded (reset or a new install), or —
+    /// for a video send — the installed video source was superseded by a later
+    /// `installVideoSource(...)`, while a send was suspended on native or
+    /// transport work.
     case sendInterrupted
     /// A video send was requested before `installVideoSource(...)` bound a
     /// server-assigned video SSRC allocation to the installed generation.
@@ -201,6 +203,15 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     private var nextSendID: UInt64 = 0
     private var videoSource: InstalledVideoSource?
     private var videoClock: DiscordVoiceVideoRTPClock?
+    /// Video-source generation, bumped by every `installVideoSource(...)` and
+    /// by `clearRuntime()`. `revision` deliberately does NOT move when a video
+    /// source is replaced — that would fail audio sends that are legitimately
+    /// in flight — so `sendVideoFrame` carries this second counter and
+    /// re-checks it after every suspension. Without it a send suspended on its
+    /// Opcode 12 announcement or on DAVE work would pass every later
+    /// `requireCurrent` check and put a frame on the wire under the superseded
+    /// source's SSRC and codec.
+    private var videoRevision: UInt64 = 0
     private var videoAnnouncementSignal: (@Sendable (VoiceGatewayV8Video) async throws -> Void)?
 
 
@@ -555,8 +566,12 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     /// installed generation never attested a ready DAVE session, when the
     /// allocation belongs to a different connection (audio SSRC mismatch), or
     /// when the codec has no modeled Discord RTP payload type. Installing a
-    /// source re-arms the one-shot announcement obligation and seeds a fresh
-    /// 90 kHz video RTP clock.
+    /// source re-arms the one-shot announcement obligation, seeds a fresh
+    /// 90 kHz video RTP clock, and advances the video-source generation so any
+    /// `sendVideoFrame` still suspended on the superseded source fails closed
+    /// with `.sendInterrupted` instead of emitting a frame under the old SSRC
+    /// and codec. Audio sends in flight are deliberately untouched: they do
+    /// not depend on the video source.
     ///
     /// Boundary honesty: no camera/screen capture, video encoder, or codec
     /// negotiation exists behind this call — it only fixes which SSRC,
@@ -578,6 +593,10 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         }
         let payloadType = try Self.rtpPayloadType(for: codec)
         let announcement = try allocation.announcement(activeRIDs: activeRIDs)
+        // Every rejection above happens before the generation moves, so a
+        // refused install cannot interrupt sends against the source that is
+        // still legitimately installed.
+        videoRevision &+= 1
         let seed = makeRTPClockSeed()
         videoClock = try DiscordVoiceVideoRTPClock(
             initialSequence: seed.sequence,
@@ -603,9 +622,11 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     /// boundary (this slice sends one whole frame per packet; MTU
     /// packetization is a later boundary), the shared
     /// `DiscordVoiceTransportEncryption` AEAD counter, and the retained
-    /// datagram transport. The current revision is re-checked after every
-    /// suspension so a `reset()` or superseding `install(_:)` cannot let a
-    /// stale generation reach the socket.
+    /// datagram transport. Both the generation revision and the video-source
+    /// generation are re-checked after every suspension, so neither a
+    /// `reset()`/superseding `install(_:)` nor a superseding
+    /// `installVideoSource(...)` can let a stale generation or an obsolete
+    /// video SSRC and codec reach the socket.
     ///
     /// Fails closed, never falling back to unprotected media, when: no
     /// generation is installed, the installed generation never attested a
@@ -613,7 +634,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     /// the Opcode 12 announcement callback is missing or fails (Discord
     /// requires the announcement before video media — unlike Speaking there
     /// is no tolerated absent-callback path), DAVE protection fails, or the
-    /// installation is superseded mid-send.
+    /// installation or the installed video source is superseded mid-send.
     ///
     /// Boundary honesty: callers must supply frames already encoded by a
     /// negotiated codec. No capture pipeline, encoder, or codec negotiation
@@ -632,6 +653,11 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             throw DiscordVoiceNativeMediaPlaneError.videoFrameInvalid
         }
         let sendRevision = revision
+        // Reserved together with the tick below: this send is bound to the
+        // video source installed right now, and every suspension point below
+        // re-checks it so a superseding `installVideoSource(...)` cannot let
+        // this frame reach the socket under the obsolete SSRC and codec.
+        let sendVideoRevision = videoRevision
 
         // Reserve the RTP tick and the one-shot announcement obligation
         // synchronously, before this call's first `await`, exactly like the
@@ -656,11 +682,15 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             signal: boundAnnouncement,
             revision: sendRevision
         )
+        // `runOnce` re-checks `revision` itself but knows nothing about video
+        // sources, so the announcement suspension gets its own check here.
+        try requireCurrentVideoSource(sendVideoRevision)
 
         guard let daveSession = await daveSessionProvider() else {
             throw DiscordVoiceNativeMediaPlaneError.daveSessionUnavailable
         }
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        try requireCurrentVideoSource(sendVideoRevision)
 
         // DAVE protection is applied to the raw encoded frame before it ever
         // becomes an RTP body; nothing downstream can substitute plaintext.
@@ -671,6 +701,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             ssrc: videoSource.ssrc
         )
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        try requireCurrentVideoSource(sendVideoRevision)
 
         let header = try DiscordVoiceRTPHeader(
             marker: true,
@@ -684,6 +715,8 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
 
         let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        // Last gate before the packet is committed to the transport.
+        try requireCurrentVideoSource(sendVideoRevision)
 
         try await sendTracked(wirePacket, through: installed.datagramTransport)
     }
@@ -709,6 +742,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         videoSource = nil
         videoClock = nil
         videoAnnouncementGate = .pending
+        videoRevision &+= 1
     }
 
     /// Maps a negotiated DAVE video codec label to the client-proposed
@@ -745,6 +779,17 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         guard revision == expectedRevision, !Task.isCancelled else {
             throw error
         }
+    }
+
+    /// The video counterpart to `requireCurrent`: fails a video send closed
+    /// when the video source it reserved has since been replaced. Kept
+    /// separate from `revision` so replacing a video source never interrupts
+    /// an audio send that is legitimately in flight.
+    private func requireCurrentVideoSource(
+        _ expectedVideoRevision: UInt64,
+        orThrow error: DiscordVoiceNativeMediaPlaneError = .sendInterrupted
+    ) throws {
+        guard videoRevision == expectedVideoRevision else { throw error }
     }
 
     private func attestDAVE(

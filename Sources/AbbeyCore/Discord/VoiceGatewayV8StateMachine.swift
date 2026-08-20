@@ -221,9 +221,13 @@ public struct VoiceGatewayV8StateMachine: Sendable {
 
     /// Validates a client-built Opcode 12 Video announcement against this
     /// connection's Ready allocation and wraps it for sending. Clients never
-    /// invent video SSRCs: every announced stream SSRC must be one the voice
-    /// server assigned in Ready, the top-level `audio_ssrc` must be this
-    /// connection's audio SSRC, and a server-owned payload (one carrying
+    /// invent video SSRCs: every announced stream must name a primary `ssrc`
+    /// the voice server assigned in Ready **and** the RTX SSRC that Ready
+    /// paired with it — explicit or `ssrc + 1`-derived — so an explicit
+    /// `rtx_ssrc` cannot smuggle an unassigned SSRC past a Ready-assigned
+    /// primary. The top-level `audio_ssrc` must be this connection's audio
+    /// SSRC, the top-level `video_ssrc`/`rtx_ssrc` pair must select one of
+    /// those same assigned streams, and a server-owned payload (one carrying
     /// `user_id`) is rejected. Signaling gate only — no media path exists
     /// behind it in this type.
     public func videoAnnouncement(_ payload: VoiceGatewayV8Video) throws -> VoiceGatewayV8Outbound {
@@ -237,12 +241,28 @@ public struct VoiceGatewayV8StateMachine: Sendable {
             guard let readyStreams = ready.streams, !readyStreams.isEmpty else {
                 throw VoiceGatewayV8Error.malformedPayload
             }
-            let assignedSSRCs = Set(readyStreams.compactMap(\.ssrc))
-            for stream in payload.streams {
-                guard let ssrc = stream.ssrc, assignedSSRCs.contains(ssrc) else {
-                    throw VoiceGatewayV8Error.malformedPayload
-                }
+            // Ready's own validation already rejects duplicate or zero
+            // primary/RTX SSRCs, so this index is one-to-one.
+            var assignedRTXByPrimary: [UInt32: UInt32] = [:]
+            for stream in readyStreams {
+                guard let primarySSRC = stream.ssrc,
+                      let rtxSSRC = stream.derivedRTXSSRC
+                else { continue }
+                assignedRTXByPrimary[primarySSRC] = rtxSSRC
             }
+            for stream in payload.streams {
+                guard let primarySSRC = stream.ssrc,
+                      let assignedRTXSSRC = assignedRTXByPrimary[primarySSRC],
+                      let rtxSSRC = stream.derivedRTXSSRC,
+                      rtxSSRC == assignedRTXSSRC
+                else { throw VoiceGatewayV8Error.malformedPayload }
+            }
+            // The selected outbound pair must be one of the assigned streams
+            // too: an omitted top-level `rtx_ssrc` is tolerated (the server
+            // derives it), but a present one must be the assigned value.
+            guard let selectedRTXSSRC = assignedRTXByPrimary[payload.videoSSRC],
+                  payload.rtxSSRC == nil || payload.rtxSSRC == selectedRTXSSRC
+            else { throw VoiceGatewayV8Error.malformedPayload }
         }
         return .video(try payload.validated())
     }
