@@ -255,6 +255,21 @@ status: in_progress
   `#if canImport(AbbeyMediaNative)` in a target that does not link it, so they compiled out and
   "passed" without running. A guarded test in the wrong target is indistinguishable from a
   passing one.
+- **Operator receive control landed 2026-08-20 — the audio path is now reachable end to end.**
+  `MediaSessionModel.setReceiveEnabled(_:)` plus a `/voice` toggle, with `receiveActive` and
+  `localMediaAvailable` surfaced in the app snapshot. Privacy posture is explicit in the UI copy:
+  receiving decrypts and plays everyone else's audio, it is off until switched on, it is never
+  started by joining, and it does not carry over to a new session. The toggle reads the
+  controller's real state rather than an optimistic local flag, so a refused enable shows as
+  still-off, and a refusal is *reported* instead of springing the switch back silently.
+  Red-proved: swallowing the refusal fails the test; restored byte-identical by sha256.
+  Verified: AbbeyCoreTests 405/405, AbbeyBotAppTests 79/79, AbbeyServerTests 22/22.
+  **The honest boundary is unchanged and now the only thing left on this goal:** every layer is
+  composed and gated, but nothing has run against Discord. The advertised DAVE version is still
+  0, `mediaAdapterAvailability` reports `.locallyComposed` rather than `.fullyWired`, and live
+  join/speak/hear/reconnect/leave evidence is operator-blocked — no token, guild, or Keychain
+  entry exists in this environment. That last step needs a rotated bot token and an authorized
+  test guild, which only Donald can supply.
 
 ## Complete Discord video and Go Live
 status: in_progress

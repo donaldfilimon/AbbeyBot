@@ -38,32 +38,47 @@ struct MediaSessionVoiceSnapshot: Equatable, Sendable {
     let phase: DiscordVoiceControllerPhase
     let generation: UInt64
     let failure: DiscordVoiceControllerFailure?
+    /// The wire-facing claim: a nonzero DAVE version is advertised to Discord.
     let mediaAdapterAvailable: Bool
+    /// Audio may flow on this machine. True in cases where
+    /// `mediaAdapterAvailable` is false — that is the point of the split, not a
+    /// contradiction.
+    let localMediaAvailable: Bool
+    /// Whether the bot is currently decrypting and playing other members' audio.
+    let receiveActive: Bool
 
     init(_ snapshot: DiscordVoiceControllerSnapshot) {
         phase = snapshot.phase
         generation = snapshot.generation
         failure = snapshot.failure
         mediaAdapterAvailable = snapshot.mediaAdapterAvailable
+        localMediaAvailable = snapshot.localMediaAvailable
+        receiveActive = snapshot.receiveActive
     }
 
     static let idle = Self(
         phase: .idle,
         generation: 0,
         failure: nil,
-        mediaAdapterAvailable: false
+        mediaAdapterAvailable: false,
+        localMediaAvailable: false,
+        receiveActive: false
     )
 
     private init(
         phase: DiscordVoiceControllerPhase,
         generation: UInt64,
         failure: DiscordVoiceControllerFailure?,
-        mediaAdapterAvailable: Bool
+        mediaAdapterAvailable: Bool,
+        localMediaAvailable: Bool,
+        receiveActive: Bool
     ) {
         self.phase = phase
         self.generation = generation
         self.failure = failure
         self.mediaAdapterAvailable = mediaAdapterAvailable
+        self.localMediaAvailable = localMediaAvailable
+        self.receiveActive = receiveActive
     }
 }
 
@@ -602,6 +617,25 @@ final class MediaSessionModel {
             operatorError = VoicePresence.requestInProgressMessage
         }
         await refreshVoicePresence()
+    }
+
+    /// Starts or stops decrypting and playing other members' audio.
+    ///
+    /// This is a privacy control, not a convenience: enabling it means the bot
+    /// begins decrypting speech from everyone in the channel. It is off by
+    /// default, is never implied by joining, and is not inherited across
+    /// sessions — the controller clears it for every new generation.
+    func setReceiveEnabled(_ enabled: Bool) async {
+        guard !isOperationInFlight else { return }
+        let updated = await controller.setReceiveEnabled(enabled)
+        snapshot = MediaSessionVoiceSnapshot(updated)
+        // Report the refusal rather than leaving a toggle that silently
+        // sprang back: the operator asked for something and did not get it.
+        if enabled, !updated.receiveActive {
+            operatorError = DiscordCopy.voiceReceiveUnavailable
+        } else {
+            operatorError = nil
+        }
     }
 
     func requestPermission(_ kind: MediaPermissionKind) async {

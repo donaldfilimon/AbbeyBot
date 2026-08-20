@@ -211,7 +211,38 @@ struct DiscordView: View {
             Text("Toggles show your requested state until Discord's echo confirms it (polled every 2s).")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+
+            Divider()
+
+            Text("Receiving decrypts and plays the audio of everyone else in the channel. It is off until you turn it on, is never started by joining, and does not carry over to a new session.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Receive channel audio", isOn: receiveBinding)
+                .accessibilityLabel("Decrypt and play other members' audio")
+                .disabled(
+                    !engine.mediaSession.snapshot.localMediaAvailable
+                        || engine.mediaSession.isOperationInFlight
+                )
+            LabeledContent("Receiving") {
+                Text(engine.mediaSession.snapshot.receiveActive ? "on" : "off")
+            }
+            if !engine.mediaSession.snapshot.localMediaAvailable {
+                Text("Unavailable: this session has no composed playback path yet.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
+    }
+
+    /// Reads the controller's actual state rather than a local optimistic flag:
+    /// a refused enable must show as still-off, not as on.
+    private var receiveBinding: Binding<Bool> {
+        Binding(
+            get: { engine.mediaSession.snapshot.receiveActive },
+            set: { value in
+                Task { await engine.mediaSession.setReceiveEnabled(value) }
+            }
+        )
     }
 
     /// The operator's requested mute/deafen pair while Discord's echo is still

@@ -375,6 +375,40 @@ struct MediaSessionModelTests {
         )
     }
 
+    @Test("Receive is off on construction and a refused enable reports rather than sticking")
+    func receiveStartsOffAndReportsRefusal() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        // The privacy default: nothing is being decrypted before the operator
+        // asks, and the toggle is not even offered without a playback path.
+        #expect(!model.snapshot.receiveActive)
+        #expect(!model.snapshot.localMediaAvailable)
+
+        // The test factory composes no playback sink, so enabling must refuse —
+        // and must SAY so, rather than leaving a toggle that silently springs
+        // back with no explanation.
+        await model.setReceiveEnabled(true)
+        #expect(!model.snapshot.receiveActive)
+        #expect(model.operatorError == DiscordCopy.voiceReceiveUnavailable)
+
+        await model.shutdown()
+    }
+
+    @Test("Turning receive off is never reported as a failure")
+    func disablingReceiveIsNotAnError() async throws {
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(controller: try makeController(), platform: platform)
+
+        await model.setReceiveEnabled(false)
+        #expect(!model.snapshot.receiveActive)
+        // Asking for the safe state must not surface an error, even though the
+        // session cannot receive at all.
+        #expect(model.operatorError == nil)
+
+        await model.shutdown()
+    }
+
     @Test("Construction is passive and does not inspect permissions or devices")
     func constructionHasNoPlatformSideEffects() async throws {
         let platform = FakeMediaSessionPlatform()

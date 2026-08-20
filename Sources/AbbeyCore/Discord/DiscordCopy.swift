@@ -18,6 +18,13 @@ public enum DiscordCopy: Sendable {
         "Dry-run mode — Discord gateway is not active; voice presence unavailable (connect live for presence only — no audio)."
     public static let voiceUnknownSubcommand = "Use `/voice join` or `/voice leave` (presence only — no audio)."
     public static let voicePresenceOnly = "Presence only — muted & deafened; no audio (DiscordBM has no Opus/UDP)."
+    /// Shown when the operator asks to start receiving and the session cannot.
+    /// Deliberately says what is and is not true rather than "failed": receive
+    /// needs a composed media stack and an established session, and neither is
+    /// a user error.
+    public static let voiceReceiveUnavailable =
+        "Cannot receive audio: this session has no composed playback path, or it is not established yet."
+
     public static let voiceMuteDeafenNotConfirmed =
         "Not confirmed in a voice channel yet — mute/deafen presence can't be changed until Discord confirms the join."
     public static let voiceMuteDeafenGatewayUnavailable =
