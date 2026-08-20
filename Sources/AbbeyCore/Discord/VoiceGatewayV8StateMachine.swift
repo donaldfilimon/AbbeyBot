@@ -219,6 +219,34 @@ public struct VoiceGatewayV8StateMachine: Sendable {
         return .speaking(try VoiceGatewayV8Speaking(speaking: flags, delay: delay, ssrc: ssrc))
     }
 
+    /// Validates a client-built Opcode 12 Video announcement against this
+    /// connection's Ready allocation and wraps it for sending. Clients never
+    /// invent video SSRCs: every announced stream SSRC must be one the voice
+    /// server assigned in Ready, the top-level `audio_ssrc` must be this
+    /// connection's audio SSRC, and a server-owned payload (one carrying
+    /// `user_id`) is rejected. Signaling gate only — no media path exists
+    /// behind it in this type.
+    public func videoAnnouncement(_ payload: VoiceGatewayV8Video) throws -> VoiceGatewayV8Outbound {
+        guard phase == .established, let ready = readyPayload else {
+            throw VoiceGatewayV8Error.unexpectedEvent
+        }
+        guard payload.userID == nil, payload.audioSSRC == ready.ssrc else {
+            throw VoiceGatewayV8Error.malformedPayload
+        }
+        if !payload.streams.isEmpty {
+            guard let readyStreams = ready.streams, !readyStreams.isEmpty else {
+                throw VoiceGatewayV8Error.malformedPayload
+            }
+            let assignedSSRCs = Set(readyStreams.compactMap(\.ssrc))
+            for stream in payload.streams {
+                guard let ssrc = stream.ssrc, assignedSSRCs.contains(ssrc) else {
+                    throw VoiceGatewayV8Error.malformedPayload
+                }
+            }
+        }
+        return .video(try payload.validated())
+    }
+
     public func resumePayload() throws -> VoiceGatewayV8Resume {
         guard resumeEligible, let lastReceivedSequence else { throw VoiceGatewayV8Error.resumeUnavailable }
         return try VoiceGatewayV8Resume(

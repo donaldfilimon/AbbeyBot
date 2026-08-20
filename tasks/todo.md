@@ -350,6 +350,49 @@ Open items above, graded against the committed tree at `2a423e1`:
       codec/RTP send/receive, remote rendering, DAVE video-frame wire path, congestion recovery, or
       live camera/screen evidence.
 
+### Video send-boundary composition slice (2026-08-20, extends audio Phase 5 to `.video`)
+
+- [x] `DiscordVoiceNativeMediaPlane.sendVideoFrame(encodedFrame:)` composes the outbound video
+      send path with the exact audio Phase 5 pattern: DAVE-protect the already-encoded frame via
+      the installed `NativeDAVESession.protect(_:mediaType:.video, codec:, ssrc:)` (fails closed
+      with `.daveProtectionRequired` unless the generation attested a ready DAVE session — no
+      transport-only or plaintext video path exists), build the RTP header via the extended
+      `DiscordVoiceRTPCodec` with the negotiated video payload type and marker bit set on the
+      frame boundary, tick a new 90 kHz `DiscordVoiceVideoRTPClock` (tick and the one-shot
+      announcement obligation are reserved synchronously before the first `await`, mirroring the
+      audio sequence/Speaking reservation), seal via the same installed single-owner
+      `DiscordVoiceTransportEncryption` (audio and video counters share one never-reused nonce
+      sequence), and send through the retained `DiscordVoiceMediaDatagramTransport`.
+- [x] `installVideoSource(allocation:activeRIDs:codec:ticksPerFrame:)` binds the video SSRC from
+      the existing bounded `VoiceGatewayV8VideoSSRCAllocation` Ready models — clients never invent
+      video SSRCs — and rejects foreign allocations (audio SSRC mismatch) and codecs with no
+      modeled Discord payload type (Opus, H.265). Payload types follow the community-documented
+      client proposals: H264 101, VP8 103, VP9 105, AV1 107; RTX payload types are deliberately
+      not accepted anywhere (no RTX path exists).
+- [x] Announcement-before-send: `DiscordVoiceGatewaySession.connect()` attaches a video
+      announcement callback alongside Speaking; the media plane fires it exactly once per
+      installed video source before the first protected packet, and the new
+      `VoiceGatewayV8StateMachine.videoAnnouncement(_:)` validates the Opcode 12 payload against
+      the Ready allocation (client-owned, matching audio SSRC, only server-assigned stream SSRCs)
+      before it reaches the socket. Unlike Speaking, a missing announcement callback fails the
+      send closed — Discord documents the announcement as mandatory before video media.
+- [x] Proof mirrors Phase 5: `sendVideoFrameComposesTheFullSendPath` decrypts every wire packet
+      and asserts real DAVE output (never the raw encoded frame), 90 kHz timestamps/sequence,
+      payload type 103/marker/SSRC, shared AEAD counter continuity after an audio frame,
+      announcement-exactly-once, and teardown via `reset()`; eight dedicated fail-closed tests
+      cover no-install, no-video-source, DAVE-never-attested (install and send), foreign
+      allocation/non-video codec, empty frame, announcement missing/failing, protect failure, the
+      real pinned-libdave unready session, and reset-mid-send. A session-level test proves the
+      gateway sends Opcode 12 for a Ready-backed announcement and fails closed on foreign SSRCs
+      and after disconnect.
+- [ ] **Still open, not attempted here (do not upgrade the claim):** nothing in production calls
+      `sendVideoFrame` — no camera/screen capture wiring, no video encoder, no codec negotiation
+      completion (payload types are modeled client proposals, not a negotiated selection), no MTU
+      packetization/pacing (one whole encoded frame per packet, marker always set), no
+      keyframes/RTX/feedback, no receive/reassembly/render path, no congestion/loss/perf
+      coverage, and no live camera or Go Live evidence. No capability advertisement changed; the
+      native factory still reports `.unavailable`.
+
 ### Video audit snapshot (2026-08-01, read-only)
 
 Nothing checkable; graded against `2a423e1`:
@@ -359,10 +402,15 @@ Nothing checkable; graded against `2a423e1`:
   AVFoundation/ScreenCaptureKit with permission gating, source enumeration/selection, screen-lock
   kill, bounded queues, and 17 hermetic tests. But there is no preview surface, and nothing in the
   app can call `startCapture()` — `MediaSessionPlatform` exposes only `stopAllCapture()`.
-- **Video RTP/codec MISSING** — `DiscordVoiceRTPMediaKind.video` is a label only; no pacer,
-  keyframes, RTX/feedback, reassembly, or negotiation fields on Select Protocol.
-- **DAVE video PARTIAL** — `NativeDAVESession` accepts `.video` + five codecs but has zero video
-  callers and zero video tests; only audio protect/unprotect is exercised.
+- **Video RTP/codec MISSING (partially superseded 2026-08-20)** — `DiscordVoiceRTPMediaKind.video`
+  was a label only. The send-boundary slice above added video payload types, a 90 kHz clock, and
+  marker semantics to the RTP layer; still no pacer, keyframes, RTX/feedback, reassembly, or
+  negotiation fields on Select Protocol.
+- **DAVE video PARTIAL (superseded 2026-08-20)** — `NativeDAVESession` accepted `.video` + five
+  codecs with zero video callers and zero video tests. The send-boundary slice above is now a
+  real `.video` caller with composition and fail-closed tests, including the real pinned binding's
+  own fail-closed `protect`; genuine multi-party MLS video ciphertext still cannot be produced in
+  this environment (see the audio Phase 5 note on roster activation).
 - **Render/UI MISSING** — read-only "Camera capture: Stopped" labels; no preview, tiles, or
   start/stop controls; `daveLabel`/`captureLabel` hardcoded to unavailable copy.
 - **Fault/perf tests** — 2 of 11 scenarios exist (screen lock, device removal); the other 9 are

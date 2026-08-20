@@ -260,6 +260,10 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             guard let self else { throw DiscordVoiceGatewaySessionError.disconnected }
             try await self.sendSpeakingSignal(generation: connectionGeneration)
         }
+        await mediaPlane.attachVideoAnnouncementSignal { [weak self] announcement in
+            guard let self else { throw DiscordVoiceGatewaySessionError.disconnected }
+            try await self.sendVideoAnnouncement(announcement, generation: connectionGeneration)
+        }
         selectedMode = nil
         negotiatedDAVEProtocolVersion = nil
         daveTransitionState.reset()
@@ -1105,6 +1109,27 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
               let machine
         else { throw DiscordVoiceGatewaySessionError.staleConnection }
         let outbound = try machine.speaking(flags: 1)
+        try await send(outbound, through: activeSession)
+    }
+
+    /// Invoked by the media plane immediately before the first protected
+    /// video packet of an installed video source. Discord requires an
+    /// Opcode 12 Video announcement before video media; the state machine
+    /// additionally validates the announcement against the Ready allocation
+    /// so a client can never announce an SSRC the server did not assign. A
+    /// stale generation, disconnect, or missing session fails closed exactly
+    /// like the Speaking analogue.
+    private func sendVideoAnnouncement(
+        _ announcement: VoiceGatewayV8Video,
+        generation connectionGeneration: UInt64
+    ) async throws {
+        guard generation == connectionGeneration,
+              !disconnectRequested,
+              phase == .established,
+              let activeSession,
+              let machine
+        else { throw DiscordVoiceGatewaySessionError.staleConnection }
+        let outbound = try machine.videoAnnouncement(announcement)
         try await send(outbound, through: activeSession)
     }
 

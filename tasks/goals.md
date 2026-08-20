@@ -115,6 +115,26 @@ status: in_progress
   server-graph parity (see new goal below). In flight — results and honest boundaries land
   per-slice when each agent returns. Live evidence remains operator-blocked and was not attempted.
 
+- **`/goal continue` 2026-08-20 ~06:20 (third pass, integration + review).** Landed on the branch:
+  (a) all five automated-review findings on PR #60, each with a regression test that fails on the
+  previous behavior — the Speaking gate no longer latches before its callback succeeds (a failed
+  or still-suspended signal can no longer let a frame reach the UDP transport), `reset()` now
+  cancels and awaits suspended datagram sends, a missed heartbeat ACK no longer resets the media
+  plane it is about to resume onto, a confirmed server-side channel move retargets later mute
+  updates, and the desktop mute/deafen toggles compose through one pending pair instead of undoing
+  each other; (b) the red linux CI job's real cause — `URLSession` is unavailable in Foundation on
+  Linux, so `RemoteOpenAICompatibleProvider` failed to build; it now carries the
+  `canImport(FoundationNetworking)` guard the rest of the repo already used (every server-graph
+  file referencing URLSession/URLRequest/HTTPURLResponse was audited; this was the only gap).
+  Verified locally: AbbeyCoreTests 314/314, AbbeyBotAppTests 70/70, native gate
+  NATIVE_MEDIA_SMOKE_GREEN + STATIC_SECURITY_GREEN in debug and release, all EXIT:0.
+  **NOT closed this pass:** Phase 6a capture composition. Its agent was killed by a session limit
+  before compiling anything; ~1,324 lines of draft (capture loop, microphone source, controller
+  wiring, four test files) are preserved as an explicitly UNVERIFIED wip commit on
+  `worktree-agent-a539f40c0a65c7d78` — never built, never gated, not landed. Nothing in production
+  calls `sendAudioFrame` yet, so the native factory still honestly reports `.unavailable` and
+  DAVE 0. Live join/speak/hear/reconnect/leave evidence remains operator-blocked.
+
 ## Complete Discord video and Go Live
 status: in_progress
 - Discord camera video and Go Live screen sharing are separate from the audio completion claim and
@@ -150,6 +170,26 @@ status: in_progress
   This is signaling and local-preview proof only: source selection UX, negotiated codec/RTP,
   remote rendering, DAVE video-frame transport, fault/performance coverage, and live camera plus
   Go Live evidence remain open, so this goal remains `in_progress`.
+- **Video send-boundary composition 2026-08-20 (extends audio Phase 5 to `.video`):**
+  `DiscordVoiceNativeMediaPlane.sendVideoFrame(encodedFrame:)` now composes the same protected
+  send path the audio Phase 5 slice proved, for one already-encoded video frame: the installed
+  `NativeDAVESession.protect(...)` with the video frame type and negotiated codec label, a
+  90 kHz `DiscordVoiceVideoRTPClock`, the negotiated video RTP payload type with the marker bit
+  set on the frame boundary, the shared single-owner `DiscordVoiceTransportEncryption` AEAD
+  counter, and the retained UDP transport. `installVideoSource(...)` binds a video SSRC only
+  from the existing bounded Ready allocation models (`VoiceGatewayV8VideoSSRCAllocation`) —
+  clients never invent SSRCs — and `DiscordVoiceGatewaySession` now sends the real Opcode 12
+  announcement through `machine.videoAnnouncement(_:)` (validated against Ready) exactly once
+  before the first video packet, the announcement-before-media analogue of Speaking. Fail-closed
+  everywhere: no DAVE attestation → no video source and no send; missing/failed announcement
+  callback, empty frames, foreign allocations, unmapped codecs (Opus/H.265), protect failures,
+  and reset-mid-send all throw with nothing reaching the socket, proven by one composition test
+  and eight dedicated fail-closed tests mirroring the audio Phase 5 style. **This closes the
+  outbound video send-path composition boundary only.** Nothing in production calls
+  `sendVideoFrame`; there is no camera/screen capture wiring into it, no video encoder, no
+  completed codec negotiation, no packetization/pacing/RTX, no receive/render path, no
+  congestion/fault/perf coverage, and no live camera or Go Live evidence — no capability
+  advertisement changed. The goal remains `in_progress`.
 - **`/goal continue` 2026-08-04: deliberately deferred, not stopped.** This pass's audio-side
   Phase 5 slice (see the voice-audio goal above) is actively composing the production call site for
   `NativeDAVESession.protect(...)` and the AEAD/RTP send path in the same files this goal's DAVE
@@ -171,6 +211,17 @@ status: in_progress
   negotiation completion, rendering, or live claims. In flight; evidence lands when the agent
   returns.
 
+- **Integrated onto the branch 2026-08-20 ~06:30, with one correction.** The video send slice was
+  merged into `codex/discord-voice-phase4` (conflicts were in the media plane, where the audio
+  review fixes had landed in parallel). Reviewing the merged result surfaced that the new video
+  path had faithfully copied the audio path's *pre-fix* shape and so reintroduced both bugs the
+  review had just closed: the Opcode 12 announcement latched its one-shot flag before the callback
+  ran, and the video datagram send was untracked by `reset()`. Audio and video now share one
+  `OneShotSignalGate` (with a documented per-kind difference: a missing Opcode 12 callback fails
+  closed, a missing Speaking callback does not) and one `sendTracked` path, specifically so the
+  two cannot diverge again. Still the send boundary only — no capture, codec negotiation,
+  packetization, rendering, or live evidence; no capability advertisement changed.
+
 ## Cross-platform server-graph toolchain parity (swiftly snapshot)
 status: in_progress
 - Goal: local development gets a first-class swiftly-managed Swift 6.4/6.5 development-snapshot
@@ -182,8 +233,18 @@ status: in_progress
 - Acceptance: a committed `Scripts/check-server-snapshot.sh` that resolves/builds/tests the four CI
   server suites under the snapshot with real per-gate exit codes, AGENTS.md documenting the path,
   and the Xcode desktop build still green.
-- **`/goal continue` 2026-08-20: dispatched** as one of three parallel worktree-isolated slices.
-  In flight; evidence lands when the agent returns.
+- **Landed 2026-08-20 (commits on the branch).** `Scripts/check-server-snapshot.sh` builds and
+  tests the server graph under a swiftly-selected development snapshot (`main-snapshot-2026-08-11`,
+  6.5-dev), per-invocation only — the swiftly global default is untouched. Measured: resolve/build
+  exit 0; AbbeyCoreTests 302, AbbeyCLITests 30, AbbeyServerKitTests 117, AbbeyServerTests 22, all
+  exit 0, `SERVER_SNAPSHOT_GREEN`, with no source changes needed for the newer toolchain. The Xcode
+  desktop path stayed green (3622/3622 targets). `.swift-version` is now gitignored and untracked:
+  `xcode` is a macOS-only swiftly selector that breaks every proxied `swift` invocation on Linux
+  (the review's P1). **Honest limit:** this runs a 6.5-dev snapshot on Darwin against the Xcode
+  SDK, while CI runs Linux glibc/Foundation in a nightly-6.4.x image — it is toolchain parity, not
+  platform parity, and it cannot catch Linux-only breakage. The very next CI run proved that: the
+  `FoundationNetworking` failure was invisible to this gate. Docker/Linux remains the only real
+  check for that class.
 
 ## Release and SwiftData hardening
 status: done

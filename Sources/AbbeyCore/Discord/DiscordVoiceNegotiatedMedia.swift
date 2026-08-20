@@ -124,6 +124,16 @@ public protocol DiscordVoiceMediaPlane: Sendable {
         _ signal: @escaping @Sendable () async throws -> Void
     ) async
 
+    /// Video analogue of `attachSpeakingSignal`. The Voice Gateway session
+    /// supplies a callback the media plane invokes exactly once per installed
+    /// video source, before that source's first protected video packet, to
+    /// emit the Opcode 12 Video announcement Discord requires before video
+    /// media. Planes without a video send path can ignore this via the
+    /// default no-op.
+    func attachVideoAnnouncementSignal(
+        _ signal: @escaping @Sendable (VoiceGatewayV8Video) async throws -> Void
+    ) async
+
     func reset() async
 }
 
@@ -137,6 +147,10 @@ public extension DiscordVoiceMediaPlane {
 
     func attachSpeakingSignal(
         _ signal: @escaping @Sendable () async throws -> Void
+    ) async {}
+
+    func attachVideoAnnouncementSignal(
+        _ signal: @escaping @Sendable (VoiceGatewayV8Video) async throws -> Void
     ) async {}
 }
 
