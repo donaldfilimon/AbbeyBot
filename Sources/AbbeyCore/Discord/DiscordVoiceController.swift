@@ -565,6 +565,14 @@ public actor DiscordVoiceController {
             }
         }
         if !target, microphoneEnabled, let captureLoop {
+            // Close frame admission BEFORE the device stop suspends. `admit`
+            // gates on `microphoneEnabled` and publishes on its own, so an
+            // accepted mute must not leave a window in which another frame is
+            // admitted — or an enabled-microphone snapshot published — while
+            // capture winds down. Together with the suppressed transient
+            // publish above, this leaves no observable moment in which the
+            // microphone reads enabled after a mute has been accepted.
+            microphoneEnabled = false
             await captureLoop.stop()
             guard generation == localGeneration else { return }
         }
