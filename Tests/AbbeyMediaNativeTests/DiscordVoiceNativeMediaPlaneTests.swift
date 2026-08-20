@@ -1011,6 +1011,506 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await daveSession.lastProtectedCodec == .h264)
     }
 
+    // MARK: - Receive boundary (§1: AEAD open -> DAVE unprotect -> Opus decode)
+
+    @Test(
+        "receiveAudioFrame mirrors the send path: a sealed packet round-trips through AEAD open, the real DAVE unprotect boundary, and Opus decode"
+    )
+    func receiveAudioFrameRoundTripsTheSendPath() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log,
+            makeRTPClockSeed: { (2_000, 96_000) }
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 60, daveProtocolVersion: 1)
+        )
+
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 3))
+        let wirePacket = try #require(await log.sentPackets.first)
+        let sentOpusPayload = try #require(await daveSession.lastProtectInputFrame)
+
+        let frame = try await plane.receiveAudioFrame(packet: wirePacket, senderID: 7_701)
+
+        // DAVE `unprotect` was actually invoked — for audio, with the
+        // caller-supplied MLS participant — and what reached the decoder is
+        // exactly the Opus payload the encoder produced. A path that skipped
+        // DAVE would have handed the decoder the on-wire (XOR-transformed)
+        // bytes instead, which the last expectation pins as different.
+        #expect(await daveSession.unprotectCallCount == 1)
+        #expect(await daveSession.lastUnprotectedMediaType == .audio)
+        #expect(await daveSession.lastUnprotectedSenderID == 7_701)
+        #expect(await daveSession.lastUnprotectOutputFrame == sentOpusPayload)
+        #expect(await daveSession.lastUnprotectInputFrame != sentOpusPayload)
+
+        // Identity comes from the authenticated header, not from the caller.
+        #expect(frame.ssrc == 0x1111_1111)
+        #expect(frame.sequence == 2_000)
+        #expect(frame.timestamp == 96_000)
+
+        // The PCM corresponds to the input: an independent, freshly created
+        // Opus decoder fed exactly this one payload produces exactly this
+        // output. Deterministic, with no tolerance hand-waving.
+        let reference = try Opus20msCodec()
+        let expectedPCM = try await reference.decode(Array(sentOpusPayload))
+        #expect(frame.pcm == expectedPCM)
+        #expect(frame.pcm.count == Opus20msCodec.interleavedSampleCount)
+        #expect(frame.pcm.contains { $0 != 0 })
+
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 1)
+        #expect(diagnostics.activeAudioSources == 1)
+
+        // Neither the frame nor the diagnostics may render PCM or packet bytes.
+        let rendered = "\(frame) \(String(reflecting: frame)) \(diagnostics)"
+        #expect(rendered.contains("samples: \(Opus20msCodec.interleavedSampleCount)"))
+        #expect(!rendered.contains("["))
+        #expect(!"\(diagnostics)".contains("286331153"))
+        let mirrored = Mirror(reflecting: frame).children.map { "\($0.value)" }.joined()
+        #expect(mirrored == "<redacted>")
+    }
+
+    @Test("receiveAudioFrame fails closed and yields no audio without an installed generation")
+    func receiveAudioFrameFailsClosedWithoutInstall() async throws {
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.mediaNotInstalled) {
+            _ = try await plane.receiveAudioFrame(packet: [0x80, 0x78], senderID: 1)
+        }
+        #expect(await daveSession.unprotectCallCount == 0)
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 0)
+        #expect(diagnostics.droppedNotInstalled == 1)
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test("receiveAudioFrame fails closed and yields no audio when DAVE was never attested")
+    func receiveAudioFrameFailsClosedWithoutDAVE() async throws {
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        // Protocol version 0 installs AEAD and Opus but never attests DAVE.
+        // There is no transport-only receive path.
+        let capabilities = try await plane.install(
+            makeCapability(generation: 61, daveProtocolVersion: 0)
+        )
+        #expect(capabilities.dave == false)
+
+        let sender = try senderTransport()
+        let packet = try await makeIncomingAudioPacket(
+            sender: sender,
+            ssrc: 0x7777_7777,
+            sequence: 5,
+            timestamp: 960,
+            opusPayload: try await fixedOpusPayload(seed: 4)
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.daveProtectionRequired) {
+            _ = try await plane.receiveAudioFrame(packet: packet, senderID: 7_702)
+        }
+        #expect(await daveSession.unprotectCallCount == 0)
+        #expect(await plane.receiveDiagnostics().droppedNotInstalled == 1)
+    }
+
+    @Test(
+        "a packet that fails RTPSIZE authentication yields no audio, is counted, and never reaches DAVE"
+    )
+    func receiveAudioFrameFailsClosedOnAEADFailure() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 62, daveProtocolVersion: 1)
+        )
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 5))
+        var tampered = try #require(await log.sentPackets.first)
+        // One flipped ciphertext byte, past the clear RTP header.
+        tampered[DiscordVoiceRTPHeader.baseLength + 2] ^= 0x01
+
+        await #expect(
+            throws: DiscordVoiceNativeMediaPlaneError.receiveTransportAuthenticationFailed
+        ) {
+            _ = try await plane.receiveAudioFrame(packet: tampered, senderID: 7_703)
+        }
+        #expect(await daveSession.unprotectCallCount == 0)
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 0)
+        #expect(diagnostics.droppedTransportAuthentication == 1)
+        // No decoder state is created from an unauthenticated packet.
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test("a packet whose DAVE unprotect fails yields no audio, is counted, and creates no decoder")
+    func receiveAudioFrameFailsClosedOnDAVEFailure() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 63, daveProtocolVersion: 1)
+        )
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 6))
+        let wirePacket = try #require(await log.sentPackets.first)
+        await daveSession.failNextUnprotect(with: TestDAVEProtectionFailure.injected)
+
+        // The injected native detail is collapsed into a payload-free
+        // media-plane case: a packet-driven caller learns nothing but that the
+        // frame was refused.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveDAVEUnprotectFailed) {
+            _ = try await plane.receiveAudioFrame(packet: wirePacket, senderID: 7_704)
+        }
+        #expect(await daveSession.unprotectCallCount == 1)
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 0)
+        #expect(diagnostics.droppedDAVE == 1)
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test(
+        "the real native DAVE unprotect boundary is called and fails closed when the session is not ready"
+    )
+    func receiveAudioFrameFailsClosedOnRealUnreadyDAVESession() async throws {
+        let log = NativeMediaDatagramDouble()
+        let readyDouble = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let source = NativeDAVEMediaSessionSource(current: readyDouble)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { await source.provide() },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 64, daveProtocolVersion: 1)
+        )
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 7))
+        let wirePacket = try #require(await log.sentPackets.first)
+
+        // Swap in the genuine pinned-libdave binding, never activated. Its
+        // real `unprotect()` must fail closed on its own terms; nothing in the
+        // receive path may substitute a plaintext or double-supplied result.
+        let realUnreadySession = try NativeDAVESession(
+            protocolVersion: 1,
+            groupID: 92_001,
+            selfUserID: "92002"
+        )
+        await source.replace(with: realUnreadySession)
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveDAVEUnprotectFailed) {
+            _ = try await plane.receiveAudioFrame(packet: wirePacket, senderID: 92_003)
+        }
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 0)
+        #expect(diagnostics.droppedDAVE == 1)
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test("malformed and payload-free packets yield no audio and are counted as malformed")
+    func receiveAudioFrameFailsClosedOnMalformedPacket() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 65, daveProtocolVersion: 1)
+        )
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 8))
+        let wirePacket = try #require(await log.sentPackets.first)
+
+        // Empty, and truncated below a fixed RTP header.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receivePacketMalformed) {
+            _ = try await plane.receiveAudioFrame(packet: [], senderID: 7_705)
+        }
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receivePacketMalformed) {
+            _ = try await plane.receiveAudioFrame(
+                packet: Array(wirePacket.prefix(8)),
+                senderID: 7_705
+            )
+        }
+
+        // A packet that authenticates but carries no payload at all must not
+        // reach DAVE or the decoder either.
+        let sender = try senderTransport()
+        let rtpCodec = try DiscordVoiceRTPCodec()
+        let emptyBodied = try await sender.seal(
+            rtpCodec.encode(
+                try DiscordVoiceRTPHeader(sequence: 1, timestamp: 960, ssrc: 0x7777_7777)
+            )
+        )
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receivePacketMalformed) {
+            _ = try await plane.receiveAudioFrame(packet: emptyBodied, senderID: 7_705)
+        }
+
+        #expect(await daveSession.unprotectCallCount == 0)
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 0)
+        #expect(diagnostics.droppedMalformed == 3)
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test(
+        "a well-formed video packet is refused as an unsupported media type, never handed to the audio DAVE boundary"
+    )
+    func receiveAudioFrameRefusesVideoPayloadTypes() async throws {
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 66, daveProtocolVersion: 1)
+        )
+
+        // `DiscordVoiceRTPHeader.acceptedPayloadTypes` admits the negotiated
+        // video payload types, so this packet decodes as a valid header.
+        let sender = try senderTransport()
+        let packet = try await makeIncomingAudioPacket(
+            sender: sender,
+            ssrc: 0x7777_7777,
+            sequence: 2,
+            timestamp: 960,
+            payloadType: DiscordVoiceRTPHeader.discordVideoVP8PayloadType,
+            opusPayload: try await fixedOpusPayload(seed: 9)
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveMediaTypeUnsupported) {
+            _ = try await plane.receiveAudioFrame(packet: packet, senderID: 7_706)
+        }
+        #expect(await daveSession.unprotectCallCount == 0)
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.droppedMediaTypeUnsupported == 1)
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test(
+        "reset() during a suspended receive interrupts it: no audio is returned and the packet is counted as interrupted"
+    )
+    func receiveAudioFrameInterruptedBySupersedingReset() async throws {
+        let bootstrapSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let receiveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        // install() and receiveAudioFrame() each call the provider once; only
+        // the second (receive-time) call is gated.
+        let gate = SendPathGate(
+            bootstrapSession: bootstrapSession,
+            sendSession: receiveSession
+        )
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { await gate.provide() },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 67, daveProtocolVersion: 1)
+        )
+
+        let sender = try senderTransport()
+        let packet = try await makeIncomingAudioPacket(
+            sender: sender,
+            ssrc: 0x7777_7777,
+            sequence: 3,
+            timestamp: 960,
+            opusPayload: try await fixedOpusPayload(seed: 10)
+        )
+
+        let receive = Task {
+            try await plane.receiveAudioFrame(packet: packet, senderID: 7_707)
+        }
+        await gate.waitUntilRequested()
+        await plane.reset()
+        await gate.release()
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveInterrupted) {
+            _ = try await receive.value
+        }
+        #expect(await receiveSession.unprotectCallCount == 0)
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 0)
+        #expect(diagnostics.droppedInterrupted == 1)
+        // Teardown dropped every decoder with the generation.
+        #expect(diagnostics.activeAudioSources == 0)
+    }
+
+    @Test(
+        "each SSRC decodes on its own Opus decoder: two sources are independent, one source is continuous, and eviction is caller-driven"
+    )
+    func receiveAudioFrameKeepsOneDecoderPerSource() async throws {
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 68, daveProtocolVersion: 1)
+        )
+
+        let sender = try senderTransport()
+        let firstPayload = try await fixedOpusPayload(seed: 11)
+        let secondPayload = try await fixedOpusPayload(seed: 12)
+
+        let alphaFirst = try await plane.receiveAudioFrame(
+            packet: try await makeIncomingAudioPacket(
+                sender: sender,
+                ssrc: 0x7777_7777,
+                sequence: 10,
+                timestamp: 960,
+                opusPayload: firstPayload
+            ),
+            senderID: 7_708
+        )
+        // The same payload from a different SSRC must decode on its own fresh
+        // decoder. A shared decoder would carry alpha's state into beta and
+        // produce different samples here.
+        let betaFirst = try await plane.receiveAudioFrame(
+            packet: try await makeIncomingAudioPacket(
+                sender: sender,
+                ssrc: 0x8888_8888,
+                sequence: 20,
+                timestamp: 1_920,
+                opusPayload: firstPayload
+            ),
+            senderID: 7_709
+        )
+        #expect(betaFirst.pcm == alphaFirst.pcm)
+        #expect(betaFirst.ssrc == 0x8888_8888)
+
+        // Alpha's second frame must continue alpha's decoder state, matching a
+        // reference decoder driven with the same two payloads in order.
+        let alphaSecond = try await plane.receiveAudioFrame(
+            packet: try await makeIncomingAudioPacket(
+                sender: sender,
+                ssrc: 0x7777_7777,
+                sequence: 11,
+                timestamp: 1_920,
+                opusPayload: secondPayload
+            ),
+            senderID: 7_708
+        )
+        let reference = try Opus20msCodec()
+        _ = try await reference.decode(firstPayload)
+        let expectedSecond = try await reference.decode(secondPayload)
+        #expect(alphaSecond.pcm == expectedSecond)
+
+        var diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.accepted == 3)
+        #expect(diagnostics.activeAudioSources == 2)
+
+        // Eviction policy (idle timeout, clock) belongs to the portable layer;
+        // the plane only exposes the lifetime hook it drives.
+        #expect(await plane.releaseAudioSource(ssrc: 0x8888_8888))
+        #expect(await plane.releaseAudioSource(ssrc: 0x8888_8888) == false)
+        diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.activeAudioSources == 1)
+    }
+
+    @Test(
+        "concealAudioLoss continues an authenticated source and refuses to fabricate one that was never authenticated"
+    )
+    func concealAudioLossOnlyContinuesAuthenticatedSources() async throws {
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 69, daveProtocolVersion: 1)
+        )
+
+        // No packet from this source has ever authenticated, so there is no
+        // decoder state to continue and nothing may be synthesized.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveSourceUnknown) {
+            _ = try await plane.concealAudioLoss(ssrc: 0x7777_7777)
+        }
+        #expect(await plane.receiveDiagnostics().droppedSourceUnknown == 1)
+
+        let sender = try senderTransport()
+        let payload = try await fixedOpusPayload(seed: 13)
+        _ = try await plane.receiveAudioFrame(
+            packet: try await makeIncomingAudioPacket(
+                sender: sender,
+                ssrc: 0x7777_7777,
+                sequence: 30,
+                timestamp: 960,
+                opusPayload: payload
+            ),
+            senderID: 7_710
+        )
+
+        let concealed = try await plane.concealAudioLoss(ssrc: 0x7777_7777)
+        let reference = try Opus20msCodec()
+        _ = try await reference.decode(payload)
+        #expect(concealed == (try await reference.decodePacketLoss()))
+        #expect(concealed.count == Opus20msCodec.interleavedSampleCount)
+
+        let diagnostics = await plane.receiveDiagnostics()
+        #expect(diagnostics.concealed == 1)
+        #expect(diagnostics.accepted == 1)
+
+        // Eviction removes the state concealment depends on, so concealment
+        // for that source fails closed again.
+        #expect(await plane.releaseAudioSource(ssrc: 0x7777_7777))
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveSourceUnknown) {
+            _ = try await plane.concealAudioLoss(ssrc: 0x7777_7777)
+        }
+    }
+
+    /// The remote side of a Discord voice room: the same construction as
+    /// `receiverTransport()` (same negotiated key), but used to seal packets
+    /// *into* the plane under test rather than to open packets it sent. It
+    /// must be a separate instance — send nonce counters and per-SSRC replay
+    /// windows are not shared between the two roles.
+    private func senderTransport() throws -> DiscordVoiceTransportEncryption {
+        try receiverTransport()
+    }
+
+    /// Builds one inbound wire packet the way a remote client would: RTP
+    /// header, DAVE-protected Opus body (XOR by 0xff, the exact transform
+    /// `NativeDAVEMediaSessionDouble` inverts), then RTPSIZE sealing.
+    private func makeIncomingAudioPacket(
+        sender: DiscordVoiceTransportEncryption,
+        ssrc: UInt32,
+        sequence: UInt16,
+        timestamp: UInt32,
+        payloadType: UInt8 = DiscordVoiceRTPHeader.discordAudioPayloadType,
+        opusPayload: [UInt8]
+    ) async throws -> [UInt8] {
+        let header = try DiscordVoiceRTPHeader(
+            payloadType: payloadType,
+            sequence: sequence,
+            timestamp: timestamp,
+            ssrc: ssrc
+        )
+        let rtpCodec = try DiscordVoiceRTPCodec()
+        let daveProtectedBody = opusPayload.map { $0 ^ 0xff }
+        return try await sender.seal(try rtpCodec.encode(header) + daveProtectedBody)
+    }
+
+    private func fixedOpusPayload(seed: Int) async throws -> [UInt8] {
+        let codec = try Opus20msCodec()
+        return try await codec.encode(fixedPCMFrame(seed: seed))
+    }
+
     private func fixedEncodedVideoFrame(seed: Int) -> Data {
         Data((0..<321).map { index in
             UInt8(truncatingIfNeeded: (index &* 31) &+ (seed &* 97) &+ 5)
@@ -1088,6 +1588,12 @@ private actor NativeDAVEMediaSessionDouble: DiscordVoiceNativeDAVEMediaSession {
     private(set) var lastProtectedMediaType: NativeDAVEMediaType?
     private(set) var lastProtectedCodec: NativeDAVECodec?
     private var forcedFailure: (any Error)?
+    private(set) var unprotectCallCount = 0
+    private(set) var lastUnprotectInputFrame: Data?
+    private(set) var lastUnprotectOutputFrame: Data?
+    private(set) var lastUnprotectedMediaType: NativeDAVEMediaType?
+    private(set) var lastUnprotectedSenderID: UInt64?
+    private var forcedUnprotectFailure: (any Error)?
 
     init(protocolVersion: UInt16, isMediaReady: Bool) {
         self.protocolVersion = protocolVersion
@@ -1096,6 +1602,10 @@ private actor NativeDAVEMediaSessionDouble: DiscordVoiceNativeDAVEMediaSession {
 
     func failNextProtect(with error: any Error) {
         forcedFailure = error
+    }
+
+    func failNextUnprotect(with error: any Error) {
+        forcedUnprotectFailure = error
     }
 
     /// A deterministic, provably non-identity transform standing in for real
@@ -1123,6 +1633,26 @@ private actor NativeDAVEMediaSessionDouble: DiscordVoiceNativeDAVEMediaSession {
         }
         let transformed = Data(frame.map { $0 ^ 0xff })
         lastProtectedFrame = transformed
+        return transformed
+    }
+
+    /// The exact inverse of `protect` above: XOR by 0xff is self-inverse, so a
+    /// receive path that skipped this call (a plaintext passthrough) hands the
+    /// decoder bytes that are provably not the sender's Opus payload.
+    func unprotect(
+        _ frame: Data,
+        mediaType: NativeDAVEMediaType,
+        senderID: UInt64
+    ) throws -> Data {
+        unprotectCallCount += 1
+        lastUnprotectInputFrame = frame
+        lastUnprotectedMediaType = mediaType
+        lastUnprotectedSenderID = senderID
+        if let forcedUnprotectFailure {
+            throw forcedUnprotectFailure
+        }
+        let transformed = Data(frame.map { $0 ^ 0xff })
+        lastUnprotectOutputFrame = transformed
         return transformed
     }
 }

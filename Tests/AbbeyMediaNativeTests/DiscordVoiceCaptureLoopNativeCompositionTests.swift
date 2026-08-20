@@ -140,6 +140,18 @@ private actor CompositionDAVESessionDouble: DiscordVoiceNativeDAVEMediaSession {
         protectCallCount += 1
         return Data(frame.map { $0 ^ 0xff })
     }
+
+    /// This capture-composition suite exercises the send path only; the
+    /// receive requirement exists so the double still satisfies the media
+    /// session protocol. XOR by 0xff is its own inverse, so it is the exact
+    /// mirror of `protect` above.
+    func unprotect(
+        _ frame: Data,
+        mediaType: NativeDAVEMediaType,
+        senderID: UInt64
+    ) throws -> Data {
+        Data(frame.map { $0 ^ 0xff })
+    }
 }
 
 private actor CompositionSpeakingRecorder {

@@ -40,6 +40,40 @@ public enum DiscordVoiceNativeMediaPlaneError: Error, Equatable, Sendable,
     case videoAnnouncementSignalFailed
     /// The caller offered an empty encoded video frame.
     case videoFrameInvalid
+    /// A received packet failed RTPSIZE transport authentication: a bad tag, a
+    /// replayed or too-old AEAD counter, or an exhausted source table.
+    ///
+    /// Receive deliberately classifies instead of propagating the underlying
+    /// error, which the send path does. Receive input is attacker-controlled,
+    /// and `DiscordVoiceTransportEncryptionError.duplicateNonce(ssrc:nonce:)`
+    /// / `.nonceTooOld(ssrc:nonce:)` carry the SSRC and the AEAD counter — a
+    /// readout of replay-window state that must not reach a packet-driven
+    /// caller. Every receive case below is payload-free for the same reason;
+    /// operators get counts from `receiveDiagnostics()`, not values.
+    case receiveTransportAuthenticationFailed
+    /// A received packet authenticated at the transport but failed DAVE
+    /// `unprotect`: no MLS participant for the claimed sender, a bad MLS tag,
+    /// or an unhealthy session.
+    case receiveDAVEUnprotectFailed
+    /// A received packet is not a well-formed RTP packet, or carries no
+    /// payload once its header and RFC 3550 padding are removed.
+    case receivePacketMalformed
+    /// A received packet is well-formed RTP for a payload type this receive
+    /// path does not decode (the negotiated video payload types). Kept
+    /// distinct from `.receivePacketMalformed` so a portable receive loop can
+    /// drop foreign media quietly instead of treating it as a fault.
+    case receiveMediaTypeUnsupported
+    /// The Opus decoder for the authenticated source could not be created, or
+    /// rejected the unprotected payload.
+    case receiveDecodeFailed
+    /// The installed generation was superseded (reset or a new install) while
+    /// a receive was suspended on transport, native, or codec work.
+    case receiveInterrupted
+    /// Loss concealment was requested for a source that has no decoder, i.e.
+    /// no packet from it has ever been authenticated on this generation.
+    /// Concealment synthesizes audio from decoder state, so it is refused
+    /// rather than allowed to fabricate a stream that was never authenticated.
+    case receiveSourceUnknown
 
     public var description: String {
         switch self {
@@ -65,6 +99,20 @@ public enum DiscordVoiceNativeMediaPlaneError: Error, Equatable, Sendable,
             "Native Discord media video announcement failed"
         case .videoFrameInvalid:
             "Native Discord media video frame is invalid"
+        case .receiveTransportAuthenticationFailed:
+            "Native Discord media receive transport authentication failed"
+        case .receiveDAVEUnprotectFailed:
+            "Native Discord media receive DAVE unprotect failed"
+        case .receivePacketMalformed:
+            "Native Discord media received a malformed packet"
+        case .receiveMediaTypeUnsupported:
+            "Native Discord media receive does not decode this media type"
+        case .receiveDecodeFailed:
+            "Native Discord media receive decode failed"
+        case .receiveInterrupted:
+            "Native Discord media receive was interrupted"
+        case .receiveSourceUnknown:
+            "Native Discord media receive has no authenticated source state"
         }
     }
 
@@ -92,9 +140,58 @@ protocol DiscordVoiceNativeDAVEMediaSession: Sendable {
         codec: NativeDAVECodec,
         ssrc: UInt32
     ) async throws -> Data
+
+    /// Removes the real MLS/DAVE media protection from one received frame.
+    /// This is the exact mirror of `protect` and the boundary the receive path
+    /// calls; nothing between the transport AEAD and this call may substitute
+    /// for it, and no receive path may return a payload that did not pass
+    /// through it.
+    ///
+    /// `senderID` is the sender's Discord user ID — the MLS participant key —
+    /// not an SSRC. The media plane has no SSRC-to-user mapping (it comes from
+    /// Voice Gateway Speaking events, which the portable layer owns), so the
+    /// caller supplies it. An incorrect mapping cannot yield audio: the frame
+    /// simply fails to authenticate against that participant's ratchet.
+    func unprotect(
+        _ frame: Data,
+        mediaType: NativeDAVEMediaType,
+        senderID: UInt64
+    ) async throws -> Data
 }
 
 extension NativeDAVESession: DiscordVoiceNativeDAVEMediaSession {}
+
+/// One authenticated, DAVE-unprotected, decoded 20 ms audio frame together
+/// with the RTP identity of the source it came from.
+///
+/// Every field is read from the packet header **after** RTPSIZE
+/// authentication succeeded, so `ssrc`, `sequence`, and `timestamp` describe
+/// an authenticated packet — a portable jitter/mix layer can order and demux
+/// on them without re-deriving anything from unauthenticated bytes.
+public struct DiscordVoiceReceivedAudioFrame: Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
+{
+    /// Authenticated synchronization source of the sender.
+    public let ssrc: UInt32
+    /// Authenticated RTP sequence number, for reorder/duplicate policy.
+    public let sequence: UInt16
+    /// Authenticated RTP timestamp (48 kHz audio clock).
+    public let timestamp: UInt32
+    /// Interleaved stereo 48 kHz PCM for exactly this packet.
+    public let pcm: [Int16]
+
+    /// Diagnostics never carry PCM. Sample counts are shape, not content.
+    public var description: String {
+        "DiscordVoiceReceivedAudioFrame(ssrc: \(ssrc), sequence: \(sequence), "
+            + "timestamp: \(timestamp), samples: \(pcm.count))"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: ["receivedAudio": "<redacted>"], displayStyle: .struct)
+    }
+}
 
 /// Session-owned native media bootstrap for one Discord Voice connection.
 ///
@@ -110,6 +207,69 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         public var description: String {
             "DiscordVoiceNativeMediaPlane.Snapshot(isInstalled: \(isInstalled))"
         }
+    }
+
+    /// Redacted receive telemetry: counts and one cardinality, nothing else.
+    ///
+    /// Every packet the receive path refuses is counted in exactly one
+    /// `dropped*` bucket, so "fails closed" is observable without any error
+    /// carrying an SSRC, a nonce, packet bytes, or PCM. Counts are cumulative
+    /// for the lifetime of the plane and deliberately survive `reset()` — drop
+    /// evidence matters most across a teardown.
+    public struct ReceiveDiagnostics: Equatable, Sendable, CustomStringConvertible {
+        /// Packets that produced decoded PCM.
+        public let accepted: UInt64
+        /// Loss-concealment frames synthesized by `concealAudioLoss(ssrc:)`.
+        public let concealed: UInt64
+        /// Refused because no generation was installed, or the installed
+        /// generation never attested a ready DAVE session.
+        public let droppedNotInstalled: UInt64
+        /// Refused by RTPSIZE transport authentication (bad tag, replay,
+        /// too-old counter, source table exhausted).
+        public let droppedTransportAuthentication: UInt64
+        /// Refused by the DAVE boundary (no session, or `unprotect` failed).
+        public let droppedDAVE: UInt64
+        /// Refused as not well-formed RTP, or as carrying no payload.
+        public let droppedMalformed: UInt64
+        /// Refused as a payload type this receive path does not decode.
+        public let droppedMediaTypeUnsupported: UInt64
+        /// Refused because the Opus decoder could not be created or rejected
+        /// the unprotected payload.
+        public let droppedDecode: UInt64
+        /// Refused because the installed generation was superseded while the
+        /// receive was suspended.
+        public let droppedInterrupted: UInt64
+        /// Concealment refused for a source with no authenticated decoder.
+        public let droppedSourceUnknown: UInt64
+        /// How many sources currently hold decoder state.
+        public let activeAudioSources: Int
+
+        public var description: String {
+            "DiscordVoiceNativeMediaPlane.ReceiveDiagnostics("
+                + "accepted: \(accepted), concealed: \(concealed), "
+                + "droppedNotInstalled: \(droppedNotInstalled), "
+                + "droppedTransportAuthentication: \(droppedTransportAuthentication), "
+                + "droppedDAVE: \(droppedDAVE), "
+                + "droppedMalformed: \(droppedMalformed), "
+                + "droppedMediaTypeUnsupported: \(droppedMediaTypeUnsupported), "
+                + "droppedDecode: \(droppedDecode), "
+                + "droppedInterrupted: \(droppedInterrupted), "
+                + "droppedSourceUnknown: \(droppedSourceUnknown), "
+                + "activeAudioSources: \(activeAudioSources))"
+        }
+    }
+
+    private struct ReceiveCounters: Sendable {
+        var accepted: UInt64 = 0
+        var concealed: UInt64 = 0
+        var droppedNotInstalled: UInt64 = 0
+        var droppedTransportAuthentication: UInt64 = 0
+        var droppedDAVE: UInt64 = 0
+        var droppedMalformed: UInt64 = 0
+        var droppedMediaTypeUnsupported: UInt64 = 0
+        var droppedDecode: UInt64 = 0
+        var droppedInterrupted: UInt64 = 0
+        var droppedSourceUnknown: UInt64 = 0
     }
 
     typealias DAVESessionProvider = @Sendable () async ->
@@ -213,6 +373,32 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     /// source's SSRC and codec.
     private var videoRevision: UInt64 = 0
     private var videoAnnouncementSignal: (@Sendable (VoiceGatewayV8Video) async throws -> Void)?
+
+    /// One Opus decoder per authenticated remote SSRC.
+    ///
+    /// Opus decoders carry per-stream state (overlap-add history, PLC state),
+    /// so feeding two senders through one decoder is a correctness bug, not a
+    /// style choice — and `runtime.opus` is the *encoder* used by the send
+    /// path, which must never be shared with any receive stream either.
+    ///
+    /// These live here rather than in the portable receive layer because the
+    /// dependency direction forces it: `Opus20msCodec` is an AbbeyMediaNative
+    /// type and AbbeyCore (where the receive loop, jitter buffer, and mixer
+    /// live) cannot name it.
+    ///
+    /// Entries are created only after a packet has passed **both** AEAD and
+    /// DAVE, never from unauthenticated input — otherwise a spoofed SSRC spray
+    /// would grow memory for free. This is why the decoder is not "reserved"
+    /// before the first `await` the way the send path reserves its RTP tick:
+    /// the send reservation exists to stop two concurrent sends racing shared
+    /// mutable state, which receive has no analogue of. Do not "fix" this by
+    /// moving decoder creation earlier.
+    ///
+    /// The map is bounded by construction: an SSRC only reaches decoder
+    /// creation after `DiscordVoiceTransportEncryption` admitted it into its
+    /// own receive-window table, which is capped at `sourceCapacity`.
+    private var audioDecoders: [UInt32: Opus20msCodec] = [:]
+    private var receiveCounters = ReceiveCounters()
 
 
     public init(
@@ -467,6 +653,238 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
 
         try await sendTracked(wirePacket, through: installed.datagramTransport)
+    }
+
+    // MARK: - Receive boundary (the exact mirror of `sendAudioFrame`)
+
+    /// Authenticates one received RTPSIZE packet, removes DAVE media
+    /// protection, decodes the Opus payload, and returns the PCM together with
+    /// the authenticated RTP identity of its source. This is the receive half
+    /// of the decryption boundary: the media plane owns the keys, and the
+    /// portable layer above it never sees them, exactly as on send.
+    ///
+    /// The order is the strict mirror of `sendAudioFrame`:
+    /// `DiscordVoiceTransportEncryption.open` → `NativeDAVESession.unprotect`
+    /// → `Opus20msCodec.decode`. Every step is real, and `revision` is
+    /// reserved synchronously before this call's first `await` and re-checked
+    /// after every suspension, so a `reset()` or superseding `install(_:)`
+    /// cannot let a superseded generation hand audio back to a caller.
+    ///
+    /// Fails closed — no audio, and the packet counted in exactly one
+    /// `receiveDiagnostics()` bucket — when: no generation is installed, the
+    /// installed generation never attested a ready DAVE session, no DAVE
+    /// session is available, the packet fails transport authentication (bad
+    /// tag, replay, too-old counter), the packet is not well-formed RTP or is
+    /// empty, its payload type is not the negotiated audio one, DAVE
+    /// `unprotect` fails, the Opus decode fails, or the installation is
+    /// superseded mid-receive. There is no branch that returns a payload which
+    /// did not pass through both AEAD `open` and DAVE `unprotect`.
+    ///
+    /// `senderID` is the sender's Discord user ID (the MLS participant key),
+    /// which the caller learns from Voice Gateway Speaking events; the plane
+    /// holds no SSRC-to-user mapping. A wrong mapping cannot leak audio — the
+    /// frame fails to authenticate against that participant's ratchet.
+    ///
+    /// Contract for the portable layer (spec §2/§3): this call does **not**
+    /// serialize per-SSRC decode ordering. Two concurrent calls for the same
+    /// SSRC both reach that SSRC's decoder actor, in nondeterministic order.
+    /// Reordering, duplicate/replay policy above the AEAD window, and
+    /// concealment scheduling belong to the jitter buffer, which must feed
+    /// this call one packet at a time per source and drive
+    /// `concealAudioLoss(ssrc:)` for gaps it cannot fill.
+    public func receiveAudioFrame(
+        packet: [UInt8],
+        senderID: UInt64
+    ) async throws -> DiscordVoiceReceivedAudioFrame {
+        guard let installed = runtime else {
+            receiveCounters.droppedNotInstalled &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.mediaNotInstalled
+        }
+        guard installed.daveReady else {
+            receiveCounters.droppedNotInstalled &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.daveProtectionRequired
+        }
+        // Reserved synchronously, before this call's first `await`, exactly as
+        // `sendAudioFrame` reserves its own send revision.
+        let receiveRevision = revision
+
+        // No header is parsed before this point on purpose: `open` performs
+        // the RTP layout and header decode itself, so everything read below
+        // comes from a packet whose header was authenticated as AEAD
+        // associated data. There is nothing to reconcile against an earlier
+        // unauthenticated parse.
+        let plaintextPacket: [UInt8]
+        do {
+            plaintextPacket = try await installed.transportEncryption.open(packet)
+        } catch is DiscordVoiceRTPError {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        } catch {
+            receiveCounters.droppedTransportAuthentication &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveTransportAuthenticationFailed
+        }
+        try requireCurrentReceive(receiveRevision)
+
+        let header: DiscordVoiceRTPHeader
+        let payload: [UInt8]
+        do {
+            let rtpCodec = try DiscordVoiceRTPCodec()
+            header = try rtpCodec.decodeHeader(from: plaintextPacket)
+            let layout = try rtpCodec.plaintextLayout(in: plaintextPacket)
+            payload = Array(plaintextPacket[layout.payloadRange])
+        } catch {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        }
+        // `acceptedPayloadTypes` also admits the negotiated video payload
+        // types, so `decodeHeader` succeeds on a video packet. Without this
+        // gate a video payload would be handed to `unprotect(mediaType:
+        // .audio)` and then to an Opus decoder.
+        guard header.payloadType == DiscordVoiceRTPHeader.discordAudioPayloadType else {
+            receiveCounters.droppedMediaTypeUnsupported &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveMediaTypeUnsupported
+        }
+        guard !payload.isEmpty else {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        }
+
+        guard let daveSession = await daveSessionProvider() else {
+            receiveCounters.droppedDAVE &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.daveSessionUnavailable
+        }
+        try requireCurrentReceive(receiveRevision)
+
+        // DAVE protection is removed before the payload ever reaches the
+        // decoder; nothing upstream can substitute a plaintext payload for it.
+        let opusPayload: Data
+        do {
+            opusPayload = try await daveSession.unprotect(
+                Data(payload),
+                mediaType: .audio,
+                senderID: senderID
+            )
+        } catch {
+            receiveCounters.droppedDAVE &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveDAVEUnprotectFailed
+        }
+        try requireCurrentReceive(receiveRevision)
+
+        // Decoder state is created only now: both AEAD and DAVE have accepted
+        // this packet, so the SSRC below is authenticated.
+        let decoder: Opus20msCodec
+        do {
+            decoder = try audioDecoder(for: header.ssrc)
+        } catch {
+            receiveCounters.droppedDecode &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveDecodeFailed
+        }
+
+        let pcm: [Int16]
+        do {
+            pcm = try await decoder.decode(Array(opusPayload))
+        } catch {
+            receiveCounters.droppedDecode &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveDecodeFailed
+        }
+        // Last gate before authenticated audio is handed to the caller.
+        try requireCurrentReceive(receiveRevision)
+
+        receiveCounters.accepted &+= 1
+        return DiscordVoiceReceivedAudioFrame(
+            ssrc: header.ssrc,
+            sequence: header.sequence,
+            timestamp: header.timestamp,
+            pcm: pcm
+        )
+    }
+
+    /// Synthesizes one 20 ms concealment frame for a source whose packet was
+    /// lost, using that source's own Opus decoder state
+    /// (`Opus20msCodec.decodePacketLoss()`).
+    ///
+    /// The decoder lives here (see `audioDecoders`), so this entry point is
+    /// what lets the portable jitter buffer implement the spec's PLC policy
+    /// without ever holding a codec or a key.
+    ///
+    /// Fails closed with `.receiveSourceUnknown` when the source has no
+    /// decoder — that is, when no packet from it has ever been authenticated
+    /// on this generation. Concealment is synthesized audio, so it is
+    /// available only as a continuation of a stream that already passed both
+    /// AEAD and DAVE; it can never introduce a stream that did not.
+    public func concealAudioLoss(ssrc: UInt32) async throws -> [Int16] {
+        guard let installed = runtime else {
+            receiveCounters.droppedNotInstalled &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.mediaNotInstalled
+        }
+        guard installed.daveReady else {
+            receiveCounters.droppedNotInstalled &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.daveProtectionRequired
+        }
+        let receiveRevision = revision
+
+        guard let decoder = audioDecoders[ssrc] else {
+            receiveCounters.droppedSourceUnknown &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveSourceUnknown
+        }
+
+        let pcm: [Int16]
+        do {
+            pcm = try await decoder.decodePacketLoss()
+        } catch {
+            receiveCounters.droppedDecode &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveDecodeFailed
+        }
+        try requireCurrentReceive(receiveRevision)
+
+        receiveCounters.concealed &+= 1
+        return pcm
+    }
+
+    /// Drops one source's decoder state. This is the eviction hook for the
+    /// portable layer's idle-SSRC timeout (spec §3): the timing policy and its
+    /// injectable clock live there, the decoder lifetime lives here, so a busy
+    /// guild does not leak decoders. Returns whether a decoder was released.
+    @discardableResult
+    public func releaseAudioSource(ssrc: UInt32) -> Bool {
+        audioDecoders.removeValue(forKey: ssrc) != nil
+    }
+
+    /// Redacted receive telemetry. Counts and one cardinality only — never an
+    /// SSRC, a nonce, packet bytes, or PCM.
+    public func receiveDiagnostics() -> ReceiveDiagnostics {
+        ReceiveDiagnostics(
+            accepted: receiveCounters.accepted,
+            concealed: receiveCounters.concealed,
+            droppedNotInstalled: receiveCounters.droppedNotInstalled,
+            droppedTransportAuthentication: receiveCounters.droppedTransportAuthentication,
+            droppedDAVE: receiveCounters.droppedDAVE,
+            droppedMalformed: receiveCounters.droppedMalformed,
+            droppedMediaTypeUnsupported: receiveCounters.droppedMediaTypeUnsupported,
+            droppedDecode: receiveCounters.droppedDecode,
+            droppedInterrupted: receiveCounters.droppedInterrupted,
+            droppedSourceUnknown: receiveCounters.droppedSourceUnknown,
+            activeAudioSources: audioDecoders.count
+        )
+    }
+
+    private func audioDecoder(for ssrc: UInt32) throws -> Opus20msCodec {
+        if let existing = audioDecoders[ssrc] { return existing }
+        let decoder = try makeOpus()
+        audioDecoders[ssrc] = decoder
+        return decoder
+    }
+
+    /// `requireCurrent` for the receive path: same check, same idiom, but the
+    /// refusal is counted so "no audio, and counted" holds for interruption
+    /// exactly as it does for every other receive failure.
+    private func requireCurrentReceive(_ expectedRevision: UInt64) throws {
+        do {
+            try requireCurrent(expectedRevision, orThrow: .receiveInterrupted)
+        } catch {
+            receiveCounters.droppedInterrupted &+= 1
+            throw error
+        }
     }
 
     private func gate(_ kind: SignalKind) -> OneShotSignalGate {
@@ -738,6 +1156,11 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     private func clearRuntime() {
         runtime = nil
         clock = nil
+        // Decoder state belongs to the generation whose keys authenticated the
+        // packets that built it; a new install must not continue a superseded
+        // generation's stream. Counters deliberately survive — see
+        // `ReceiveDiagnostics`.
+        audioDecoders.removeAll(keepingCapacity: false)
         speakingGate = .pending
         videoSource = nil
         videoClock = nil
