@@ -136,3 +136,33 @@ nonce is not on the wire) subtracted from every fragment budget.
 **Known gap this leaves:** fragments are opaque byte ranges. There is no H.264 FU-A, VP8 payload
 descriptor, or AV1 OBU aggregation header — a real Discord receiver needs those, and no receiver
 interoperability is claimed.
+
+
+## §2 correction (2026-08-20): "malformed framing is terminal" was too literal
+
+§2 said a malformed frame ends the loop. Taken literally that is wrong, and the implementing
+agent flagged it rather than following it: **Discord multiplexes RTP, RTX, and RTCP on the one
+socket** (this repo's own `sendProtectedPacket` documentation says "RTP/RTCP datagram"), and
+`decodeHeader` validates length *before* payload type. So an 8-byte RTCP receiver report — a
+completely normal packet — would have killed the receive path on arrival.
+
+**Confirmed reading:** unparseable framing that claims the Discord *audio* payload type is
+terminal; anything else on the socket is a counted ignore. That is the behavior now implemented
+and tested (`unexpectedPayloadTypeIsIgnored`, `shortRTCPDatagramIsIgnored`).
+
+## Follow-up wiring is NOT done (stated so it is not mistaken for finished)
+
+The three slices are each verified in isolation and merged, but **the receive path is not yet
+connected end to end**. Two seams remain:
+
+1. **Plane ⇄ loop.** The loop consumes `DiscordVoiceAudioFrameDecoder`
+   (`decodeAudioFrame(packet:)`, `concealAudioFrame(ssrc:)`); the plane exposes
+   `receiveAudioFrame(packet:senderID:)` and `concealAudioLoss(ssrc:)`. The gap is `senderID`,
+   which DAVE needs for the per-participant ratchet and which arrives on Speaking events — so
+   the adapter needs an SSRC→user map that does not exist yet. That is a design decision, not a
+   mechanical shim.
+2. **Packetizer ⇄ plane.** `sendVideoFrame` still emits one packet per frame; adopting the
+   packetizer needs a `NativeDAVECodec` ⇄ `DiscordVoiceVideoCodec` bridge and a per-fragment
+   revision re-check.
+
+Until both land, nothing calls the receive path in production and no audio is heard.
