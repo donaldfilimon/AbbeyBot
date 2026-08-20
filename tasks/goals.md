@@ -148,6 +148,20 @@ status: in_progress
   tests in 8 suites in debug AND release, STATIC_SECURITY_GREEN, NATIVE_MEDIA_SMOKE_GREEN, all
   EXIT:0.
 
+- **`/goal complete all / cleanup all` 2026-08-20 ~07:1x.** Found that **PR #60 was merged at
+  13:05 UTC while work was still landing on its branch**, stranding ten commits behind a closed
+  PR; reunited the histories and opened **PR #64** for them. Swept the repository for orphaned
+  work at the same time and found two agent branches nobody had merged, both worth keeping:
+  hermetic UDP loss/reorder/corruption fault injection (directly one of this goal's required
+  evidence items) and deterministic Twitch loopback connection-state tests. Both are now
+  integrated — AbbeyCoreTests 333/333 (from 327), AbbeyBotAppTests 74/74, build exit 0.
+  Cleanup: 8 worktrees removed (3 were stale pointers into the deleted `~/Desktop/AbbeyBot`) and
+  8 fully-merged branches deleted. Deliberately left alone: the `voice-reconnect-fallback`
+  worktree and branch, which carry another session's in-flight work (a live-disconnect
+  termination-signal fix and a cursor-mirror doc sync) that is **not** in PR #64 and still needs
+  its owner — note it independently landed the same `import Observation` fix, so it will conflict
+  trivially on that file.
+
 ## Complete Discord video and Go Live
 status: in_progress
 - Discord camera video and Go Live screen sharing are separate from the audio completion claim and
