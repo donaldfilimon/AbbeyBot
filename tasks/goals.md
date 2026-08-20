@@ -67,6 +67,44 @@ status: in_progress
   in debug and release with output secrecy and `NATIVE_MEDIA_SMOKE_GREEN`. This closes the local
   Phase 4 bootstrap boundary only; protected packet send/receive, capture/playback, reconnect,
   UI, and live evidence remain open, so the goal stays `in_progress`.
+- **`/goal continue` 2026-08-04:** dispatched three parallel worktree-isolated slices against the
+  open Phase 4 residuals — (1) Phase 5: compose the installed runtime into one deterministic
+  protected 20 ms Opus/RTP send proving DAVE protection, RTP header/clock, AEAD counter,
+  speaking-before-send ordering, teardown, and no-plaintext-fallback; (2) a scripted local Voice
+  Gateway WebSocket test server to replace in-process fake transports in the voice-gate audit gap;
+  (3) `/voice` SwiftUI mute/deafen + honest connection-phase visibility, scoped to existing gateway
+  presence only (explicitly not PTT/VAD/volume/device work, which needs capture composition that
+  doesn't exist yet). All three are in flight; results and ledger updates land per-slice when each
+  agent finishes. Reconnect/resume (`VoiceGatewayClient` dead-code wiring) and AVAudioEngine
+  capture/playback composition remain unstarted open residuals for the next continue pass. Live
+  join/speak/hear/reconnect/leave evidence stays operator-blocked (no `.env`/token/Keychain entry
+  in this environment) and was not attempted.
+- **All three `/goal continue` slices landed 2026-08-04.** The voice-gate and `/voice` UI slices
+  merged clean on the first pass. The Phase 5 agent hit two transient connection failures (an API
+  connection drop mid-response, then a stalled resume) with real, sound work already staged in its
+  worktree each time; rather than keep re-dispatching a flaky agent, the session reviewed the
+  staged diff directly (correct reuse of existing `DiscordVoiceRTPHeader`/`DiscordVoiceRTPCodec`/
+  `DiscordVoiceRTPClock`/`NativeDAVESession.protect` — no invented types) and finished verification
+  itself. See `tasks/todo.md`'s Phase 5 entry for what closed: the full protected-send path composes
+  and is proven by six properties in `sendAudioFrameComposesTheFullSendPath` plus five dedicated
+  fail-closed tests, and `DiscordVoiceGatewaySession` now actually sends the previously-modeled
+  Speaking opcode. Nothing in production calls `sendAudioFrame` yet (no capture loop), so the native
+  factory still honestly reports `.unavailable` and DAVE 0 — this closes the send-path composition
+  boundary only. All three slices verified together in one tree: native gate 59/59 (debug+release),
+  the four non-desktop targets 472/472, `STATIC_SECURITY_GREEN`, all `EXIT:0`. This goal remains
+  `in_progress` — reconnect/resume and AVAudioEngine capture composition (Phase 6) are the next
+  slices, and live evidence stays operator-blocked.
+- **`/goal continue` 2026-08-20: buffered resume landed (the reconnect/resume residual's
+  in-session half).** `DiscordVoiceGatewaySession` gained a bounded transport loop: a resumable
+  close on an established session retains credentials/keys/media plane, backs off through an
+  injected `VoiceGatewayReconnectBackoff`, reopens the same endpoint, and resumes via op-7/op-9
+  with the attempt budget refilled only by a successful Resumed; every other outcome (including
+  budget exhaustion and operator disconnect mid-backoff) takes the pre-existing credential-dropping
+  teardown. New `.resuming` session phase keeps snapshots honest. Verified: five new multi-attempt
+  harness tests, full `AbbeyCoreTests` 312 green, desktop smoke green (see todo bullet for the
+  in-log evidence). Explicitly NOT closed: automatic controller-level full-reconnect
+  (`DiscordVoiceController.reconnect()` remains production-uninvoked), induced UDP/invalid-session/
+  channel-move/shutdown verification, and live-network resume evidence (operator-blocked).
 
 ## Complete Discord video and Go Live
 status: in_progress
@@ -103,6 +141,18 @@ status: in_progress
   This is signaling and local-preview proof only: source selection UX, negotiated codec/RTP,
   remote rendering, DAVE video-frame transport, fault/performance coverage, and live camera plus
   Go Live evidence remain open, so this goal remains `in_progress`.
+- **`/goal continue` 2026-08-04: deliberately deferred, not stopped.** This pass's audio-side
+  Phase 5 slice (see the voice-audio goal above) is actively composing the production call site for
+  `NativeDAVESession.protect(...)` and the AEAD/RTP send path in the same files this goal's DAVE
+  video-frame and video-RTP items would need to extend (`NativeDAVESession.swift`,
+  `DiscordVoiceTransportEncryption.swift`, the RTP header/clock pieces in `DiscordVoiceRTP.swift`).
+  Starting DAVE-video or video-RTP work concurrently — even in an isolated worktree — would either
+  duplicate Phase 5's composition pattern before it exists or create a merge conflict on those
+  shared files once both land. Non-colliding video work (render/UI beyond what's already landed,
+  source-selection UX) was not started this pass either, to keep this session's coordination bounded
+  to the three in-flight slices. Next continue pass: once Phase 5 lands, extend its
+  DAVE-protect/AEAD/RTP call pattern to `.video` frames rather than re-deriving it. Goal remains
+  `in_progress`; no new evidence this pass.
 
 ## Release and SwiftData hardening
 status: done

@@ -76,13 +76,54 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 - [ ] Add Voice Gateway buffered resume and full reconnect fallback, re-establish UDP/media state
       safely, stop audio on explicit leave, and verify induced WebSocket loss, UDP loss/reorder,
       invalid session, channel move, and process shutdown.
+      *(PARTIAL 2026-08-20 — in-session buffered resume landed in
+      `DiscordVoiceGatewaySession`: the transport now runs in a bounded loop; only a `.resume`
+      close disposition (which requires an established, `resumeEligible` session) retains
+      credentials, transport keys, and the installed media plane, re-opens the same endpoint
+      through injected backoff, sends op-7 Resume (never Identify) on Hello, and re-establishes
+      on op-9 Resumed — the attempt budget (`maximumResumeAttempts`, default 3, 0 disables)
+      refills only on a successful Resumed. Every other outcome — pre-established drops,
+      reidentify/terminal codes, protocol violations, budget exhaustion — takes the exact
+      credential-dropping teardown that existed before, and explicit `disconnect()` wins over an
+      in-flight backoff. New session phase `.resuming` is honest in snapshots
+      (`signalingEstablished == false` during the gap). Five new hermetic tests drive multi-attempt
+      scripted transports (`DiscordVoiceGatewayResumeHarness`); full `AbbeyCoreTests` 312 green.
+      Still open in this bullet: controller-level full-reconnect fallback is NOT auto-triggered —
+      `DiscordVoiceController.reconnect()` exists and is tested but nothing invokes it on session
+      failure; induced UDP loss/reorder, invalid-session, channel-move, and process-shutdown
+      verification remain unattempted; live-network resume evidence stays operator-blocked.)*
 - [ ] Expand `/voice` and the Discord SwiftUI surface with honest connection phases, guild/channel
       selection, join/leave/status, mute/deafen, PTT/VAD, device/volume controls, speaking meters,
       reconnect/error visibility, stage-channel state, permission preflight, privacy policy, and an
       immediate capture kill switch.
-- [ ] Add the voice gate: protocol/unit fixtures, scripted local Voice WebSocket, real UDP loopback,
-      codec/crypto/DAVE tests, audio-device tests, and fault injection; then run the full repository
-      gate. Do not mark live capability complete from local tests alone.
+      *(2026-08-04: Closed the gateway-presence slice of this item — mute/deafen and honest
+      connection-phase visibility, nothing else. `DiscordBridge.updateVoiceMuteState(selfMute:
+      selfDeaf:)` sends a real `VOICE_STATE_UPDATE` for the already-confirmed channel; the tracked
+      `voiceSelfMute`/`voiceSelfDeaf` only ever update from Discord's own echo in
+      `handleVoiceStateUpdate`, never optimistically. `MediaSessionModel` gained a
+      `VoicePresencePort` (hermetically fakeable) wiring this into `DiscordView`'s new self-mute/
+      self-deaf toggles, gated on confirmed presence. Added a literal `connectionPhaseLabel` —
+      one phrase per `DiscordVoiceControllerPhase` case (idle → requesting → awaiting pair →
+      connecting → negotiating transport → negotiating DAVE → ready → reconnecting → failed) —
+      alongside the existing signaling/transport copy, so the view never implies more than a
+      connected/disconnected binary. This is presence-only signaling: there is still no Opus/UDP
+      audio to silence, and it is distinct from `AVAudioEngineAdapter.setMuted` (still unwired to
+      Discord, see the AVAudioEngine PARTIAL bullet below). Caveat found and disclosed in-view:
+      both `DiscordVoiceSessionFactory` implementations still report `mediaAdapterAvailability ==
+      .unavailable`, so `DiscordView`'s own "Probe transport" button always ends by leaving
+      (`fail(.mediaUnavailable)` drains the leave before `join()` returns) — the new toggles are
+      reachable only while presence is held via Discord's `/voice join` slash command (which does
+      not auto-leave), not via this view's own join affordance. Also fixed a torn-read risk:
+      `DiscordBridge.voicePresenceState()` returns confirmed-channel + self-mute + self-deaf from
+      one actor-isolated read instead of three separate hops. PTT/VAD, device/volume controls beyond
+      the existing pickers, speaking meters, reconnect/error visibility, stage-channel state, and
+      privacy-policy copy remain open and were not attempted here — see
+      `Tests/AbbeyBotAppTests/MediaSessionModelTests.swift` and
+      `Tests/AbbeyCoreTests/DiscordBridgeLifecycleTests.swift` for the new coverage.)*
+- [ ] Add the voice gate: protocol/unit fixtures, scripted local Voice WebSocket (done
+      2026-08-04 — see `Tests/AbbeyCoreTests/VoiceGatewayLoopbackWebSocketTests.swift`), real UDP
+      loopback, codec/crypto/DAVE tests, audio-device tests, and fault injection; then run the full
+      repository gate. Do not mark live capability complete from local tests alone.
 - [ ] Rotate the previously exposed Discord bot token, authorize an isolated test guild/channel,
       and capture live current-protocol evidence for join, DAVE negotiation, speak, hear, network
       reconnect/resume, channel move, and leave without logging credentials or raw audio.
@@ -181,9 +222,36 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       verification passed 67 tests in 4 suites; fresh pinned native debug and release each passed
       52 tests in 7 suites, output secrecy passed, `STATIC_SECURITY_GREEN` and
       `NATIVE_MEDIA_SMOKE_GREEN` were emitted.
-- [ ] Phase 5 remains open: send one deterministic protected 20 ms Opus/RTP packet through the
-      retained UDP socket and prove DAVE protection, RTP header/clock, AEAD counter, speaking
-      ordering, teardown, and no plaintext fallback. No live-audio claim is made by Phase 4.
+- [x] Phase 5 closed 2026-08-04: `DiscordVoiceNativeMediaPlane.sendAudioFrame(pcm:)` composes the
+      full send path — encode via `Opus20msCodec`, DAVE-protect via the installed
+      `NativeDAVESession.protect(...)` (fails closed with `.daveProtectionRequired` unless the
+      generation attested a ready DAVE session), build the RTP header via the existing
+      `DiscordVoiceRTPCodec`/`DiscordVoiceRTPClock` (clock tick and the one-shot Speaking gate are
+      reserved synchronously before the first `await` so two overlapping sends can't race the same
+      sequence number or double-fire Speaking), seal via the installed
+      `DiscordVoiceTransportEncryption`, and send through the retained
+      `DiscordVoiceMediaDatagramTransport`. `DiscordVoiceGatewaySession.connect()` now attaches a
+      real Speaking callback to the media plane that calls the previously-modeled-but-never-sent
+      `machine.speaking(flags: 1)` and sends it over the live WebSocket session — closing the
+      Phase 1 audit's "speaking(flags:) is modeled and tested but not yet sent by the production
+      session" caveat. `sendAudioFrameComposesTheFullSendPath` proves all six required properties
+      over 3 sent frames: DAVE protection is real (wire payload matches DAVE's actual output, not
+      the raw Opus bytes a bypass would send), RTP sequence/timestamp advance deterministically,
+      AEAD counters are unique and verified by actually decrypting each wire packet, Speaking fires
+      exactly once before the first packet, and five dedicated fail-closed tests prove no send ever
+      reaches the transport without an installed generation, without attested DAVE, when DAVE
+      protection fails, when the Speaking signal fails, or when `reset()` interrupts a suspended
+      send. **Still open, not attempted here:** nothing in production calls `sendAudioFrame` yet —
+      there is no capture loop (that's the `AVAudioEngine` composition item below) — so the native
+      factory correctly still reports `.unavailable` and advertises DAVE 0; this closes the send-path
+      composition boundary only, not shipped audio. Verified: native gate 59/59 tests in 7 suites
+      (debug + release), output secrecy and `STATIC_SECURITY_GREEN`, `NATIVE_MEDIA_SMOKE_GREEN`; the
+      four non-desktop targets 472/472 (`AbbeyCoreTests` 303 + `AbbeyServerKitTests` 117 +
+      `AbbeyCLITests` 30 + `AbbeyServerTests` 22), `EXIT:0`.
+- [ ] Phase 6: wire a real capture loop (microphone or a deterministic test source) that actually
+      calls `sendAudioFrame` in production, so the native factory can honestly stop reporting
+      `.unavailable`. This is the `AVAudioEngine` capture/playback composition item below, not a
+      separate task.
 
 ### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
 
@@ -209,9 +277,23 @@ Open items above, graded against the committed tree at `2a423e1`:
   dispositioning with 14 tests but is dead code: the production factory builds
   `DiscordVoiceGatewaySession`, which has no reconnect; "buffered" resume exists nowhere.
 - **`/voice` + UI PARTIAL** — honest presence-only copy, kill switch, device pickers, disclaimed
-  meters; missing mute/deafen/PTT/VAD/volume controls and stage state.
-- **Voice gate PARTIAL** — real UDP loopback yes; scripted local Voice WebSocket server no (all
-  gateway tests use in-process fake transports); `ABBEY_NATIVE_MEDIA=1` suites are outside CI.
+  meters, gateway self-mute/self-deaf presence toggle, and a literal per-phase connection-state
+  readout (2026-08-04, gateway-presence-only, not wired to `AVAudioEngineAdapter.setMuted`);
+  missing PTT/VAD, volume/speaker-level controls, and stage-channel state.
+- **Voice gate PARTIAL, narrowed 2026-08-04** — real UDP loopback yes; scripted local Voice
+  WebSocket server now also yes: `Tests/AbbeyCoreTests/VoiceGatewayLoopbackWebSocketTests.swift`
+  binds a real `NIOTypedWebSocketServerUpgrader`-based server to `127.0.0.1:0` and drives it with
+  the production `WSClient.WebSocketClient` (via a test-only `VoiceGatewayClientTransport.loopback`
+  runner that reuses `.live()`'s exact internal session-bridging code, `@testable`-visible), proving
+  a genuine HTTP/1.1 Upgrade handshake and real WebSocket frame (de)serialization end-to-end through
+  `VoiceGatewayClient` + `VoiceGatewayV8StateMachine`: Identify→Ready→Select Protocol→Session
+  Description reaching `established`/`terminated`, a real 4014 close frame producing
+  `.terminalClose(4014)`, and a withheld heartbeat ACK producing a real 1001 close from the client
+  and `.reconnectLimitReached`. `VoiceGatewayClientTests.swift`'s in-process fake-transport suite is
+  unchanged and still covers reconnect/backoff/cancellation edge cases the real-socket tests don't
+  re-derive. Still open: codec/crypto/DAVE payload correctness over this real transport, audio-device
+  tests, and fault injection (packet loss/reorder, mid-handshake disconnects) are explicitly out of
+  this slice's scope; `ABBEY_NATIVE_MEDIA=1` suites remain outside CI.
 - **Item 12 (live evidence) MISSING** — no rotation record, no live-run artifact; blocked on a
   real guild + operator, not on code in this environment.
 

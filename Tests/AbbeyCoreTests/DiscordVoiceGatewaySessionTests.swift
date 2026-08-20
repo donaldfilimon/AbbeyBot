@@ -1150,6 +1150,143 @@ struct DiscordVoiceGatewaySessionTests {
         await gateway.disconnect()
     }
 
+    @Test("resumable close after establish sends Resume, not Identify, and re-establishes without media reinstall")
+    func bufferedResumeReestablishes() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let handler = DiscordVoiceGatewayDAVEHandlerRecorder()
+        let operations = DiscordVoiceGatewayOperationRecorder()
+        let plane = DiscordVoiceGatewayMediaPlaneRecorder(operationRecorder: operations)
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            mediaPlane: plane,
+            daveControlHandler: handler.handler,
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness, keyByte: 197)
+        #expect(await plane.installation()?.installCount == 1)
+        await operations.clear()
+
+        await harness.finishRemotely(code: 4015)
+        try await eventually { await harness.attemptCount() == 2 }
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+        try await eventually { await harness.sentOpcodes(attempt: 1).contains(7) }
+        #expect(!(await harness.sentOpcodes(attempt: 1).contains(0)))
+        await harness.send(#"{"op":9,"seq":5,"d":null}"#)
+        try await eventually { await gateway.snapshot().phase == .established }
+
+        // Same session, same keys: the installed media plane survives the
+        // outage un-reset and un-reinstalled, and the DAVE handler saw only
+        // the connect-time reset.
+        #expect(await plane.installation()?.installCount == 1)
+        #expect(!(await operations.values().contains("media-reset")))
+        #expect(await handler.resetCount() == 1)
+        await gateway.disconnect()
+    }
+
+    @Test("terminal close after establish still takes the credential-dropping teardown")
+    func terminalCloseAfterEstablishFailsClosed() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let handler = DiscordVoiceGatewayDAVEHandlerRecorder()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            daveControlHandler: handler.handler,
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness)
+
+        await harness.finishRemotely(code: 4004)
+        try await eventually { await gateway.snapshot().phase == .failed }
+        #expect(await harness.attemptCount() == 1)
+        #expect(!(await gateway.snapshot().mediaProductionReady))
+        #expect(await handler.resetCount() == 2)
+        await gateway.disconnect()
+    }
+
+    @Test("resume attempts are bounded per outage; exhaustion fails closed")
+    func resumeBudgetExhaustionFailsClosed() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            configuration: .init(maximumResumeAttempts: 1),
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness)
+
+        await harness.finishRemotely(code: 4015)
+        try await eventually { await harness.attemptCount() == 2 }
+        await harness.finishRemotely(code: 4015)
+        try await eventually { await gateway.snapshot().phase == .failed }
+        #expect(await harness.attemptCount() == 2)
+    }
+
+    @Test("a successful Resumed refills the attempt budget for the next independent outage")
+    func resumedRefillsAttemptBudget() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            configuration: .init(maximumResumeAttempts: 1),
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness)
+
+        for attempt in [1, 2] {
+            await harness.finishRemotely(code: 4015)
+            try await eventually { await harness.attemptCount() == attempt + 1 }
+            await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+            try await eventually { await harness.sentOpcodes(attempt: attempt).contains(7) }
+            await harness.send(#"{"op":9,"seq":9,"d":null}"#)
+            try await eventually { await gateway.snapshot().phase == .established }
+        }
+        #expect(await harness.attemptCount() == 3)
+        await gateway.disconnect()
+    }
+
+    @Test("explicit disconnect during the resume backoff wins and lands disconnected")
+    func disconnectDuringResumeBackoff() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            resumeBackoff: VoiceGatewayReconnectBackoff(
+                jitter: { _ in 0 },
+                sleep: { _ in try await Task.sleep(for: .seconds(60)) }
+            )
+        )
+        try await establishOverResumeHarness(gateway, harness: harness)
+
+        await harness.finishRemotely(code: 4015)
+        try await eventually { await gateway.snapshot().phase == .resuming }
+        await gateway.disconnect()
+        #expect(await gateway.snapshot().phase == .disconnected)
+        #expect(await harness.attemptCount() == 1)
+    }
+
+    private func immediateBackoff() -> VoiceGatewayReconnectBackoff {
+        VoiceGatewayReconnectBackoff(jitter: { _ in 0 }, sleep: { _ in })
+    }
+
+    private func establishOverResumeHarness(
+        _ gateway: DiscordVoiceGatewaySession,
+        harness: DiscordVoiceGatewayResumeHarness,
+        keyByte: UInt8 = 1
+    ) async throws {
+        let mode = DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue
+        let connection = Task { try await gateway.connect(using: pair()) }
+        try await eventually { await harness.attemptCount() == 1 }
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+        await harness.send(readyJSON(modes: [mode]))
+        _ = try await connection.value
+        try await gateway.selectTransport(
+            .init(address: "198.51.100.40", port: 63_040)
+        )
+        await harness.send(sessionDescriptionJSON(mode: mode, keyByte: keyByte))
+        try await eventually { await gateway.snapshot().phase == .established }
+    }
+
     @Test("endpoint and identity validation happen before opening a socket and descriptions redact credentials")
     func validationAndRedaction() async throws {
         let harness = DiscordVoiceGatewaySessionHarness()
@@ -1181,6 +1318,39 @@ struct DiscordVoiceGatewaySessionTests {
         await #expect(throws: DiscordVoiceGatewaySessionError.self) {
             _ = try await connection.value
         }
+    }
+
+    @Test("an established session sends Speaking through the media plane's callback, and a stale callback fails closed")
+    func speakingSignalSendsThroughGatewayAndFailsClosedWhenStale() async throws {
+        let plane = DiscordVoiceGatewaySpeakingSignalCapturingPlane()
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock(),
+            mediaPlane: plane
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 0)
+
+        // Nothing sends Speaking on its own; only the media plane's send path
+        // (not exercised by signaling alone) triggers it.
+        #expect(await harness.sentOpcodes() == [0, 1])
+
+        let signal = try #require(await plane.capturedSignal())
+        try await signal()
+
+        #expect(await harness.sentOpcodes() == [0, 1, 5])
+        #expect(await harness.sentInteger(opcode: 5, key: "ssrc") == 44)
+        #expect(await harness.sentInteger(opcode: 5, key: "speaking") == 1)
+
+        // A second, later call is not itself deduplicated by the gateway (the
+        // media plane's own one-shot-per-generation gate owns that); what the
+        // gateway must guarantee is that it never emits Speaking on behalf of
+        // a torn-down or superseded connection.
+        await gateway.disconnect()
+        await #expect(throws: (any Error).self) {
+            try await signal()
+        }
+        #expect(await harness.sentOpcodes() == [0, 1, 5])
     }
 
     private func pair(token: String = "ephemeral-voice-token") -> DiscordVoiceGatewayPair {
@@ -1326,6 +1496,64 @@ private actor DiscordVoiceGatewaySessionHarness {
 
     private func finishedOperation() { finished = true }
     private func closeResult() -> VoiceGatewayClientClose? { remoteClose }
+}
+
+/// Multi-attempt harness: every `transport.run` invocation gets a fresh
+/// scripted socket, so buffered-resume reconnects can be driven attempt by
+/// attempt. `send`/`finishRemotely` address the newest socket; recorded
+/// evidence is read back per attempt index.
+private actor DiscordVoiceGatewayResumeHarness {
+    private var sockets: [DiscordVoiceGatewaySessionSocket] = []
+    private var remoteCloses: [Int: VoiceGatewayClientClose] = [:]
+    private var attempts = 0
+
+    nonisolated var transport: VoiceGatewayClientTransport {
+        VoiceGatewayClientTransport { [self] _, _, operation in
+            let (socket, index) = await beginAttempt()
+            do {
+                try await operation(socket.session)
+            } catch VoiceGatewayClientTransportError.connectionClosed {
+                return await closeResult(for: index)
+            }
+            return await closeResult(for: index)
+        }
+    }
+
+    func attemptCount() -> Int { attempts }
+
+    func send(_ text: String) async {
+        guard let socket = sockets.last else { return }
+        await socket.enqueue(text)
+    }
+
+    func finishRemotely(code: Int) async {
+        guard let socket = sockets.last else { return }
+        remoteCloses[sockets.count - 1] = VoiceGatewayClientClose(
+            code: code,
+            reason: "untrusted remote reason"
+        )
+        await socket.finish()
+    }
+
+    func sentOpcodes(attempt: Int) async -> [Int] {
+        guard attempt >= 0, attempt < sockets.count else { return [] }
+        return await sockets[attempt].sentOpcodes()
+    }
+
+    private func beginAttempt() -> (DiscordVoiceGatewaySessionSocket, Int) {
+        let socket = DiscordVoiceGatewaySessionSocket(
+            autoResponseOnSelect: nil,
+            suspendSelectSend: false,
+            operationRecorder: nil
+        )
+        sockets.append(socket)
+        attempts += 1
+        return (socket, attempts - 1)
+    }
+
+    private func closeResult(for index: Int) -> VoiceGatewayClientClose? {
+        remoteCloses[index]
+    }
 }
 
 private actor DiscordVoiceGatewaySessionSocket {
@@ -1553,6 +1781,30 @@ private actor DiscordVoiceGatewayMediaPlaneRecorder: DiscordVoiceMediaPlane {
     }
 
     func installation() -> DiscordVoiceGatewayMediaInstallation? { installed }
+}
+
+/// Captures the Speaking callback `connect()` attaches instead of exercising
+/// it, so a test can invoke it directly and assert what the gateway does
+/// with it — independent of any native media-plane send path.
+private actor DiscordVoiceGatewaySpeakingSignalCapturingPlane: DiscordVoiceMediaPlane {
+    nonisolated let aes256GCMAvailable = false
+    private var signal: (@Sendable () async throws -> Void)?
+
+    func install(
+        _ capability: DiscordVoiceNegotiatedMediaCapability
+    ) async throws -> DiscordVoiceMediaCapabilities {
+        DiscordVoiceMediaCapabilities(dave: false, aead: true, opus: true)
+    }
+
+    func reset() async {}
+
+    func attachSpeakingSignal(
+        _ signal: @escaping @Sendable () async throws -> Void
+    ) async {
+        self.signal = signal
+    }
+
+    func capturedSignal() -> (@Sendable () async throws -> Void)? { signal }
 }
 
 private actor DiscordVoiceGatewaySuspendedMediaPlane: DiscordVoiceMediaPlane {
