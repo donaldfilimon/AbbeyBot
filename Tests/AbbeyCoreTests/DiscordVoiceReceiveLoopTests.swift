@@ -467,6 +467,41 @@ struct DiscordVoiceReceiveLoopTests {
         #expect(await sink.recorded() == [[0, 0], [1, 1]])
     }
 
+    /// RTCP shares the media socket with RTP on a real call, and an empty
+    /// receiver report is 8 bytes — shorter than an RTP base header. The length
+    /// checks inside `decodeHeader` run before its payload-type check, so
+    /// without a payload-type pre-screen this would read as truncated framing
+    /// and kill receive on the first RTCP packet.
+    @Test("A short RTCP-shaped datagram is ignored, never terminal")
+    func shortRTCPDatagramIsIgnored() async throws {
+        let transport = ReceiveTransportDouble()
+        let sink = PlaybackSinkDouble()
+        let terminal = TerminalRecorder()
+        let loop = try makeLoop(
+            transport: transport,
+            decoder: ReceiveDecoderDouble(),
+            sink: sink,
+            clock: ManualReceiveClock()
+        )
+        await loop.setTerminalHandler { await terminal.record() }
+        try await loop.start(generation: 1)
+        // Version 2, payload type 201 (RTCP receiver report), length 1.
+        await transport.enqueue([0x80, 0xC9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2A])
+        for sequence in UInt16(0)...UInt16(5) {
+            await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
+        }
+        #expect(
+            await awaitCondition { await sink.frameCount() >= 2 },
+            "playback never reached 2 frame(s)"
+        )
+        let snapshot = await loop.snapshot()
+        await loop.stop()
+        #expect(snapshot.phase == .receiving)
+        #expect(snapshot.ignoredPacketCount == 1)
+        #expect(await terminal.count == 0)
+        #expect(await sink.recorded() == [[0, 0], [1, 1]])
+    }
+
     @Test("Malformed RTP framing ends the loop through the terminal handler")
     func malformedFramingIsTerminal() async throws {
         let transport = ReceiveTransportDouble()

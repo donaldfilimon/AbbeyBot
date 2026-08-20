@@ -268,25 +268,29 @@ public actor DiscordVoiceReceiveLoop: DiscordVoiceReceiveLoopControlling,
     private func handle(_ packet: [UInt8], revision startRevision: UInt64) async -> Bool {
         receivedPacketCount &+= 1
 
+        // Screen on the payload-type byte BEFORE parsing, because this socket is
+        // multiplexed: Discord carries video, RTX, and RTCP alongside audio on
+        // it (`DiscordVoiceUDPSession.sendProtectedPacket` says so in as many
+        // words). Those are not malformed audio — they are simply not ours, and
+        // the length checks inside `decodeHeader` run *before* its payload-type
+        // check, so an 8-byte RTCP receiver report would otherwise surface as a
+        // truncation error and kill receive on the first one.
+        guard packet.count >= 2,
+              (packet[1] & 0x7f) == DiscordVoiceRTPHeader.discordAudioPayloadType
+        else {
+            ignoredPacketCount &+= 1
+            return true
+        }
+
         let header: DiscordVoiceRTPHeader
         do {
             header = try codec.decodeHeader(from: packet)
-        } catch DiscordVoiceRTPError.unexpectedPayloadType(_) {
-            // Well-formed framing carrying something this layer does not decode
-            // (RTX, RTCP-shaped payload types). Discord multiplexes these on the
-            // same socket; ending the loop here would break receive outright.
-            ignoredPacketCount &+= 1
-            return true
         } catch {
-            // Genuinely malformed framing: truncated below the base header, bad
-            // version, truncated CSRC list or extension.
+            // Framing that claims to be Discord audio but cannot be parsed:
+            // truncated below the base header, bad version, truncated CSRC list
+            // or extension. That is a protocol breakdown, not a foreign packet.
             await failReceive(revision: startRevision)
             return false
-        }
-
-        guard header.payloadType == DiscordVoiceRTPHeader.discordAudioPayloadType else {
-            ignoredPacketCount &+= 1
-            return true
         }
 
         let now = clock.now()
@@ -374,6 +378,14 @@ public actor DiscordVoiceReceiveLoop: DiscordVoiceReceiveLoopControlling,
         return true
     }
 
+    /// Drops per-SSRC state for speakers that have gone quiet.
+    ///
+    /// Known tail loss, accepted rather than fixed: a stream can hold up to
+    /// `targetDepth` packets below the release threshold, and eviction discards
+    /// them instead of flushing. On a real call that truncates up to ~80 ms from
+    /// the end of an utterance. Flushing on eviction is not in spec §3 and would
+    /// need a decode/PLC pass at a moment no packet is driving the loop; it is
+    /// recorded here so the next reader does not mistake it for an oversight.
     private func evictIdleStreams(now: Duration) {
         guard !streams.isEmpty else { return }
         let timeout = configuration.idleTimeout
