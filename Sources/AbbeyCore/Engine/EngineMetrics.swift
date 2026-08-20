@@ -1,4 +1,8 @@
 import Foundation
+// Explicit, like AppConfig.swift: the Apple SDK makes `@Observable` visible
+// through Foundation, but corelibs Foundation on Linux does not — without
+// this the server graph fails to compile with "unknown attribute 'Observable'".
+import Observation
 
 /// In-memory counters for the Dashboard view. Deliberately not persisted — these reset
 /// each launch, since they describe "this session," not historical fact (historical
