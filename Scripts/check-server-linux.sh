@@ -9,9 +9,11 @@
 # WHAT THIS IS NOT
 # ----------------
 # * NOT a test run. The Static Linux SDK ships **no `Testing` and no `XCTest`
-#   module** (verified: nothing matching either name under the SDK's
-#   `usr/lib/swift_static`), so `swift build --build-tests` cannot even compile
-#   the test targets, let alone run them. Test sources are covered natively by
+#   module** — verified two ways: an unbounded `find` for `*Testing*`/`*XCTest*`
+#   over the whole artifact bundle returns nothing, and the module directory
+#   (`.../musl-1.2.5.sdk/x86_64/usr/lib/swift_static/linux-static`) contains
+#   neither. So `swift build --build-tests` cannot even compile the test
+#   targets, let alone run them. Test sources are covered natively by
 #   Scripts/check-server-snapshot.sh. The two scripts are COMPLEMENTARY:
 #     - check-server-snapshot.sh → macOS host, nightly compiler, builds AND runs
 #       the four CI test filters. Catches compiler-version breaks, misses
@@ -153,7 +155,25 @@ if [[ $FAILED -ne 0 ]]; then echo "SERVER_LINUX_FAIL: build failed"; exit 1; fi
 # Comments are stripped (`//...` to end of line) before matching so the prose
 # in this repo that *discusses* `stderr` does not trip the lint. Block comments
 # are not stripped; keep libc symbol names out of /* */ blocks.
+#
+# SCOPE is deliberately the server graph only. Sources/AbbeyBotApp and
+# Sources/AbbeyMediaMacOS are desktop-only targets that Linux never compiles
+# (ABBEY_PACKAGE_ROLE=server omits them from the package graph entirely), and on
+# Darwin `stderr` is a perfectly legal `let`. Linting them here would fail a
+# Linux gate over code Linux never sees.
 # ---------------------------------------------------------------------------
+SERVER_GRAPH_PATHS=(
+    Sources/AbbeyCore
+    Sources/AbbeyServerKit
+    Sources/AbbeyServer
+    Sources/AbbeyCLI
+    Sources/AbbeyEntry
+    Tests/AbbeyCoreTests
+    Tests/AbbeyCLITests
+    Tests/AbbeyServerKitTests
+    Tests/AbbeyServerTests
+)
+
 LINT_LOG="$LOG_DIR/glibc-divergence.log"
 echo "== GATE glibc-divergence =="
 : >"$LINT_LOG"
@@ -165,7 +185,7 @@ while IFS= read -r file; do
         printf '%s\n' "$hits" | sed "s|^|$file:|" >>"$LINT_LOG"
         LINT_RC=1
     fi
-done < <(find Sources Tests -name '*.swift' -type f)
+done < <(find "${SERVER_GRAPH_PATHS[@]}" -name '*.swift' -type f)
 
 if [[ $LINT_RC -ne 0 ]]; then
     echo "  glibc-divergence: reference(s) to the C stdio stream globals." >&2
@@ -176,7 +196,7 @@ if [[ $LINT_RC -ne 0 ]]; then
 fi
 
 # Advisory only (does not fail the gate): Glibc-guarded code not exercised here.
-UNEXERCISED="$(grep -rln 'canImport(Glibc)' Sources Tests 2>/dev/null | while IFS= read -r f; do
+UNEXERCISED="$(grep -rln 'canImport(Glibc)' "${SERVER_GRAPH_PATHS[@]}" 2>/dev/null | while IFS= read -r f; do
     grep -q 'canImport(Musl)' "$f" || printf '%s\n' "$f"
 done)"
 if [[ -n "$UNEXERCISED" ]]; then
