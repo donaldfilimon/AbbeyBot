@@ -140,17 +140,25 @@ actor MacOSMediaSessionPlatform: MediaSessionPlatform {
     private let audioCatalog: AudioDeviceCatalog
     private let audio: AVAudioEngineAdapter
     private let video: VideoCaptureAdapter
+    /// The capture bridge that hands the shared audio adapter's frames to the
+    /// Discord capture loop, when one is installed. The kill switch must
+    /// terminate it explicitly: stopping the adapter alone leaves the bridge's
+    /// delivered stream open, so the loop would keep running against a dead
+    /// device instead of failing closed.
+    private let microphone: MicrophoneCaptureSource?
 
     init(
         permissions: MediaPermissionController = MediaPermissionController(),
         audioCatalog: AudioDeviceCatalog = AudioDeviceCatalog(),
         audio: AVAudioEngineAdapter = AVAudioEngineAdapter(),
-        video: VideoCaptureAdapter = VideoCaptureAdapter()
+        video: VideoCaptureAdapter = VideoCaptureAdapter(),
+        microphone: MicrophoneCaptureSource? = nil
     ) {
         self.permissions = permissions
         self.audioCatalog = audioCatalog
         self.audio = audio
         self.video = video
+        self.microphone = microphone
     }
 
     func isMediaDisabled() async -> Bool {
@@ -234,6 +242,14 @@ actor MacOSMediaSessionPlatform: MediaSessionPlatform {
     func stopAllCapture() async {
         await video.killSwitch()
         await audio.stopNow()
+        // `stopNow()` kills the device but leaves the bridge's delivered
+        // capture stream open, and the adapter emits no runtime event for an
+        // explicit stop. Finish the bridge here so the capture loop sees the
+        // stream end, fails closed, and drops the controller's microphone to
+        // disabled instead of reporting a live microphone on a dead device.
+        // `MicrophoneCaptureSource.stopCapture()` is idempotent and leaves the
+        // bridge reusable, so a later enable can start capture again.
+        await microphone?.stopCapture()
     }
 
     /// Explicit opt-in LOCAL start path. It preflights authorization via the shared
@@ -422,11 +438,15 @@ final class MediaSessionModel {
         // kill switch, and runtime snapshot operate on the same adapter whose
         // capture frames feed the Discord capture loop.
         let audio = AVAudioEngineAdapter()
+        // The same bridge instance is handed to the session factory and to the
+        // platform, so the kill switch terminates the very stream the capture
+        // loop is pumping rather than only the adapter underneath it.
+        let microphone = MicrophoneCaptureSource(adapter: audio)
         do {
             let factory: any DiscordVoiceSessionFactory
 #if canImport(AbbeyMediaNative)
             factory = DiscordVoiceNativeControlSessionFactory(
-                captureSource: MicrophoneCaptureSource(adapter: audio)
+                captureSource: microphone
             )
 #else
             factory = DiscordVoicePortableSessionFactory()
@@ -441,7 +461,7 @@ final class MediaSessionModel {
         }
         self.init(
             controller: controller,
-            platform: MacOSMediaSessionPlatform(audio: audio),
+            platform: MacOSMediaSessionPlatform(audio: audio, microphone: microphone),
             presencePort: DiscordBridgeVoicePresencePort(bridge: discordBridge)
         )
     }

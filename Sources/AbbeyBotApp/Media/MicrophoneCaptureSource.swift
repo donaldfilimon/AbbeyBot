@@ -14,6 +14,17 @@ import AbbeyMediaMacOS
 ///   configuration change finishes the delivered stream, which makes the
 ///   capture loop stop and report failure instead of continuing on a changed
 ///   device. There is no automatic restart.
+/// - The operator kill switch stays fail-closed: the adapter emits no runtime
+///   event for an explicit `stopNow()`, so
+///   `MacOSMediaSessionPlatform.stopAllCapture()` kills the shared adapter
+///   first and then calls `stopCapture()` here to finish this stream. The
+///   device stop is the adapter's; this call is what tells the capture loop
+///   about it. Without it the stream would stay open and the loop would keep
+///   reporting a live microphone on a stopped device.
+/// - Stop is idempotent and leaves this bridge reusable: the shared adapter's
+///   frame and event streams are drained by long-lived bridge tasks that
+///   outlive any one session, so a later `startCapture()` opens a fresh
+///   delivered stream without discarding them.
 actor MicrophoneCaptureSource: DiscordVoiceCaptureSource {
     private let adapter: AVAudioEngineAdapter
     private var activeContinuation: AsyncStream<[Int16]>.Continuation?
