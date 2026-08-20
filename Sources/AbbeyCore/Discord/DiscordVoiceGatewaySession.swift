@@ -157,6 +157,13 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private var disconnectRequested = false
     private var resumeAttempts = 0
 
+    /// SSRC → user, learned from inbound Speaking (opcode 5). Bounded: a
+    /// gateway that sprayed distinct SSRCs could otherwise grow this without
+    /// limit. Eviction on Client Disconnect keeps it honest for normal churn,
+    /// and the cap is the backstop for the abnormal case.
+    private var speakingSSRCOwners: [UInt32: UInt64] = [:]
+    private static let maximumSpeakingSSRCOwners = 256
+
     public init(
         transport: VoiceGatewayClientTransport = .live(),
         clock: VoiceGatewayClientClock = .continuous,
@@ -185,6 +192,19 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             children: ["endpoint": "<redacted>", "credentials": "<redacted>"],
             displayStyle: .class
         )
+    }
+
+    /// See `DiscordVoiceGatewaySessionClient.senderID(forSSRC:)`. Returns nil
+    /// until Discord has told us who owns this SSRC, which keeps receive
+    /// fail-closed rather than attributing audio to a guess.
+    ///
+    /// **Must stay `async`.** A non-`async` method does not win as the witness
+    /// for an `async` protocol requirement, so the protocol extension's
+    /// nil-returning default silently shadows it — no compile error, receive
+    /// just never learns a sender. That cost a debugging cycle; do not
+    /// "simplify" the `async` away.
+    public func senderID(forSSRC ssrc: UInt32) async -> UInt64? {
+        speakingSSRCOwners[ssrc]
     }
 
     public func snapshot() -> Snapshot {
@@ -271,6 +291,8 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         daveTransitionState.reset()
         lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
         resumeAttempts = 0
+        // A fresh connection never inherits SSRC attribution from an old one.
+        speakingSSRCOwners.removeAll(keepingCapacity: false)
 
         let transport = self.transport
         let maximumMessageBytes = configuration.maximumMessageBytes
@@ -766,6 +788,11 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 }
 
             case .clientDisconnect(let payload):
+                // Drop that user's SSRC mappings; a later Speaking re-establishes
+                // them if they rejoin with a new SSRC.
+                if let goneUserID = UInt64(payload.userID) {
+                    speakingSSRCOwners = speakingSSRCOwners.filter { $0.value != goneUserID }
+                }
                 if daveControlHandler.isAvailable {
                     let userID = try requireDAVESnowflake(payload.userID)
                     var nextUserIDs = recognizedDAVEUserIDs
@@ -780,6 +807,22 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 }
                 guard generation == connectionGeneration, !disconnectRequested else {
                     throw DiscordVoiceGatewaySessionError.staleConnection
+                }
+
+            case .speaking(let payload):
+                // Discord sends this when a user starts speaking, and it is the
+                // only place SSRC and user_id appear together. Recording it is
+                // what lets the receive path name a sender for DAVE.
+                if let rawUserID = payload.userID, let userID = UInt64(rawUserID) {
+                    if speakingSSRCOwners[payload.ssrc] == nil,
+                       speakingSSRCOwners.count >= Self.maximumSpeakingSSRCOwners {
+                        // Full and this is a new SSRC: refuse rather than evict
+                        // someone arbitrarily. A real call never approaches the
+                        // cap, and dropping the new entry only costs receive for
+                        // that speaker, which fails closed.
+                        break
+                    }
+                    speakingSSRCOwners[payload.ssrc] = userID
                 }
 
             default:
@@ -1325,6 +1368,10 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         daveTransitionState.reset()
         daveConnectionContext = nil
         recognizedDAVEUserIDs.removeAll(keepingCapacity: false)
+        // SSRC ownership is per-connection evidence learned from Speaking. A
+        // stale attribution surviving teardown could name the wrong sender to
+        // DAVE on a later connection.
+        speakingSSRCOwners.removeAll(keepingCapacity: false)
         daveHandlingTask = nil
         daveMembershipTask = nil
         lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)

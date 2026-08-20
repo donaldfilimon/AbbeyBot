@@ -1486,6 +1486,54 @@ struct DiscordVoiceGatewaySessionTests {
         #expect(await harness.sentOpcodes() == [0, 1, 12])
     }
 
+    @Test("inbound Speaking records SSRC ownership, and Client Disconnect evicts it")
+    func speakingRecordsSSRCOwnership() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock()
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 0)
+
+        // Nothing is known before Discord says so — receive must fail closed
+        // rather than attribute audio to a guess.
+        #expect(await gateway.senderID(forSSRC: 4_242) == nil)
+
+        // The regression this pins: inbound Speaking used to fall through the
+        // session's `default: break` and be dropped, so SSRC ownership — the
+        // only place ssrc and user_id appear together — was never learned, and
+        // DAVE could not name a sender.
+        await harness.send(#"{"op":5,"d":{"speaking":1,"delay":0,"ssrc":4242,"user_id":"7777"}}"#)
+        try await eventually { await gateway.senderID(forSSRC: 4_242) == 7_777 }
+
+        // A Speaking frame without user_id must not invent one.
+        await harness.send(#"{"op":5,"d":{"speaking":1,"delay":0,"ssrc":9999}}"#)
+        #expect(await gateway.senderID(forSSRC: 9_999) == nil)
+
+        // Client Disconnect drops that user's mappings.
+        await harness.send(#"{"op":13,"d":{"user_id":"7777"}}"#)
+        try await eventually { await gateway.senderID(forSSRC: 4_242) == nil }
+
+        await gateway.disconnect()
+    }
+
+    @Test("SSRC ownership does not survive into a new connection")
+    func ssrcOwnershipIsPerConnection() async throws {
+        let harness = DiscordVoiceGatewaySessionHarness()
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: quiescentClock()
+        )
+        try await establish(gateway, harness: harness, daveProtocolVersion: 0)
+        await harness.send(#"{"op":5,"d":{"speaking":1,"delay":0,"ssrc":4242,"user_id":"7777"}}"#)
+        try await eventually { await gateway.senderID(forSSRC: 4_242) == 7_777 }
+
+        // Per-connection evidence: a torn-down session must not leave a stale
+        // attribution that a later connection could inherit.
+        await gateway.disconnect()
+        #expect(await gateway.senderID(forSSRC: 4_242) == nil)
+    }
+
     private func pair(token: String = "ephemeral-voice-token") -> DiscordVoiceGatewayPair {
         DiscordVoiceGatewayPair(
             endpoint: "voice.example.test",

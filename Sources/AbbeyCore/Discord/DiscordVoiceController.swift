@@ -95,10 +95,24 @@ public protocol DiscordVoiceGatewaySessionClient: Sendable {
     /// controller's full-reconnect fallback inert for clients that cannot
     /// distinguish termination causes.
     func awaitTermination() async -> Bool
+    /// The user a received SSRC belongs to, learned from inbound Speaking
+    /// (opcode 5), which carries `ssrc` and `user_id` together.
+    ///
+    /// DAVE's `unprotect` needs the sender's identity to select the right
+    /// per-participant ratchet, and the media plane deliberately holds no
+    /// SSRC→user map of its own. The lookup key is an SSRC read from an
+    /// *unauthenticated* RTP header, which is safe precisely because a wrong
+    /// answer cannot leak audio: the frame simply fails against that
+    /// participant's ratchet and is counted as a drop.
+    ///
+    /// The default returns `nil`, so a client that never observes Speaking
+    /// leaves receive fail-closed rather than guessing an identity.
+    func senderID(forSSRC ssrc: UInt32) async -> UInt64?
 }
 
 extension DiscordVoiceGatewaySessionClient {
     public func awaitTermination() async -> Bool { false }
+    public func senderID(forSSRC ssrc: UInt32) async -> UInt64? { nil }
 }
 
 extension DiscordVoiceGatewayPairBridge {
