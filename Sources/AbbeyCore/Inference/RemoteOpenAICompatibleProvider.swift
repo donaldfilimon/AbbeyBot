@@ -1,4 +1,10 @@
 import Foundation
+// URLSession lives in FoundationNetworking on Linux; without this the
+// server-graph build fails there (URLSession unavailable, and `session`
+// then degrades to a non-Sendable AnyObject in this Sendable struct).
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Talks to any OpenAI-compatible `/chat/completions` endpoint over URLSession — no
 /// vendor SDK dependency, matching the stdlib-first / minimal-dependency preference.

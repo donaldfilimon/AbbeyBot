@@ -109,6 +109,22 @@ private struct DiscordDetachedGatewayState: Sendable {
     let untrackedLeaveSignal: DiscordVoiceLeaveSignal?
 }
 
+/// Atomic snapshot of confirmed self voice-state presence. Reading
+/// `voiceChannelId`/`voiceSelfMute`/`voiceSelfDeaf` as three separate actor
+/// hops can tear across a concurrent leave; `DiscordBridge.voicePresenceState()`
+/// returns all three from a single actor-isolated read instead.
+public struct DiscordVoicePresenceState: Equatable, Sendable {
+    public let confirmedInChannel: Bool
+    public let selfMute: Bool
+    public let selfDeaf: Bool
+
+    public init(confirmedInChannel: Bool, selfMute: Bool, selfDeaf: Bool) {
+        self.confirmedInChannel = confirmedInChannel
+        self.selfMute = selfMute
+        self.selfDeaf = selfDeaf
+    }
+}
+
 public enum DiscordConnectionState: String, Sendable {
     case disconnected
     case connecting
@@ -203,6 +219,12 @@ public actor DiscordBridge {
     /// Current voice-channel presence (gateway update only; no Opus/UDP audio).
     public private(set) var voiceChannelId: String?
     public private(set) var voiceGuildId: String?
+    /// Discord-confirmed self `self_mute`/`self_deaf` presence bits from the last
+    /// self `VOICE_STATE_UPDATE` for the tracked channel. Presence only — there is
+    /// no Opus/UDP audio yet, so these flags change what other members observe,
+    /// not what is heard.
+    public private(set) var voiceSelfMute = false
+    public private(set) var voiceSelfDeaf = false
 
     private var gateway: (any DiscordGatewayDriver)?
     private var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
@@ -517,6 +539,8 @@ extension DiscordBridge {
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
+        voiceSelfMute = false
+        voiceSelfDeaf = false
         voiceGatewayCredentials = nil
         voiceGatewayHandshake.reset()
         return detached
@@ -655,6 +679,8 @@ extension DiscordBridge {
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
+        voiceSelfMute = false
+        voiceSelfDeaf = false
         voiceGatewayCredentials = nil
         voiceGatewayHandshake.reset()
         await gatewayToClose?.disconnect()
@@ -705,6 +731,8 @@ extension DiscordBridge {
         botUserId = nil
         voiceChannelId = nil
         voiceGuildId = nil
+        voiceSelfMute = false
+        voiceSelfDeaf = false
         voiceGatewayCredentials = nil
         voiceGatewayHandshake.reset()
         await gatewayToClose?.disconnect()
@@ -771,6 +799,8 @@ extension DiscordBridge {
             // confirmed self Voice State Update.
             voiceGuildId = payload.channel_id == nil ? nil : guildId
             voiceChannelId = payload.channel_id?.rawValue
+            voiceSelfMute = payload.channel_id == nil ? false : payload.self_mute
+            voiceSelfDeaf = payload.channel_id == nil ? false : payload.self_deaf
             if case .ready(let credentials) = outcome {
                 voiceGatewayCredentials = credentials
                 completeVoiceHandshakeDeadline()
@@ -788,16 +818,65 @@ extension DiscordBridge {
             if voiceGuildId == guildId {
                 voiceGuildId = nil
                 voiceChannelId = nil
+                voiceSelfMute = false
+                voiceSelfDeaf = false
             }
         case .ignored:
             if payload.channel_id == nil, voiceGuildId == guildId {
                 voiceGatewayCredentials = nil
                 voiceGuildId = nil
                 voiceChannelId = nil
+                voiceSelfMute = false
+                voiceSelfDeaf = false
+            } else if guildId == voiceGuildId, let confirmedChannelId = payload.channel_id?.rawValue {
+                // No join/leave handshake is active — this is Discord's
+                // confirmed self Voice State for the guild we are in: either
+                // an echo of a presence-only self-mute/self-deaf update, or a
+                // server-side move to another channel. Track the confirmed
+                // channel either way, so a later mute/deafen opcode 4 targets
+                // the channel the bot is actually in rather than moving it
+                // back to a channel Discord already took it out of.
+                voiceChannelId = confirmedChannelId
+                voiceSelfMute = payload.self_mute
+                voiceSelfDeaf = payload.self_deaf
             }
         case .rejected:
             break
         }
+    }
+
+    /// Single actor-isolated read of confirmed channel presence plus self-mute/
+    /// self-deaf, so callers never observe a torn combination across a
+    /// concurrent leave (e.g. `confirmedInChannel: true` with stale flags).
+    public func voicePresenceState() -> DiscordVoicePresenceState {
+        DiscordVoicePresenceState(
+            confirmedInChannel: voiceChannelId != nil,
+            selfMute: voiceSelfMute,
+            selfDeaf: voiceSelfDeaf
+        )
+    }
+
+    /// Updates self-mute/self-deaf presence for the already-confirmed voice
+    /// channel without requesting a new gateway pair or Voice Gateway session.
+    /// Presence only: there is no Opus/UDP audio to silence yet, so this only
+    /// changes what Discord and other members observe about the bot's voice
+    /// state. The tracked `voiceSelfMute`/`voiceSelfDeaf` values update only
+    /// once Discord echoes the change back through `handleVoiceStateUpdate`.
+    @discardableResult
+    public func updateVoiceMuteState(selfMute: Bool, selfDeaf: Bool) async -> VoiceUpdateResult {
+        guard let gateway else { return .gatewayUnavailable }
+        guard let guildId = voiceGuildId, let channelId = voiceChannelId else {
+            return .invalidIdentifiers
+        }
+        await gateway.updateVoiceState(
+            payload: VoiceStateUpdate(
+                guildId: GuildSnowflake(guildId),
+                channelId: ChannelSnowflake(channelId),
+                selfMute: selfMute,
+                selfDeaf: selfDeaf
+            )
+        )
+        return .requested
     }
 
     func handleVoiceStateUpdate(

@@ -558,6 +558,17 @@ final class AbbeyEngine {
         discordBotUserId = await discordBridge.botUserId
         discordVoiceChannelId = await discordBridge.voiceChannelId
         discordVoiceGuildId = await discordBridge.voiceGuildId
+        await mediaSession.refreshVoicePresence()
+    }
+
+    /// Presence-only self-mute/self-deaf `VOICE_STATE_UPDATE`. Gateway signaling
+    /// only — there is no Opus/UDP audio to silence, so this changes what
+    /// Discord and other members observe, not what is heard.
+    @discardableResult
+    func setVoiceMuteDeafen(selfMute: Bool, selfDeaf: Bool) async -> String {
+        await mediaSession.setMuteDeafen(selfMute: selfMute, selfDeaf: selfDeaf)
+        await refreshDiscordStatus()
+        return mediaSession.operatorError ?? DiscordCopy.voiceMuteDeafenUpdated(selfMute: selfMute, selfDeaf: selfDeaf)
     }
 
     /// Gateway voice presence only (muted/deafened; no Opus/UDP audio).

@@ -73,7 +73,16 @@ var packageTargets: [Target] = [
     ),
     .testTarget(
         name: "AbbeyCoreTests",
-        dependencies: ["AbbeyCore"],
+        dependencies: [
+            "AbbeyCore",
+            // Real, in-process Discord Voice Gateway v8 WebSocket loopback server/client
+            // fixtures (VoiceGatewayLoopbackWebSocketTests.swift) — exercises genuine WebSocket
+            // handshake/framing over 127.0.0.1 instead of the in-process fake transport used by
+            // VoiceGatewayClientTests.swift.
+            .product(name: "WSClient", package: "swift-websocket"),
+            .product(name: "NIOHTTP1", package: "swift-nio"),
+            .product(name: "NIOWebSocket", package: "swift-nio")
+        ],
         path: "Tests/AbbeyCoreTests",
         swiftSettings: [
             .swiftLanguageMode(.v6)

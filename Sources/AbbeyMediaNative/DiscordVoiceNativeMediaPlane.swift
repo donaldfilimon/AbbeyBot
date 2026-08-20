@@ -1,4 +1,5 @@
 import AbbeyCore
+import Foundation
 
 /// Fail-closed errors from the native negotiated-media bootstrap.
 ///
@@ -11,6 +12,19 @@ public enum DiscordVoiceNativeMediaPlaneError: Error, Equatable, Sendable,
     case installationInterrupted
     case nativeComponentsUnavailable
     case daveSessionUnavailable
+    /// A send was requested before any generation finished `install(_:)`.
+    case mediaNotInstalled
+    /// The installed generation exists but never attested a ready DAVE
+    /// session (protocol version 0 or an unattested session). Discord's
+    /// current calls require DAVE-protected media, so this path refuses to
+    /// send rather than fall back to transport-only or plaintext protection.
+    case daveProtectionRequired
+    /// The Voice Gateway session's Speaking callback failed or was rejected;
+    /// no packet is sent without a preceding Speaking signal.
+    case speakingSignalFailed
+    /// The installed generation was superseded (reset or a new install) while
+    /// a send was suspended on native or transport work.
+    case sendInterrupted
 
     public var description: String {
         switch self {
@@ -20,6 +34,14 @@ public enum DiscordVoiceNativeMediaPlaneError: Error, Equatable, Sendable,
             "Native Discord media components are unavailable"
         case .daveSessionUnavailable:
             "Native DAVE media state is unavailable"
+        case .mediaNotInstalled:
+            "Native Discord media has no installed generation"
+        case .daveProtectionRequired:
+            "Native Discord media send requires an attested DAVE session"
+        case .speakingSignalFailed:
+            "Native Discord media Speaking signal failed"
+        case .sendInterrupted:
+            "Native Discord media send was interrupted"
         }
     }
 
@@ -37,6 +59,16 @@ public enum DiscordVoiceNativeMediaPlaneError: Error, Equatable, Sendable,
 protocol DiscordVoiceNativeDAVEMediaSession: Sendable {
     var protocolVersion: UInt16 { get async }
     var isMediaReady: Bool { get async }
+
+    /// Applies the real MLS/DAVE media protection to one media frame. This is
+    /// the exact boundary the Phase 5 send path calls; nothing between the
+    /// Opus encoder and this call may substitute for it.
+    func protect(
+        _ frame: Data,
+        mediaType: NativeDAVEMediaType,
+        codec: NativeDAVECodec,
+        ssrc: UInt32
+    ) async throws -> Data
 }
 
 extension NativeDAVESession: DiscordVoiceNativeDAVEMediaSession {}
@@ -62,12 +94,21 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     typealias AEADPrimitiveFactory = @Sendable (DiscordVoiceTransportMode) throws ->
         any DiscordVoiceAEADPrimitive
     typealias OpusFactory = @Sendable () throws -> Opus20msCodec
+    /// Seeds the per-generation RTP clock. Production uses the system CSPRNG
+    /// (Discord recommends an unpredictable initial sequence/timestamp);
+    /// tests inject a fixed pair so packet fixtures stay deterministic.
+    typealias RTPClockSeedFactory = @Sendable () -> (sequence: UInt16, timestamp: UInt32)
 
     private struct InstalledRuntime: Sendable {
         let transportEncryption: DiscordVoiceTransportEncryption
         let opus: Opus20msCodec
         let datagramTransport: any DiscordVoiceMediaDatagramTransport
         let ssrc: UInt32
+        /// True only when `install`/`updateDAVEProtocolVersion` attested a
+        /// ready DAVE session for a nonzero negotiated protocol version.
+        /// `sendAudioFrame` refuses to run while this is false so a
+        /// transport-only or DAVE-less generation can never emit media.
+        let daveReady: Bool
     }
 
     public nonisolated let aes256GCMAvailable: Bool
@@ -77,10 +118,33 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     private let datagramTransport: any DiscordVoiceMediaDatagramTransport
     private let makeAEADPrimitive: AEADPrimitiveFactory
     private let makeOpus: OpusFactory
+    private let makeRTPClockSeed: RTPClockSeedFactory
 
     private var highestGeneration: UInt64?
     private var revision: UInt64 = 0
     private var runtime: InstalledRuntime?
+    private var clock: DiscordVoiceRTPClock?
+    private var speakingSignal: (@Sendable () async throws -> Void)?
+
+    /// One-shot-per-generation Speaking obligation, shared across concurrent
+    /// sends. `.inFlight` carries the single signaling task so a frame that
+    /// arrives while the first frame's callback is suspended awaits the SAME
+    /// outcome instead of racing past the gate; a failed callback regresses
+    /// the gate to `.pending` so the next frame re-attempts opcode 5 rather
+    /// than silently skipping it.
+    private enum SpeakingGate {
+        case pending
+        case inFlight(Task<Void, any Error>)
+        case sent
+    }
+
+    private var speakingGate: SpeakingGate = .pending
+
+    /// Suspended datagram sends, keyed for interruption: `reset()` cancels and
+    /// awaits every entry so an obsolete generation's packet cannot reach the
+    /// wire during or after teardown.
+    private var inFlightSends: [UInt64: Task<Void, any Error>] = [:]
+    private var nextSendID: UInt64 = 0
 
     public init(
         daveAdapter: NativeDAVEControlAdapter,
@@ -93,6 +157,9 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         self.datagramTransport = datagramTransport
         self.makeAEADPrimitive = { try NativeDiscordVoiceAEADPrimitive(mode: $0) }
         self.makeOpus = { try Opus20msCodec() }
+        self.makeRTPClockSeed = {
+            (UInt16.random(in: .min ... .max), UInt32.random(in: .min ... .max))
+        }
     }
 
     init(
@@ -102,13 +169,17 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         makeAEADPrimitive: @escaping AEADPrimitiveFactory = {
             try NativeDiscordVoiceAEADPrimitive(mode: $0)
         },
-        makeOpus: @escaping OpusFactory = { try Opus20msCodec() }
+        makeOpus: @escaping OpusFactory = { try Opus20msCodec() },
+        makeRTPClockSeed: @escaping RTPClockSeedFactory = {
+            (UInt16.random(in: .min ... .max), UInt32.random(in: .min ... .max))
+        }
     ) {
         self.aes256GCMAvailable = aes256GCMAvailable
         self.daveSessionProvider = daveSessionProvider
         self.datagramTransport = datagramTransport
         self.makeAEADPrimitive = makeAEADPrimitive
         self.makeOpus = makeOpus
+        self.makeRTPClockSeed = makeRTPClockSeed
     }
 
     public nonisolated var description: String {
@@ -136,7 +207,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         try acceptGeneration(capability.generation)
         revision &+= 1
         let installationRevision = revision
-        runtime = nil
+        clearRuntime()
 
         do {
             try await generationStore.install(capability)
@@ -158,8 +229,15 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
                 transportEncryption: transportEncryption,
                 opus: opus,
                 datagramTransport: datagramTransport,
-                ssrc: capability.ssrc
+                ssrc: capability.ssrc,
+                daveReady: daveAvailable
             )
+            let seed = makeRTPClockSeed()
+            clock = try DiscordVoiceRTPClock(
+                initialSequence: seed.sequence,
+                initialTimestamp: seed.timestamp
+            )
+            speakingGate = .pending
             return DiscordVoiceMediaCapabilities(
                 dave: daveAvailable,
                 aead: true,
@@ -167,19 +245,19 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             )
         } catch let error as DiscordVoiceNegotiatedMediaError {
             if revision == installationRevision {
-                runtime = nil
+                clearRuntime()
                 await generationStore.reset()
             }
             throw error
         } catch let error as DiscordVoiceNativeMediaPlaneError {
             if revision == installationRevision {
-                runtime = nil
+                clearRuntime()
                 await generationStore.reset()
             }
             throw error
         } catch {
             if revision == installationRevision {
-                runtime = nil
+                clearRuntime()
                 await generationStore.reset()
             }
             throw DiscordVoiceNativeMediaPlaneError.nativeComponentsUnavailable
@@ -189,6 +267,9 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     /// Re-attests the adapter's current DAVE session after an executed Voice
     /// Gateway transition. The media plane never caches the returned native
     /// session, so subsequent packet work cannot retain an obsolete epoch.
+    /// The RTP clock and one-shot Speaking gate survive a re-attestation of
+    /// the same generation; only a fresh `install(_:)` or `reset()` clears
+    /// them, since this is still the same outgoing media stream.
     public func updateDAVEProtocolVersion(
         _ version: UInt16,
         generation: UInt64
@@ -210,7 +291,13 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
                 revision: updateRevision
             )
             try requireCurrent(updateRevision)
-            runtime = installedRuntime
+            runtime = InstalledRuntime(
+                transportEncryption: installedRuntime.transportEncryption,
+                opus: installedRuntime.opus,
+                datagramTransport: installedRuntime.datagramTransport,
+                ssrc: installedRuntime.ssrc,
+                daveReady: daveAvailable
+            )
             return DiscordVoiceMediaCapabilities(
                 dave: daveAvailable,
                 aead: true,
@@ -231,12 +318,159 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         }
     }
 
+    /// Lets the owning Voice Gateway session provide the Speaking callback.
+    /// Stored, not invoked; `sendAudioFrame` calls it at most once per
+    /// installed generation, before the first protected packet.
+    public func attachSpeakingSignal(
+        _ signal: @escaping @Sendable () async throws -> Void
+    ) async {
+        speakingSignal = signal
+    }
+
+    /// Encodes one 20 ms PCM frame, applies DAVE media protection, builds and
+    /// RTPSIZE-protects the RTP packet, then sends it through the retained
+    /// UDP socket. This is the Phase 5 send path: every step is real
+    /// (`Opus20msCodec`, the installed `NativeDAVESession`,
+    /// `DiscordVoiceRTPCodec`/`DiscordVoiceRTPClock`,
+    /// `DiscordVoiceTransportEncryption`, and the retained
+    /// `DiscordVoiceMediaDatagramTransport`), and the current revision is
+    /// re-checked after every suspension so a `reset()` or superseding
+    /// `install(_:)` cannot let a stale generation reach the socket.
+    ///
+    /// Fails closed, never falling back to unprotected media, when: no
+    /// generation is installed, the installed generation never attested a
+    /// ready DAVE session, the Speaking callback fails, DAVE protection
+    /// fails, or the installation is superseded mid-send.
+    public func sendAudioFrame(pcm: [Int16]) async throws {
+        guard let installed = runtime, var reservedClock = clock, installed.daveReady else {
+            throw runtime == nil
+                ? DiscordVoiceNativeMediaPlaneError.mediaNotInstalled
+                : DiscordVoiceNativeMediaPlaneError.daveProtectionRequired
+        }
+        let sendRevision = revision
+
+        // This actor can be re-entered while a send is suspended on native or
+        // transport work. Everything below this point that must not race a
+        // concurrent send — the RTP tick and the one-shot Speaking
+        // obligation — is reserved here, synchronously, before this call's
+        // first `await`. This mirrors how `DiscordVoiceTransportEncryption`
+        // reserves its AEAD send counter before its own first suspension, so
+        // two overlapping sends can never observe or emit the same RTP
+        // sequence number, and at most one of them owns firing Speaking.
+        let tick = reservedClock.next()
+        clock = reservedClock
+
+        // The Speaking obligation is marked satisfied only AFTER the callback
+        // succeeds. A throwing callback regresses the gate so the next frame
+        // re-attempts opcode 5 instead of reaching the UDP transport with no
+        // successful Speaking on record, and a concurrent frame that enters
+        // while the first callback is suspended awaits that same shared
+        // outcome rather than bypassing the gate.
+        try await ensureSpeakingSent(revision: sendRevision)
+
+        let opusPayload = try await installed.opus.encode(pcm)
+        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+
+        guard let daveSession = await daveSessionProvider() else {
+            throw DiscordVoiceNativeMediaPlaneError.daveSessionUnavailable
+        }
+        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+
+        // DAVE protection is applied to the raw Opus payload before it ever
+        // becomes an RTP body; nothing downstream can substitute plaintext.
+        let protectedFrame = try await daveSession.protect(
+            Data(opusPayload),
+            mediaType: .audio,
+            codec: .opus,
+            ssrc: installed.ssrc
+        )
+        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+
+        let header = try DiscordVoiceRTPHeader(
+            sequence: tick.sequence,
+            timestamp: tick.timestamp,
+            ssrc: installed.ssrc
+        )
+        let rtpCodec = try DiscordVoiceRTPCodec()
+        let plaintextPacket = try rtpCodec.encode(header) + Array(protectedFrame)
+
+        let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
+        try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+
+        // The datagram send runs as a tracked, cancellable task so `reset()`
+        // can interrupt a send suspended inside the transport and await its
+        // completion before teardown finishes — an obsolete generation's
+        // packet must never reach the wire after reset returns.
+        let sendID = nextSendID
+        nextSendID &+= 1
+        let transport = installed.datagramTransport
+        let sendTask = Task { try await transport.sendProtectedPacket(wirePacket) }
+        inFlightSends[sendID] = sendTask
+        defer { inFlightSends[sendID] = nil }
+        do {
+            try await sendTask.value
+        } catch is CancellationError {
+            throw DiscordVoiceNativeMediaPlaneError.sendInterrupted
+        }
+    }
+
+    /// At most one Speaking signal task exists per installed generation;
+    /// every concurrent send shares its outcome. Success latches `.sent`;
+    /// failure regresses to `.pending` (unless a reset or superseding install
+    /// already replaced the gate) and fails this send closed.
+    private func ensureSpeakingSent(revision sendRevision: UInt64) async throws {
+        switch speakingGate {
+        case .sent:
+            return
+        case .inFlight(let task):
+            do {
+                try await task.value
+            } catch {
+                throw DiscordVoiceNativeMediaPlaneError.speakingSignalFailed
+            }
+            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        case .pending:
+            guard let speakingSignal else {
+                // No callback attached: nothing to signal, and nothing to
+                // re-attempt later — mirror the previous one-shot consumption.
+                speakingGate = .sent
+                return
+            }
+            let task = Task { try await speakingSignal() }
+            speakingGate = .inFlight(task)
+            do {
+                try await task.value
+            } catch {
+                if case .inFlight(let current) = speakingGate, current == task {
+                    speakingGate = .pending
+                }
+                throw DiscordVoiceNativeMediaPlaneError.speakingSignalFailed
+            }
+            if case .inFlight(let current) = speakingGate, current == task {
+                speakingGate = .sent
+            }
+            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        }
+    }
+
     /// Drops every object that can retain the transport key while preserving
     /// the generation high-water mark against late installation tasks.
+    /// Interrupts and awaits every suspended datagram send so teardown cannot
+    /// complete while an obsolete packet could still be put on the wire.
     public func reset() async {
         revision &+= 1
-        runtime = nil
+        clearRuntime()
+        let pending = Array(inFlightSends.values)
+        inFlightSends.removeAll(keepingCapacity: false)
+        for task in pending { task.cancel() }
+        for task in pending { _ = try? await task.value }
         await generationStore.reset()
+    }
+
+    private func clearRuntime() {
+        runtime = nil
+        clock = nil
+        speakingGate = .pending
     }
 
     private func acceptGeneration(_ generation: UInt64) throws {
@@ -251,9 +485,12 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         highestGeneration = generation
     }
 
-    private func requireCurrent(_ expectedRevision: UInt64) throws {
+    private func requireCurrent(
+        _ expectedRevision: UInt64,
+        orThrow error: DiscordVoiceNativeMediaPlaneError = .installationInterrupted
+    ) throws {
         guard revision == expectedRevision, !Task.isCancelled else {
-            throw DiscordVoiceNativeMediaPlaneError.installationInterrupted
+            throw error
         }
     }
 

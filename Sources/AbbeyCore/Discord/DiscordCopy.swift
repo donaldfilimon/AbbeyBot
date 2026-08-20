@@ -18,6 +18,10 @@ public enum DiscordCopy: Sendable {
         "Dry-run mode — Discord gateway is not active; voice presence unavailable (connect live for presence only — no audio)."
     public static let voiceUnknownSubcommand = "Use `/voice join` or `/voice leave` (presence only — no audio)."
     public static let voicePresenceOnly = "Presence only — muted & deafened; no audio (DiscordBM has no Opus/UDP)."
+    public static let voiceMuteDeafenNotConfirmed =
+        "Not confirmed in a voice channel yet — mute/deafen presence can't be changed until Discord confirms the join."
+    public static let voiceMuteDeafenGatewayUnavailable =
+        "Not connected to Discord — connect before changing mute/deafen presence."
 
     public static let equityDisabled =
         "Equity module is disabled (`ABBEY_EQUITY_MODULE` / Settings). Synthetic screen only — not financial advice."
@@ -60,6 +64,10 @@ public enum DiscordCopy: Sendable {
 
     public static func voiceLeft(guildId: String) -> String {
         "Requested leave from voice in server \(guildId) — presence only (no audio)."
+    }
+
+    public static func voiceMuteDeafenUpdated(selfMute: Bool, selfDeaf: Bool) -> String {
+        "Requested presence update — self-mute: \(selfMute), self-deaf: \(selfDeaf) (no audio exists to silence)."
     }
 
     public static func voiceStatus(guildId: String?, channelId: String?) -> String {

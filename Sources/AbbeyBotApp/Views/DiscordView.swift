@@ -9,6 +9,7 @@ struct DiscordView: View {
     @State private var statusMessage: String?
     @State private var voiceGuildId = ""
     @State private var voiceChannelId = ""
+    @State private var pendingVoiceFlags: PendingVoiceFlags?
 
     var body: some View {
         Form {
@@ -129,6 +130,7 @@ struct DiscordView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            LabeledContent("Connection phase") { Text(engine.mediaSession.connectionPhaseLabel) }
             LabeledContent("Signaling") { Text(engine.mediaSession.signalingLabel) }
             LabeledContent("Transport") { Text(engine.mediaSession.transportLabel) }
             LabeledContent("DAVE") {
@@ -177,6 +179,91 @@ struct DiscordView: View {
 
             if let error = engine.mediaSession.operatorError {
                 Text(error).font(.caption).foregroundStyle(.orange)
+            }
+
+            Divider()
+
+            Text("Gateway presence only — self-mute/self-deaf change what Discord and other members see, not what is heard. There is no Opus/UDP audio.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Probe transport above always ends by leaving (DAVE media is unavailable), so these stay disabled after it. They enable only while presence is held via Discord's `/voice join` slash command.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            LabeledContent("Presence") { Text(engine.mediaSession.muteDeafenLabel) }
+            HStack {
+                Toggle("Self-mute", isOn: muteBinding)
+                    .accessibilityLabel("Discord self-mute presence")
+                Toggle("Self-deafen", isOn: deafenBinding)
+                    .accessibilityLabel("Discord self-deafen presence")
+            }
+            .disabled(
+                !engine.mediaSession.voicePresenceConfirmed
+                    || engine.mediaSession.isOperationInFlight
+            )
+            .onChange(of: confirmedVoiceFlags) { _, confirmed in
+                // Discord's echo caught up with the requested pair — hand the
+                // toggles back to confirmed state.
+                if pendingVoiceFlags == confirmed { pendingVoiceFlags = nil }
+            }
+            .onChange(of: engine.mediaSession.voicePresenceConfirmed) { _, confirmed in
+                if !confirmed { pendingVoiceFlags = nil }
+            }
+            Text("Toggles show your requested state until Discord's echo confirms it (polled every 2s).")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// The operator's requested mute/deafen pair while Discord's echo is still
+    /// pending. Both bindings read and extend this pair so two quick toggles
+    /// compose (mute-on then deafen-on sends `(true,false)` then `(true,true)`)
+    /// instead of each combining with the other's stale confirmed value and
+    /// silently undoing the first change.
+    private struct PendingVoiceFlags: Equatable {
+        var selfMute: Bool
+        var selfDeaf: Bool
+    }
+
+    private var confirmedVoiceFlags: PendingVoiceFlags {
+        PendingVoiceFlags(
+            selfMute: engine.mediaSession.voiceSelfMute,
+            selfDeaf: engine.mediaSession.voiceSelfDeaf
+        )
+    }
+
+    private var muteBinding: Binding<Bool> {
+        Binding(
+            get: { pendingVoiceFlags?.selfMute ?? engine.mediaSession.voiceSelfMute },
+            set: { value in
+                var desired = pendingVoiceFlags ?? confirmedVoiceFlags
+                desired.selfMute = value
+                sendVoiceFlags(desired)
+            }
+        )
+    }
+
+    private var deafenBinding: Binding<Bool> {
+        Binding(
+            get: { pendingVoiceFlags?.selfDeaf ?? engine.mediaSession.voiceSelfDeaf },
+            set: { value in
+                var desired = pendingVoiceFlags ?? confirmedVoiceFlags
+                desired.selfDeaf = value
+                sendVoiceFlags(desired)
+            }
+        )
+    }
+
+    private func sendVoiceFlags(_ desired: PendingVoiceFlags) {
+        pendingVoiceFlags = desired
+        Task {
+            statusMessage = await engine.setVoiceMuteDeafen(
+                selfMute: desired.selfMute,
+                selfDeaf: desired.selfDeaf
+            )
+            if engine.mediaSession.operatorError != nil {
+                // The request failed — resync the toggles to Discord's
+                // confirmed state instead of pinning a pair that never lands.
+                pendingVoiceFlags = nil
             }
         }
     }
