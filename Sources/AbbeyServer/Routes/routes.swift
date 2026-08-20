@@ -132,6 +132,30 @@ private func syncListResponse<T: Content>(
     return response
 }
 
+/// Context for `status.leaf`. Field names match the template's `#(...)`
+/// references exactly; a rename on either side breaks rendering, so they are
+/// kept in one place rather than assembled inline.
+private struct StatusPageContext: Encodable {
+    let databaseDialect: String
+    let discordState: String
+    let botUserId: String
+    let userCount: Int
+    let channelCount: Int
+    let messageCount: Int
+    let reputationEventCount: Int
+    let equityIdeaCount: Int
+    let messagesIngested: Int
+    let liveIngestCount: Int
+    let inferenceCalls: Int
+    let inferenceFailures: Int
+    /// Rendered directly as a display value, so this is a String rather than
+    /// a Bool: `BotRuntime.twitchStreamLive` is `Bool?`, and nil means "never
+    /// observed", which is NOT the same claim as "offline". Collapsing nil to
+    /// false would state a stream is down when nothing has ever checked.
+    let twitchStreamLive: String
+    let dashboardAvailable: Bool
+}
+
 func routes(_ app: Application) throws {
     TwitchEventSubRoutes.register(on: app)
     SocialRoutes.register(on: app)
@@ -140,6 +164,47 @@ func routes(_ app: Application) throws {
         let runtime = req.application.botRuntime
         let state = await runtime.discordState
         return HealthDTO(status: "ok", discord: state.rawValue)
+    }
+
+    /// Operator root. `status.leaf`, `app.views.use(.leaf)`, and
+    /// `viewsDirectory` all existed while the route rendering them did not, so
+    /// an authorized `GET /` returned no page at all — which is what
+    /// `operatorLeafFollowsConfiguredTokenPolicy` has been failing on.
+    ///
+    /// Every value comes from the same runtime sources `GET /api/status` uses;
+    /// none is hardcoded. Behind the same token policy as the other operator
+    /// surfaces, so the unauthorized case still refuses before touching the
+    /// database.
+    app.get { req async throws -> View in
+        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        let runtime = req.application.botRuntime
+        let metrics = await runtime.metricsSnapshot()
+        let counts = try await StatusRepository.counts(on: req.db)
+        let twitchStreamLive = await runtime.twitchStreamLive
+        let indexPath = resourcesPublicDirectory()
+            .appendingPathComponent("index.html")
+            .path
+        return try await req.view.render(
+            "status",
+            StatusPageContext(
+                databaseDialect: req.application.databaseDialect,
+                discordState: metrics.discordState,
+                botUserId: metrics.discordBotUserId,
+                userCount: counts.users,
+                channelCount: counts.channels,
+                messageCount: counts.messages,
+                reputationEventCount: counts.reputationEvents,
+                equityIdeaCount: counts.equityIdeas,
+                messagesIngested: metrics.messagesIngested,
+                liveIngestCount: metrics.liveIngestCount,
+                inferenceCalls: metrics.inferenceCalls,
+                inferenceFailures: metrics.inferenceFailures,
+                twitchStreamLive: twitchStreamLive.map { $0 ? "live" : "offline" } ?? "unknown",
+                // The template links to the SPA only when it was actually
+                // built; `bun run build` populates this path in CI.
+                dashboardAvailable: FileManager.default.fileExists(atPath: indexPath)
+            )
+        )
     }
 
     app.get("dashboard") { req async throws -> Response in
