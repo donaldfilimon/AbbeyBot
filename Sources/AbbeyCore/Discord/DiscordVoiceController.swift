@@ -330,6 +330,16 @@ public actor DiscordVoiceController {
     private var udpSession: (any DiscordVoiceUDPDiscoverySession)?
     private var captureLoop: (any DiscordVoiceCaptureLoopControlling)?
     private var microphoneTransitionInFlight = false
+    /// Desired microphone state recorded while a transition is suspended in
+    /// `captureLoop.start`/`stop`. Reconciled by the in-flight transition
+    /// instead of being dropped — see `setMicrophoneEnabled`.
+    private var pendingMicrophoneDesiredState: Bool?
+    /// The generation whose `captureLoop.start` is currently suspended, or
+    /// `nil` when no start is in flight.
+    private var captureStartInFlightGeneration: UInt64?
+    /// Set when the capture loop reported a terminal failure during that
+    /// suspended start, i.e. before `microphoneEnabled` could be set.
+    private var captureTerminalDuringStart = false
     private var acceptsFrames = false
     private var nextTeardownID: UInt64 = 0
     private var teardownTasks: [UInt64: Task<Void, Never>] = [:]
@@ -451,41 +461,128 @@ public actor DiscordVoiceController {
     /// merely at frame admission). A capture-loop start failure fails closed —
     /// the microphone stays disabled and `failure` reports
     /// `.captureUnavailable` — while signaling stays up.
+    ///
+    /// `captureLoop.start` suspends, so this actor is reentrant across it and
+    /// anything that happens in that window must be *recorded and reconciled*,
+    /// never dropped. One mechanism covers the three ways that bites:
+    ///
+    /// * a mute arriving mid-start is stored in
+    ///   `pendingMicrophoneDesiredState` and re-applied by the reconcile loop
+    ///   below, so a privacy action can never appear to succeed while capture
+    ///   actually begins (last request wins);
+    /// * a terminal verdict arriving mid-start is stored in
+    ///   `captureTerminalDuringStart` and turned into the fail-closed result,
+    ///   so an already-failed loop is never published as an enabled
+    ///   microphone;
+    /// * a start that provably succeeds clears a `.captureUnavailable` left by
+    ///   an earlier failed start, so a recovered session never reports an
+    ///   enabled microphone and a capture failure at the same time.
     @discardableResult
     public func setMicrophoneEnabled(_ enabled: Bool) async -> DiscordVoiceControllerSnapshot {
-        guard !microphoneTransitionInFlight else { return makeSnapshot() }
+        guard !microphoneTransitionInFlight else {
+            // Record rather than drop: the in-flight transition reconciles
+            // this before it returns.
+            pendingMicrophoneDesiredState = enabled
+            return makeSnapshot()
+        }
         microphoneTransitionInFlight = true
-        defer { microphoneTransitionInFlight = false }
+        defer {
+            microphoneTransitionInFlight = false
+            pendingMicrophoneDesiredState = nil
+        }
 
+        var desired = enabled
+        while true {
+            pendingMicrophoneDesiredState = nil
+            await applyMicrophoneDesiredState(desired)
+            // A request that landed while the step above was suspended wins.
+            // Bounded: each concurrent caller contributes at most one extra
+            // iteration, and a step that cannot suspend cannot enqueue one.
+            guard let pending = pendingMicrophoneDesiredState else { break }
+            pendingMicrophoneDesiredState = nil
+            desired = pending
+        }
+        return makeSnapshot()
+    }
+
+    /// One reconciliation step toward `enabled`. Every suspension point is
+    /// followed by a generation re-check; the start path additionally consults
+    /// the terminal verdict that may have been recorded while it was
+    /// suspended.
+    private func applyMicrophoneDesiredState(_ enabled: Bool) async {
+        let localGeneration = generation
         let target = enabled && acceptsFrames
         if target, !microphoneEnabled, let captureLoop {
-            let localGeneration = generation
+            captureStartInFlightGeneration = localGeneration
+            captureTerminalDuringStart = false
             do {
                 try await captureLoop.start(generation: localGeneration)
             } catch {
-                guard generation == localGeneration else { return makeSnapshot() }
+                captureStartInFlightGeneration = nil
+                captureTerminalDuringStart = false
+                guard generation == localGeneration else { return }
                 microphoneEnabled = false
                 failure = .captureUnavailable
-                publish()
-                return makeSnapshot()
+                publishUnlessSuperseded()
+                return
             }
+            // INVARIANT: from here to `microphoneEnabled = target` there must
+            // be no suspension point on the enabling path. Clearing the
+            // in-flight marker stops the terminal handler from recording, and
+            // `microphoneEnabled` is not yet true, so a terminal landing in
+            // between would be neither recorded nor acted on — reintroducing
+            // exactly the bug this branch fixes. The two guards below are
+            // synchronous, and the `!target` stop branch cannot be taken when
+            // `target` is true.
+            let terminalRacedStart = captureTerminalDuringStart
+            captureStartInFlightGeneration = nil
+            captureTerminalDuringStart = false
             guard generation == localGeneration, acceptsFrames else {
                 // Superseded while capture was starting; teardown of the
                 // detached session owns the loop, but stop here too so a
                 // late-started source never outlives its generation.
                 await captureLoop.stop()
-                return makeSnapshot()
+                return
+            }
+            guard !terminalRacedStart else {
+                // The loop already failed closed (an already-finished stream,
+                // or a first send that failed immediately) before this start
+                // returned. Honor that verdict rather than publishing an
+                // enabled microphone that can never send a frame.
+                microphoneEnabled = false
+                failure = .captureUnavailable
+                if phase == .readySpeaking {
+                    phase = .readyMuted
+                }
+                publishUnlessSuperseded()
+                await captureLoop.stop()
+                return
+            }
+            if failure == .captureUnavailable {
+                // The documented retry succeeded — clear the stale capture
+                // failure so recovery is visible.
+                failure = nil
             }
         }
         if !target, microphoneEnabled, let captureLoop {
             await captureLoop.stop()
+            guard generation == localGeneration else { return }
         }
         microphoneEnabled = target
         if phase == .readySpeaking, !microphoneEnabled {
             phase = .readyMuted
         }
+        publishUnlessSuperseded()
+    }
+
+    /// Suppresses a transient publish when a newer microphone request is
+    /// already pending: consumers must never observe an enabled microphone
+    /// between a mute being accepted and that mute being applied. The
+    /// reconcile loop only exits with no request pending, so the settled state
+    /// is always published.
+    private func publishUnlessSuperseded() {
+        guard pendingMicrophoneDesiredState == nil else { return }
         publish()
-        return makeSnapshot()
     }
 
     @discardableResult
@@ -642,8 +739,20 @@ public actor DiscordVoiceController {
     /// failure, malformed framing, unexpected capture end). The microphone
     /// drops to disabled and the failure is operator-visible; the established
     /// signaling session is left up.
+    /// A terminal event can beat the controller's own `captureLoop.start`
+    /// continuation — the source may hand back an already-finished stream, or
+    /// the first send may fail immediately. `microphoneEnabled` is still false
+    /// at that point, so the event is recorded for the resuming start instead
+    /// of being discarded; discarding it let `setMicrophoneEnabled` go on to
+    /// publish an enabled microphone over an already-failed loop.
     private func handleCaptureLoopTerminal(generation localGeneration: UInt64) {
-        guard generation == localGeneration, microphoneEnabled else { return }
+        guard generation == localGeneration else { return }
+        guard microphoneEnabled else {
+            if captureStartInFlightGeneration == localGeneration {
+                captureTerminalDuringStart = true
+            }
+            return
+        }
         microphoneEnabled = false
         failure = .captureUnavailable
         if phase == .readySpeaking {
