@@ -1,6 +1,11 @@
 import Foundation
 #if canImport(Darwin)
 import CoreFoundation
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 import Logging
 
@@ -315,7 +320,9 @@ public actor TwitchBridge {
         return max(0.5, capped + jitter)
     }
 
-    private static func isLoopback(_ host: String) -> Bool {
+    /// Also consulted by `TwitchIRCConnection.connect` as the transport-level backstop that
+    /// keeps a cleartext connection from ever reaching a non-loopback host.
+    static func isLoopback(_ host: String) -> Bool {
         switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "127.0.0.1", "::1", "localhost": return true
         default: return false
@@ -327,28 +334,123 @@ public actor TwitchBridge {
 /// validated TLS before the streams are opened; plaintext exists only for the internal,
 /// loopback-restricted state-machine test helper above.
 actor TwitchIRCConnection {
+    private let stream: any TwitchIRCByteStream
+    private var buffer = Data()
+
+    private init(stream: any TwitchIRCByteStream) {
+        self.stream = stream
+    }
+
+    /// Opens a connection. Two transports, chosen by `useTLS`:
+    ///
+    /// * `useTLS == true` — certificate-validated TLS. Implemented on CFNetwork's stream SSL
+    ///   settings (`kCFStreamSSLPeerName`, the negotiated-SSL security level), which exist only
+    ///   on Apple platforms. Non-Darwin platforms therefore **fail closed** here rather than
+    ///   degrading to cleartext: an unencrypted IRC connection would put the bot's OAuth token
+    ///   on the wire in plaintext. Twitch IRC on Linux needs a real NIOSSL-based client, which
+    ///   is separate work. Mirrors the `#if canImport(Security)` Keychain guard in AppConfig.swift.
+    /// * `useTLS == false` — a plain BSD socket, reachable only from
+    ///   `TwitchBridge.connectInsecureLoopbackForTesting` and restricted to loopback twice over
+    ///   (the guard below, plus `TwitchLoopbackSocketStream`'s own hardcoded address table, which
+    ///   never consults a resolver). It is portable, so the same lines compile and run on Darwin
+    ///   and Linux and the state-machine tests work on both.
+    ///
+    /// Both guards run before any socket or CFNetwork call, so neither a fail-closed TLS attempt
+    /// nor a rejected plaintext host touches the network.
+    static func connect(host: String, port: Int, useTLS: Bool) async throws -> TwitchIRCConnection {
+        // Plaintext is loopback-only on every platform. This is what makes a cleartext
+        // connection to a real Twitch host unreachable by construction rather than by
+        // convention, on Linux included.
+        guard useTLS || TwitchBridge.isLoopback(host) else {
+            throw TwitchIRCError.plaintextRestrictedToLoopback
+        }
+
+        guard useTLS else {
+            return TwitchIRCConnection(
+                stream: try TwitchLoopbackSocketStream.dial(host: host, port: port)
+            )
+        }
+
+        #if canImport(Darwin)
+        return TwitchIRCConnection(
+            stream: try await TwitchCFStreamTLSStream.dial(host: host, port: port)
+        )
+        #else
+        throw TwitchIRCError.tlsUnsupportedOnPlatform
+        #endif
+    }
+
+    func send(_ line: String) throws {
+        var payload = line
+        if !payload.hasSuffix("\r\n") {
+            payload += "\r\n"
+        }
+        guard let data = payload.data(using: .utf8) else {
+            throw TwitchIRCError.encodeFailed
+        }
+        let written = data.withUnsafeBytes { raw -> Int in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return -1 }
+            return stream.writeBytes(base, maxLength: data.count)
+        }
+        if written < 0 {
+            throw TwitchIRCError.writeFailed
+        }
+    }
+
+    func readLine() async throws -> String? {
+        while true {
+            if let range = buffer.range(of: Data([0x0D, 0x0A])) {
+                let lineData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
+                buffer.removeSubrange(buffer.startIndex..<range.upperBound)
+                return String(decoding: lineData, as: UTF8.self)
+            }
+            var chunk = [UInt8](repeating: 0, count: 4096)
+            let n = stream.readBytes(&chunk, maxLength: chunk.count)
+            if n < 0 {
+                throw TwitchIRCError.readFailed
+            }
+            if n == 0 {
+                if buffer.isEmpty { return nil }
+                let line = String(decoding: buffer, as: UTF8.self)
+                buffer.removeAll()
+                return line
+            }
+            buffer.append(contentsOf: chunk.prefix(n))
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func close() {
+        stream.closeStream()
+    }
+}
+
+/// The byte transport under `TwitchIRCConnection`'s line protocol. Exists so that only the TLS
+/// implementation is Darwin-gated: the plaintext loopback implementation below is portable, so
+/// the non-TLS path — and the connection-state tests that drive it — work on Linux too.
+///
+/// `readBytes`/`writeBytes` keep `InputStream`/`OutputStream`'s return convention: bytes moved,
+/// `0` from a read means end of stream, negative means error.
+protocol TwitchIRCByteStream: AnyObject {
+    func writeBytes(_ bytes: UnsafePointer<UInt8>, maxLength: Int) -> Int
+    func readBytes(_ bytes: UnsafeMutablePointer<UInt8>, maxLength: Int) -> Int
+    func closeStream()
+}
+
+#if canImport(Darwin)
+/// Certificate-validated TLS over CFNetwork's socket stream pair. Darwin-only by construction:
+/// the SSL settings keys it depends on ship with CFNetwork, not with swift-corelibs-foundation.
+/// TLS is applied unconditionally — this transport has no cleartext mode to fall back to.
+final class TwitchCFStreamTLSStream: TwitchIRCByteStream {
     private let input: InputStream
     private let output: OutputStream
-    private var buffer = Data()
 
     private init(input: InputStream, output: OutputStream) {
         self.input = input
         self.output = output
     }
 
-    static func connect(host: String, port: Int, useTLS: Bool) async throws -> TwitchIRCConnection {
-        // CFNetwork's stream SSL settings (kCFStreamSSLPeerName, the
-        // negotiated-SSL security level) exist only on Apple platforms;
-        // swift-corelibs-foundation ships CoreFoundation without them, so
-        // this implementation cannot compile — let alone secure a socket —
-        // on Linux. Mirrors the `#if canImport(Security)` Keychain guard in
-        // AppConfig.swift.
-        //
-        // Linux deliberately fails closed instead of falling back: an
-        // unencrypted IRC connection would put the bot's OAuth token on the
-        // wire in plaintext. Supporting Twitch IRC on Linux needs a real
-        // NIOSSL-based client, which is a separate piece of work.
-        #if canImport(Darwin)
+    static func dial(host: String, port: Int) async throws -> TwitchCFStreamTLSStream {
         var readStream: Unmanaged<CFReadStream>?
         var writeStream: Unmanaged<CFWriteStream>?
         CFStreamCreatePairWithSocketToHost(nil, host as CFString, UInt32(port), &readStream, &writeStream)
@@ -358,30 +460,28 @@ actor TwitchIRCConnection {
             throw TwitchIRCError.streamCreateFailed
         }
 
-        if useTLS {
-            let sslSettings = [
-                kCFStreamSSLPeerName as String: host,
-                kCFStreamSSLValidatesCertificateChain as String: true,
-            ] as CFDictionary
-            let sslSettingsKey = CFStreamPropertyKey(kCFStreamPropertySSLSettings)
-            let securityLevelKey = CFStreamPropertyKey(kCFStreamPropertySocketSecurityLevel)
-            guard CFReadStreamSetProperty(cfInput, sslSettingsKey, sslSettings),
-                  CFWriteStreamSetProperty(cfOutput, sslSettingsKey, sslSettings),
-                  CFReadStreamSetProperty(
-                      cfInput,
-                      securityLevelKey,
-                      kCFStreamSocketSecurityLevelNegotiatedSSL
-                  ),
-                  CFWriteStreamSetProperty(
-                      cfOutput,
-                      securityLevelKey,
-                      kCFStreamSocketSecurityLevelNegotiatedSSL
-                  )
-            else {
-                CFReadStreamClose(cfInput)
-                CFWriteStreamClose(cfOutput)
-                throw TwitchIRCError.tlsConfigurationFailed
-            }
+        let sslSettings = [
+            kCFStreamSSLPeerName as String: host,
+            kCFStreamSSLValidatesCertificateChain as String: true,
+        ] as CFDictionary
+        let sslSettingsKey = CFStreamPropertyKey(kCFStreamPropertySSLSettings)
+        let securityLevelKey = CFStreamPropertyKey(kCFStreamPropertySocketSecurityLevel)
+        guard CFReadStreamSetProperty(cfInput, sslSettingsKey, sslSettings),
+              CFWriteStreamSetProperty(cfOutput, sslSettingsKey, sslSettings),
+              CFReadStreamSetProperty(
+                  cfInput,
+                  securityLevelKey,
+                  kCFStreamSocketSecurityLevelNegotiatedSSL
+              ),
+              CFWriteStreamSetProperty(
+                  cfOutput,
+                  securityLevelKey,
+                  kCFStreamSocketSecurityLevelNegotiatedSSL
+              )
+        else {
+            CFReadStreamClose(cfInput)
+            CFWriteStreamClose(cfOutput)
+            throw TwitchIRCError.tlsConfigurationFailed
         }
 
         guard let input = cfInput as InputStream?,
@@ -400,56 +500,92 @@ actor TwitchIRCConnection {
             output.close()
             throw TwitchIRCError.streamOpenFailed
         }
-        return TwitchIRCConnection(input: input, output: output)
-        #else
-        _ = (host, port, useTLS)
-        throw TwitchIRCError.tlsUnsupportedOnPlatform
-        #endif
+        return TwitchCFStreamTLSStream(input: input, output: output)
     }
 
-    func send(_ line: String) throws {
-        var payload = line
-        if !payload.hasSuffix("\r\n") {
-            payload += "\r\n"
-        }
-        guard let data = payload.data(using: .utf8) else {
-            throw TwitchIRCError.encodeFailed
-        }
-        let written = data.withUnsafeBytes { raw -> Int in
-            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return -1 }
-            return output.write(base, maxLength: data.count)
-        }
-        if written < 0 {
-            throw TwitchIRCError.writeFailed
-        }
+    func writeBytes(_ bytes: UnsafePointer<UInt8>, maxLength: Int) -> Int {
+        output.write(bytes, maxLength: maxLength)
     }
 
-    func readLine() async throws -> String? {
-        while true {
-            if let range = buffer.range(of: Data([0x0D, 0x0A])) {
-                let lineData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
-                buffer.removeSubrange(buffer.startIndex..<range.upperBound)
-                return String(decoding: lineData, as: UTF8.self)
-            }
-            var chunk = [UInt8](repeating: 0, count: 4096)
-            let n = input.read(&chunk, maxLength: chunk.count)
-            if n < 0 {
-                throw TwitchIRCError.readFailed
-            }
-            if n == 0 {
-                if buffer.isEmpty { return nil }
-                let line = String(decoding: buffer, as: UTF8.self)
-                buffer.removeAll()
-                return line
-            }
-            buffer.append(contentsOf: chunk.prefix(n))
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
+    func readBytes(_ bytes: UnsafeMutablePointer<UInt8>, maxLength: Int) -> Int {
+        input.read(bytes, maxLength: maxLength)
     }
 
-    func close() {
+    func closeStream() {
         input.close()
         output.close()
+    }
+}
+#endif
+
+/// Cleartext BSD-socket transport for the loopback-only test path. Deliberately built from the
+/// same plain POSIX calls the connection-state tests' own listener uses, so it compiles and runs
+/// identically on Darwin and Linux — the non-TLS path is therefore exercised for real on macOS
+/// rather than being Linux-only code nobody can execute locally.
+///
+/// It resolves nothing: the address table below is hardcoded to the IPv4 loopback literal. A
+/// resolver would reopen the hole the loopback restriction exists to close, since a name that
+/// passes a string check can still resolve off-host.
+final class TwitchLoopbackSocketStream: TwitchIRCByteStream {
+    private let descriptor: Int32
+    private var closed = false
+
+    private init(descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    /// Named `dial` rather than `connect` so the call to the global C `connect(2)` below
+    /// resolves to the syscall instead of recursing into this method.
+    static func dial(host: String, port: Int) throws -> TwitchLoopbackSocketStream {
+        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "127.0.0.1", "localhost":
+            break
+        default:
+            // Includes "::1": this transport is IPv4-only on purpose, because an IPv6
+            // loopback literal needs `in6_addr` internals whose Swift field names differ
+            // between Darwin and Glibc. Rejecting is the fail-closed direction.
+            throw TwitchIRCError.loopbackAddressUnsupported
+        }
+        guard let portNumber = UInt16(exactly: port) else {
+            throw TwitchIRCError.loopbackAddressUnsupported
+        }
+
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { throw TwitchIRCError.loopbackSocketCreateFailed }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = portNumber.bigEndian
+        // 127.0.0.1 as a literal — no `INADDR_LOOPBACK`, no resolver, no platform divergence.
+        addr.sin_addr.s_addr = UInt32(0x7F00_0001).bigEndian
+
+        let result = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard result == 0 else {
+            close(sock)  // global C close(_:), not this type's closeStream()
+            throw TwitchIRCError.loopbackConnectFailed
+        }
+        return TwitchLoopbackSocketStream(descriptor: sock)
+    }
+
+    func writeBytes(_ bytes: UnsafePointer<UInt8>, maxLength: Int) -> Int {
+        guard !closed else { return -1 }
+        return write(descriptor, bytes, maxLength)
+    }
+
+    func readBytes(_ bytes: UnsafeMutablePointer<UInt8>, maxLength: Int) -> Int {
+        guard !closed else { return 0 }
+        return read(descriptor, bytes, maxLength)
+    }
+
+    func closeStream() {
+        guard !closed else { return }
+        closed = true
+        close(descriptor)  // global C close(_:), not this method
     }
 }
 
@@ -460,13 +596,26 @@ enum TwitchIRCError: Error, LocalizedError, Sendable {
     case encodeFailed
     case writeFailed
     case readFailed
-    /// Twitch IRC over TLS is unavailable on this platform (see `connect`).
+    /// Twitch IRC over TLS is unavailable on this platform (see `TwitchIRCConnection.connect`).
     case tlsUnsupportedOnPlatform
+    /// A cleartext connection was requested for a host that is not loopback. Never reachable from
+    /// the production path (which always requests TLS); this is the transport-level backstop that
+    /// keeps the OAuth token off the wire in cleartext on every platform.
+    case plaintextRestrictedToLoopback
+    case loopbackAddressUnsupported
+    case loopbackSocketCreateFailed
+    case loopbackConnectFailed
 
     var errorDescription: String? {
         switch self {
         case .tlsUnsupportedOnPlatform:
             return "Twitch IRC over TLS is not supported on this platform"
+        case .plaintextRestrictedToLoopback:
+            return "Cleartext Twitch IRC is restricted to loopback"
+        case .loopbackAddressUnsupported:
+            return "Cleartext Twitch IRC test transport supports only the IPv4 loopback address"
+        case .loopbackSocketCreateFailed: return "Twitch IRC loopback socket create failed"
+        case .loopbackConnectFailed: return "Twitch IRC loopback socket connect failed"
         case .streamCreateFailed: return "Twitch IRC stream create failed"
         case .tlsConfigurationFailed: return "Twitch IRC TLS configuration failed"
         case .streamOpenFailed: return "Twitch IRC stream open failed"

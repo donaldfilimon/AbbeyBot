@@ -128,8 +128,66 @@ struct TwitchBridgeConnectionStateTests {
         )
 
         #expect(await bridge.state == .failed)
+        // The bridge-level guard fires first, so this pins that guard specifically — the
+        // transport-level backstop below reports a different message on purpose.
         #expect(await bridge.lastError == "Insecure Twitch IRC test transport is restricted to loopback")
     }
+
+    /// The security property the platform gating exists to protect, pinned on every platform:
+    /// cleartext IRC must be unreachable against a real host. `TwitchIRCConnection.connect` is
+    /// the last layer before a socket, so a caller that got past the bridge's own loopback guard
+    /// must still fail closed here — and fail before any name resolution or connect(2), which is
+    /// why this test needs no network.
+    @Test func transportRefusesCleartextToNonLoopbackHost() async {
+        do {
+            _ = try await TwitchIRCConnection.connect(
+                host: "irc.chat.twitch.tv",
+                port: 6667,
+                useTLS: false
+            )
+            Issue.record("cleartext Twitch IRC to a non-loopback host must not connect")
+        } catch let error as TwitchIRCError {
+            #expect(error == .plaintextRestrictedToLoopback)
+        } catch {
+            Issue.record("expected TwitchIRCError, got \(error)")
+        }
+    }
+
+    /// Second, independent barrier: even the cleartext transport itself refuses a non-loopback
+    /// address, and it does so from a hardcoded table rather than a resolver — a hostname that
+    /// passes a string check must never be looked up and dialed.
+    @Test func loopbackTransportRefusesNonLoopbackAddressWithoutResolving() {
+        do {
+            _ = try TwitchLoopbackSocketStream.dial(host: "irc.chat.twitch.tv", port: 6667)
+            Issue.record("the loopback-only transport must not dial a non-loopback host")
+        } catch let error as TwitchIRCError {
+            #expect(error == .loopbackAddressUnsupported)
+        } catch {
+            Issue.record("expected TwitchIRCError, got \(error)")
+        }
+    }
+
+    #if !canImport(Darwin)
+    /// Production TLS must fail closed where CFNetwork's stream SSL settings do not exist, rather
+    /// than degrading to cleartext and putting the bot's OAuth token on the wire. Asserts the
+    /// exact error case: "it threw something" would also pass if a plaintext-fallback bug threw
+    /// for an unrelated reason, which is the failure this test exists to catch. Like the test
+    /// above, the throw happens before any socket work, so this needs no network egress in CI.
+    @Test func tlsFailsClosedOnPlatformsWithoutCFNetworkTLS() async {
+        do {
+            _ = try await TwitchIRCConnection.connect(
+                host: "irc.chat.twitch.tv",
+                port: 6697,
+                useTLS: true
+            )
+            Issue.record("Twitch IRC TLS must fail closed on this platform, not connect")
+        } catch let error as TwitchIRCError {
+            #expect(error == .tlsUnsupportedOnPlatform)
+        } catch {
+            Issue.record("expected TwitchIRCError, got \(error)")
+        }
+    }
+    #endif
 }
 
 /// Minimal loopback TCP listener for triggering a real, clean peer-close in tests.
