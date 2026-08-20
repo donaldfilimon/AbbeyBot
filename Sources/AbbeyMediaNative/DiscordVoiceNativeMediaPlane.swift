@@ -125,7 +125,26 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     private var runtime: InstalledRuntime?
     private var clock: DiscordVoiceRTPClock?
     private var speakingSignal: (@Sendable () async throws -> Void)?
-    private var hasSentSpeakingForInstalledRuntime = false
+
+    /// One-shot-per-generation Speaking obligation, shared across concurrent
+    /// sends. `.inFlight` carries the single signaling task so a frame that
+    /// arrives while the first frame's callback is suspended awaits the SAME
+    /// outcome instead of racing past the gate; a failed callback regresses
+    /// the gate to `.pending` so the next frame re-attempts opcode 5 rather
+    /// than silently skipping it.
+    private enum SpeakingGate {
+        case pending
+        case inFlight(Task<Void, any Error>)
+        case sent
+    }
+
+    private var speakingGate: SpeakingGate = .pending
+
+    /// Suspended datagram sends, keyed for interruption: `reset()` cancels and
+    /// awaits every entry so an obsolete generation's packet cannot reach the
+    /// wire during or after teardown.
+    private var inFlightSends: [UInt64: Task<Void, any Error>] = [:]
+    private var nextSendID: UInt64 = 0
 
     public init(
         daveAdapter: NativeDAVEControlAdapter,
@@ -218,7 +237,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
                 initialSequence: seed.sequence,
                 initialTimestamp: seed.timestamp
             )
-            hasSentSpeakingForInstalledRuntime = false
+            speakingGate = .pending
             return DiscordVoiceMediaCapabilities(
                 dave: daveAvailable,
                 aead: true,
@@ -340,25 +359,14 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         // sequence number, and at most one of them owns firing Speaking.
         let tick = reservedClock.next()
         clock = reservedClock
-        let mustSendSpeaking = !hasSentSpeakingForInstalledRuntime
-        if mustSendSpeaking {
-            hasSentSpeakingForInstalledRuntime = true
-        }
 
-        // If this call owns Speaking and its own send later fails, no other
-        // call re-attempts Speaking for this generation. Production callers
-        // are expected to drive one send at a time from a single capture
-        // loop, so this is a documented ordering caveat for out-of-order
-        // concurrent failures, not a gap in the sequential case this Phase 5
-        // slice proves.
-        if mustSendSpeaking, let speakingSignal {
-            do {
-                try await speakingSignal()
-            } catch {
-                throw DiscordVoiceNativeMediaPlaneError.speakingSignalFailed
-            }
-            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
-        }
+        // The Speaking obligation is marked satisfied only AFTER the callback
+        // succeeds. A throwing callback regresses the gate so the next frame
+        // re-attempts opcode 5 instead of reaching the UDP transport with no
+        // successful Speaking on record, and a concurrent frame that enters
+        // while the first callback is suspended awaits that same shared
+        // outcome rather than bypassing the gate.
+        try await ensureSpeakingSent(revision: sendRevision)
 
         let opusPayload = try await installed.opus.encode(pcm)
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
@@ -389,21 +397,80 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         let wirePacket = try await installed.transportEncryption.seal(plaintextPacket)
         try requireCurrent(sendRevision, orThrow: .sendInterrupted)
 
-        try await installed.datagramTransport.sendProtectedPacket(wirePacket)
+        // The datagram send runs as a tracked, cancellable task so `reset()`
+        // can interrupt a send suspended inside the transport and await its
+        // completion before teardown finishes — an obsolete generation's
+        // packet must never reach the wire after reset returns.
+        let sendID = nextSendID
+        nextSendID &+= 1
+        let transport = installed.datagramTransport
+        let sendTask = Task { try await transport.sendProtectedPacket(wirePacket) }
+        inFlightSends[sendID] = sendTask
+        defer { inFlightSends[sendID] = nil }
+        do {
+            try await sendTask.value
+        } catch is CancellationError {
+            throw DiscordVoiceNativeMediaPlaneError.sendInterrupted
+        }
+    }
+
+    /// At most one Speaking signal task exists per installed generation;
+    /// every concurrent send shares its outcome. Success latches `.sent`;
+    /// failure regresses to `.pending` (unless a reset or superseding install
+    /// already replaced the gate) and fails this send closed.
+    private func ensureSpeakingSent(revision sendRevision: UInt64) async throws {
+        switch speakingGate {
+        case .sent:
+            return
+        case .inFlight(let task):
+            do {
+                try await task.value
+            } catch {
+                throw DiscordVoiceNativeMediaPlaneError.speakingSignalFailed
+            }
+            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        case .pending:
+            guard let speakingSignal else {
+                // No callback attached: nothing to signal, and nothing to
+                // re-attempt later — mirror the previous one-shot consumption.
+                speakingGate = .sent
+                return
+            }
+            let task = Task { try await speakingSignal() }
+            speakingGate = .inFlight(task)
+            do {
+                try await task.value
+            } catch {
+                if case .inFlight(let current) = speakingGate, current == task {
+                    speakingGate = .pending
+                }
+                throw DiscordVoiceNativeMediaPlaneError.speakingSignalFailed
+            }
+            if case .inFlight(let current) = speakingGate, current == task {
+                speakingGate = .sent
+            }
+            try requireCurrent(sendRevision, orThrow: .sendInterrupted)
+        }
     }
 
     /// Drops every object that can retain the transport key while preserving
     /// the generation high-water mark against late installation tasks.
+    /// Interrupts and awaits every suspended datagram send so teardown cannot
+    /// complete while an obsolete packet could still be put on the wire.
     public func reset() async {
         revision &+= 1
         clearRuntime()
+        let pending = Array(inFlightSends.values)
+        inFlightSends.removeAll(keepingCapacity: false)
+        for task in pending { task.cancel() }
+        for task in pending { _ = try? await task.value }
         await generationStore.reset()
     }
 
     private func clearRuntime() {
         runtime = nil
         clock = nil
-        hasSentSpeakingForInstalledRuntime = false
+        speakingGate = .pending
     }
 
     private func acceptGeneration(_ generation: UInt64) throws {

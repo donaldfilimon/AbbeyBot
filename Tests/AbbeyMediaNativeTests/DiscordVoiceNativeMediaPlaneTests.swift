@@ -395,6 +395,99 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await plane.snapshot().isInstalled == false)
     }
 
+    @Test("a failed Speaking signal is re-attempted by the next frame instead of being consumed")
+    func failedSpeakingSignalIsRetriedByNextFrame() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let speaking = SpeakingSignalRecorder()
+        await speaking.markShouldFail()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachSpeakingSignal { try await speaking.signal() }
+        _ = try await plane.install(
+            makeCapability(generation: 31, daveProtocolVersion: 1)
+        )
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.speakingSignalFailed) {
+            try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 0))
+        }
+        #expect(await log.sentPackets.isEmpty)
+
+        // The regression this pins: the old one-shot flag was consumed by the
+        // failed attempt, so the next frame skipped opcode 5 and reached the
+        // transport with no successful Speaking on record. The gate must
+        // re-attempt instead.
+        await speaking.markShouldSucceed()
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 1))
+        #expect(await speaking.callCount == 2)
+        #expect(await log.sentPackets.count == 1)
+    }
+
+    @Test("a frame arriving while Speaking is suspended cannot bypass the gate and reach the transport")
+    func concurrentFrameSharesSuspendedSpeakingOutcome() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let speaking = SuspendableSpeakingSignal()
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: log
+        )
+        await plane.attachSpeakingSignal { try await speaking.signal() }
+        _ = try await plane.install(
+            makeCapability(generation: 32, daveProtocolVersion: 1)
+        )
+
+        let first = Task { try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 0)) }
+        await speaking.waitUntilSignalStarted()
+        let second = Task { try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 1)) }
+        await Task.yield()
+        await speaking.release(failing: true)
+
+        // Under the old eager flag, the second frame observed Speaking as
+        // already "sent" while the first callback was still suspended, and
+        // proceeded to the transport. Both frames must fail closed and nothing
+        // may reach the wire without a successful Speaking.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.speakingSignalFailed) {
+            try await first.value
+        }
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.speakingSignalFailed) {
+            try await second.value
+        }
+        #expect(await log.sentPackets.isEmpty)
+        #expect(await daveSession.protectCallCount == 0)
+    }
+
+    @Test("reset() interrupts a send suspended inside the datagram transport; the packet never reaches the wire")
+    func resetInterruptsSuspendedDatagramSend() async throws {
+        let transport = SuspendableDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: transport
+        )
+        _ = try await plane.install(
+            makeCapability(generation: 33, daveProtocolVersion: 1)
+        )
+
+        let send = Task { try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 0)) }
+        await transport.waitUntilSendStarted()
+        // reset() must cancel and await the suspended send before returning,
+        // so the obsolete generation's packet cannot land on the wire during
+        // or after teardown.
+        await plane.reset()
+
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await send.value
+        }
+        #expect(await transport.deliveredPackets.isEmpty)
+        #expect(await plane.snapshot().isInstalled == false)
+    }
+
     private func fixedPCMFrame(seed: Int) -> [Int16] {
         (0..<Opus20msCodec.interleavedSampleCount).map { index in
             Int16(truncatingIfNeeded: (index * 37) + (seed * 911) + 1)
@@ -498,11 +591,89 @@ private actor SpeakingSignalRecorder {
         shouldFail = true
     }
 
+    func markShouldSucceed() {
+        shouldFail = false
+    }
+
     func signal() throws {
         callCount += 1
         if shouldFail {
             throw TestSpeakingFailure.injected
         }
+    }
+}
+
+/// A Speaking signal that suspends its first caller until the test releases
+/// it. Once released, later calls complete immediately with the same latched
+/// outcome, so a frame that (racily) re-attempts after a released failure
+/// still fails deterministically instead of hanging.
+private actor SuspendableSpeakingSignal {
+    private(set) var callCount = 0
+    private var released = false
+    private var failWhenReleased = false
+    private var signalStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() async throws {
+        callCount += 1
+        let startWaiters = signalStartWaiters
+        signalStartWaiters.removeAll(keepingCapacity: false)
+        for waiter in startWaiters { waiter.resume() }
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        if failWhenReleased {
+            throw TestSpeakingFailure.injected
+        }
+    }
+
+    func waitUntilSignalStarted() async {
+        guard callCount == 0 else { return }
+        await withCheckedContinuation { signalStartWaiters.append($0) }
+    }
+
+    func release(failing: Bool) {
+        released = true
+        failWhenReleased = failing
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
+    }
+}
+
+/// A datagram transport whose send suspends until released, honoring task
+/// cancellation, so tests can pin what `reset()` does to an in-flight send.
+private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
+    private(set) var deliveredPackets: [[UInt8]] = []
+    private var released = false
+    private var sendStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var sendStarted = false
+
+    func sendProtectedPacket(_ bytes: [UInt8]) async throws {
+        sendStarted = true
+        let waiters = sendStartWaiters
+        sendStartWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
+        while !released {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        deliveredPackets.append(bytes)
+    }
+
+    func receiveProtectedPacket() async throws -> [UInt8] {
+        throw CancellationError()
+    }
+
+    func disconnect() async {}
+
+    func waitUntilSendStarted() async {
+        guard !sendStarted else { return }
+        await withCheckedContinuation { sendStartWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
     }
 }
 
