@@ -184,12 +184,17 @@ public actor DiscordVoiceCaptureLoop: DiscordVoiceCaptureLoopControlling,
             }
             do {
                 try await sender.sendAudioFrame(pcm: pcm)
+                // Counted the moment the send succeeds, not after the next
+                // revision check: the frame really did reach the wire, and a
+                // `stop()` landing in between must not un-count it. (That
+                // window is real — the send path suspends on a tracked child
+                // task — and made this counter flaky under teardown.)
+                sentFrameCount &+= 1
             } catch {
                 await failCapture(revision: startRevision)
                 return
             }
             guard revision == startRevision else { return }
-            sentFrameCount &+= 1
         }
         // The source finished the stream on its own: device removal,
         // interruption, or configuration change. A deliberate `stop()` bumps
