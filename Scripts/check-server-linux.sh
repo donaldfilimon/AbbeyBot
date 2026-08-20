@@ -179,18 +179,44 @@ echo "== GATE glibc-divergence =="
 : >"$LINT_LOG"
 LINT_RC=0
 
+# Rule 1: the C stdio stream globals.
+#   glibc: `extern FILE *stderr;`      -> a Swift `var` -> rejected by strict concurrency
+#   musl:  `extern FILE *const stderr;`-> a Swift `let` -> compiles clean
+# Rule 2: the socket type constants.
+#   glibc: SOCK_STREAM & friends are the `__socket_type` ENUM, so passing one
+#          straight to socket(_:_:_:) fails with "cannot convert value of type
+#          '__socket_type' to expected argument type 'Int32'".
+#   musl/Darwin: plain Int32, compiles clean.
+# Both rules exist because a musl-green build said nothing about either case:
+# rule 1 was found by CI after this gate passed, and rule 2 was found by CI
+# after this gate passed *and* after the code had been reviewed.
 while IFS= read -r file; do
-    hits="$(sed 's://.*::' "$file" | grep -nE '(^|[^.[:alnum:]_"])(stdin|stdout|stderr)([^([:alnum:]_]|$)' || true)"
+    # Comments are stripped so prose mentions do not trip the lint — but the
+    # opt-out marker is a comment too, so preserve it as a sentinel first.
+    stripped="$(sed 's|//[[:space:]]*glibc-divergence:ok|@@GDOK@@|; s://.*::' "$file")"
+    hits="$(printf '%s\n' "$stripped" | grep -nE '(^|[^.[:alnum:]_"])(stdin|stdout|stderr)([^([:alnum:]_]|$)' || true)"
     if [[ -n "$hits" ]]; then
-        printf '%s\n' "$hits" | sed "s|^|$file:|" >>"$LINT_LOG"
+        printf '%s\n' "$hits" | sed "s|^|$file:[stdio] |" >>"$LINT_LOG"
+        LINT_RC=1
+    fi
+    # Only flag a socket-type constant used as a bare argument; an explicit
+    # Int32(...) conversion or a .rawValue access is already portable.
+    sock="$(printf '%s\n' "$stripped" \
+        | grep -nE '(^|[^.[:alnum:]_"])(SOCK_STREAM|SOCK_DGRAM|SOCK_RAW|SOCK_SEQPACKET)([^([:alnum:]_.]|$)' \
+        | grep -vE 'Int32\(|\.rawValue|@@GDOK@@' || true)"
+    if [[ -n "$sock" ]]; then
+        printf '%s\n' "$sock" | sed "s|^|$file:[socktype] |" >>"$LINT_LOG"
         LINT_RC=1
     fi
 done < <(find "${SERVER_GRAPH_PATHS[@]}" -name '*.swift' -type f)
 
 if [[ $LINT_RC -ne 0 ]]; then
-    echo "  glibc-divergence: reference(s) to the C stdio stream globals." >&2
-    echo "  These compile under musl (const) and FAIL under glibc (mutable var)." >&2
-    echo "  Replace with FileHandle.standardError / FileHandle.standardOutput." >&2
+    echo "  glibc-divergence: construct(s) that compile under musl and FAIL under glibc." >&2
+    echo "    [stdio]    replace with FileHandle.standardError / .standardOutput" >&2
+    echo "    [socktype] glibc types these as the __socket_type enum; pass" >&2
+    echo "               Int32(SOCK_STREAM.rawValue) behind #if canImport(Glibc)" >&2
+    echo "    A deliberate non-Glibc branch may opt out with a trailing" >&2
+    echo "    '// glibc-divergence:ok' comment — visible in the source, not silent." >&2
     sed 's/^/  | /' "$LINT_LOG" >&2
     FAILED=1
 fi

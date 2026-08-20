@@ -1,6 +1,16 @@
 import Foundation
 import Testing
 
+/// `SOCK_STREAM` is not the same Swift type on every platform: Glibc declares it as the
+/// `__socket_type` enum, while Darwin and musl expose a plain `Int32`. Passing it straight to
+/// `socket(_:_:_:)` therefore compiles on macOS *and* under the musl cross-compile gate, and
+/// fails only on the Glibc build CI actually runs — which is exactly how this reached CI.
+#if canImport(Glibc)
+private let testStreamSocketType = Int32(SOCK_STREAM.rawValue)
+#else
+private let testStreamSocketType = SOCK_STREAM // glibc-divergence:ok
+#endif
+
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -214,7 +224,7 @@ private final class LoopbackListener: @unchecked Sendable {
     }
 
     init(port requestedPort: UInt16 = 0) throws {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        let sock = socket(AF_INET, testStreamSocketType, 0)
         guard sock >= 0 else { throw ListenerError.socketFailed }
 
         var reuse: Int32 = 1

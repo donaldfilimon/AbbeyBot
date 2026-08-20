@@ -333,6 +333,16 @@ public actor TwitchBridge {
 /// Minimal line-oriented Twitch IRC client. Production calls always set up certificate-
 /// validated TLS before the streams are opened; plaintext exists only for the internal,
 /// loopback-restricted state-machine test helper above.
+/// `SOCK_STREAM` is not the same Swift type on every platform: Glibc declares it as the
+/// `__socket_type` enum, while Darwin and musl expose a plain `Int32`. Passing it straight to
+/// `socket(_:_:_:)` therefore compiles on macOS *and* under the musl cross-compile gate, and
+/// fails only on the Glibc build CI actually runs — which is exactly how this reached CI.
+#if canImport(Glibc)
+private let abbeyStreamSocketType = Int32(SOCK_STREAM.rawValue)
+#else
+private let abbeyStreamSocketType = SOCK_STREAM // glibc-divergence:ok
+#endif
+
 actor TwitchIRCConnection {
     private let stream: any TwitchIRCByteStream
     private var buffer = Data()
@@ -551,7 +561,7 @@ final class TwitchLoopbackSocketStream: TwitchIRCByteStream {
             throw TwitchIRCError.loopbackAddressUnsupported
         }
 
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        let sock = socket(AF_INET, abbeyStreamSocketType, 0)
         guard sock >= 0 else { throw TwitchIRCError.loopbackSocketCreateFailed }
 
         var addr = sockaddr_in()
