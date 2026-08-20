@@ -828,10 +828,15 @@ extension DiscordBridge {
                 voiceChannelId = nil
                 voiceSelfMute = false
                 voiceSelfDeaf = false
-            } else if guildId == voiceGuildId, payload.channel_id?.rawValue == voiceChannelId {
-                // No join/leave handshake is active — this is Discord's echo of a
-                // presence-only self-mute/self-deaf update for the channel we are
-                // already confirmed in.
+            } else if guildId == voiceGuildId, let confirmedChannelId = payload.channel_id?.rawValue {
+                // No join/leave handshake is active — this is Discord's
+                // confirmed self Voice State for the guild we are in: either
+                // an echo of a presence-only self-mute/self-deaf update, or a
+                // server-side move to another channel. Track the confirmed
+                // channel either way, so a later mute/deafen opcode 4 targets
+                // the channel the bot is actually in rather than moving it
+                // back to a channel Discord already took it out of.
+                voiceChannelId = confirmedChannelId
                 voiceSelfMute = payload.self_mute
                 voiceSelfDeaf = payload.self_deaf
             }

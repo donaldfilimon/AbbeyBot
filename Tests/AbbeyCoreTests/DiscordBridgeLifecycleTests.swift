@@ -485,6 +485,58 @@ struct DiscordBridgeLifecycleTests {
         await bridge.disconnect()
     }
 
+    @Test("a confirmed server-side channel move retargets later mute updates instead of moving the bot back")
+    func serverSideChannelMoveRetargetsMuteUpdates() async throws {
+        let driver = FakeDiscordGatewayDriver()
+        let factory = FakeDiscordGatewayDriverFactory([driver])
+        let bridge = makeBridge(factory: factory)
+        try await connectReady(bridge: bridge, driver: driver, userID: "42")
+
+        guard case .requested = await bridge.requestVoiceGatewayPair(guildId: "guild", channelId: "channel") else {
+            Issue.record("Expected producer generation")
+            return
+        }
+        await driver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: "channel",
+            userID: "42",
+            sessionID: "session"
+        ))
+        await driver.emit(try voiceServerEvent(
+            guildID: "guild",
+            endpoint: "voice.example.invalid",
+            token: "ephemeral-token"
+        ))
+        #expect(await eventually { await bridge.voiceChannelId == "channel" })
+
+        // Discord moves the bot to another channel with no local handshake
+        // active. The confirmed self Voice State is authoritative: the bridge
+        // must track the move, not classify it away and keep the stale channel.
+        await driver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: "moved-channel",
+            userID: "42",
+            sessionID: "session",
+            selfMute: false,
+            selfDeaf: false
+        ))
+        #expect(await eventually { await bridge.voiceChannelId == "moved-channel" })
+        #expect(await bridge.voiceSelfMute == false)
+        #expect(await bridge.voiceSelfDeaf == false)
+
+        // The regression this pins: a mute toggle after the move used to send
+        // opcode 4 with the OLD channel id, yanking the bot back to the
+        // channel Discord had already moved it out of.
+        #expect(await bridge.updateVoiceMuteState(selfMute: true, selfDeaf: false) == .requested)
+        #expect(await driver.voiceUpdates.last == .init(
+            guildID: "guild",
+            channelID: "moved-channel",
+            selfMute: true,
+            selfDeaf: false
+        ))
+        await bridge.disconnect()
+    }
+
     @Test("wrong voice events and nil endpoint cannot publish presence or credentials")
     func rejectsMismatchedVoiceEvents() async throws {
         let driver = FakeDiscordGatewayDriver()

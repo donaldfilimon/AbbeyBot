@@ -9,6 +9,7 @@ struct DiscordView: View {
     @State private var statusMessage: String?
     @State private var voiceGuildId = ""
     @State private var voiceChannelId = ""
+    @State private var pendingVoiceFlags: PendingVoiceFlags?
 
     var body: some View {
         Form {
@@ -199,38 +200,72 @@ struct DiscordView: View {
                 !engine.mediaSession.voicePresenceConfirmed
                     || engine.mediaSession.isOperationInFlight
             )
-            Text("Reflects Discord's confirmed state — after a toggle, it may briefly show the old value until Discord's echo arrives (polled every 2s).")
+            .onChange(of: confirmedVoiceFlags) { _, confirmed in
+                // Discord's echo caught up with the requested pair — hand the
+                // toggles back to confirmed state.
+                if pendingVoiceFlags == confirmed { pendingVoiceFlags = nil }
+            }
+            .onChange(of: engine.mediaSession.voicePresenceConfirmed) { _, confirmed in
+                if !confirmed { pendingVoiceFlags = nil }
+            }
+            Text("Toggles show your requested state until Discord's echo confirms it (polled every 2s).")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
     }
 
+    /// The operator's requested mute/deafen pair while Discord's echo is still
+    /// pending. Both bindings read and extend this pair so two quick toggles
+    /// compose (mute-on then deafen-on sends `(true,false)` then `(true,true)`)
+    /// instead of each combining with the other's stale confirmed value and
+    /// silently undoing the first change.
+    private struct PendingVoiceFlags: Equatable {
+        var selfMute: Bool
+        var selfDeaf: Bool
+    }
+
+    private var confirmedVoiceFlags: PendingVoiceFlags {
+        PendingVoiceFlags(
+            selfMute: engine.mediaSession.voiceSelfMute,
+            selfDeaf: engine.mediaSession.voiceSelfDeaf
+        )
+    }
+
     private var muteBinding: Binding<Bool> {
         Binding(
-            get: { engine.mediaSession.voiceSelfMute },
+            get: { pendingVoiceFlags?.selfMute ?? engine.mediaSession.voiceSelfMute },
             set: { value in
-                Task {
-                    statusMessage = await engine.setVoiceMuteDeafen(
-                        selfMute: value,
-                        selfDeaf: engine.mediaSession.voiceSelfDeaf
-                    )
-                }
+                var desired = pendingVoiceFlags ?? confirmedVoiceFlags
+                desired.selfMute = value
+                sendVoiceFlags(desired)
             }
         )
     }
 
     private var deafenBinding: Binding<Bool> {
         Binding(
-            get: { engine.mediaSession.voiceSelfDeaf },
+            get: { pendingVoiceFlags?.selfDeaf ?? engine.mediaSession.voiceSelfDeaf },
             set: { value in
-                Task {
-                    statusMessage = await engine.setVoiceMuteDeafen(
-                        selfMute: engine.mediaSession.voiceSelfMute,
-                        selfDeaf: value
-                    )
-                }
+                var desired = pendingVoiceFlags ?? confirmedVoiceFlags
+                desired.selfDeaf = value
+                sendVoiceFlags(desired)
             }
         )
+    }
+
+    private func sendVoiceFlags(_ desired: PendingVoiceFlags) {
+        pendingVoiceFlags = desired
+        Task {
+            statusMessage = await engine.setVoiceMuteDeafen(
+                selfMute: desired.selfMute,
+                selfDeaf: desired.selfDeaf
+            )
+            if engine.mediaSession.operatorError != nil {
+                // The request failed — resync the toggles to Discord's
+                // confirmed state instead of pinning a pair that never lands.
+                pendingVoiceFlags = nil
+            }
+        }
     }
 
     @ViewBuilder

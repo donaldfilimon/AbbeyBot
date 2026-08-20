@@ -1075,12 +1075,22 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 }
             } catch VoiceGatewayV8Error.missedHeartbeatAcknowledgement {
                 self.machine = machine
-                await resetMediaAndClose(
-                    session,
-                    code: 1001,
-                    reason: "heartbeat ACK timeout",
-                    generation: connectionGeneration
-                )
+                // Deliberately NOT `resetMediaAndClose`: a missed heartbeat ACK
+                // is exactly the abrupt loss the buffered-resume gate treats as
+                // close code 1006, and a successful Resume retains the installed
+                // DAVE/AEAD/Opus runtime — resetting here would let the session
+                // return to `established` with no media installed, failing every
+                // later send with `mediaNotInstalled`. `transportDidFinish` owns
+                // the reset decision: a non-resume disposition (or exhausted
+                // budget) still takes the credential-dropping teardown.
+                //
+                // The revision bump is kept: an installation still in flight
+                // when signaling drops must fail closed (its completion guard
+                // compares this revision), because it has not been attested
+                // against a connection that was ever whole. Only a runtime that
+                // finished installing BEFORE the outage survives into a resume.
+                mediaLifecycleRevision &+= 1
+                await session.close(code: 1001, reason: "heartbeat ACK timeout")
                 throw VoiceGatewayV8Error.missedHeartbeatAcknowledgement
             }
 

@@ -1184,6 +1184,48 @@ struct DiscordVoiceGatewaySessionTests {
         await gateway.disconnect()
     }
 
+    @Test("a missed heartbeat ACK resumes with the installed media plane intact")
+    func missedHeartbeatResumeRetainsMediaPlane() async throws {
+        let harness = DiscordVoiceGatewayResumeHarness()
+        let manualClock = DiscordVoiceGatewaySessionManualClock()
+        let operations = DiscordVoiceGatewayOperationRecorder()
+        let plane = DiscordVoiceGatewayMediaPlaneRecorder(operationRecorder: operations)
+        let gateway = DiscordVoiceGatewaySession(
+            transport: harness.transport,
+            clock: VoiceGatewayClientClock(
+                now: { await manualClock.now() },
+                sleep: { milliseconds in try await manualClock.sleep(milliseconds: milliseconds) }
+            ),
+            mediaPlane: plane,
+            resumeBackoff: immediateBackoff()
+        )
+        try await establishOverResumeHarness(gateway, harness: harness, keyByte: 211)
+        #expect(await plane.installation()?.installCount == 1)
+        await operations.clear()
+
+        // Drive a genuine heartbeat-ACK timeout: the heartbeat goes out at the
+        // hello interval, then the deadline passes with no ACK. The loop must
+        // close the socket WITHOUT resetting the installed media plane, because
+        // this abrupt loss is resume-eligible and a successful Resume reuses
+        // the same transport keys and runtime.
+        await manualClock.advance(to: 1_000)
+        try await eventually { await harness.sentOpcodes(attempt: 0).contains(3) }
+        await manualClock.advance(to: 2_500)
+        try await eventually { await harness.attemptCount() == 2 }
+
+        await harness.send(#"{"op":8,"d":{"heartbeat_interval":1000}}"#)
+        try await eventually { await harness.sentOpcodes(attempt: 1).contains(7) }
+        await harness.send(#"{"op":9,"seq":5,"d":null}"#)
+        try await eventually { await gateway.snapshot().phase == .established }
+
+        // The regression this pins: resetting media before the resume verdict
+        // returned the session to `established` with nothing installed, so
+        // every later send failed `mediaNotInstalled`.
+        #expect(await plane.installation()?.installCount == 1)
+        #expect(!(await operations.values().contains("media-reset")))
+        await gateway.disconnect()
+    }
+
     @Test("terminal close after establish still takes the credential-dropping teardown")
     func terminalCloseAfterEstablishFailsClosed() async throws {
         let harness = DiscordVoiceGatewayResumeHarness()
