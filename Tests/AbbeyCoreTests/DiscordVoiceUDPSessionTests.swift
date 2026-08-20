@@ -270,7 +270,23 @@ struct DiscordVoiceUDPSessionTests {
             }()
             async let delivery: Void = server.sendFromConfiguredSocket(racedPacket)
             _ = try await (cancellation, delivery)
-            await expectCancellation { _ = try await receive.value }
+
+            // Either outcome is correct, and which one wins is genuinely
+            // racy. If the cancel lands first the receive throws; if the
+            // datagram resumes the waiter first the receive returns that
+            // packet, and delivering it is right — an arrived datagram is not
+            // discarded just because a cancel was in flight. Asserting that
+            // cancellation ALWAYS wins made this test fail roughly one run in
+            // thirty-two iterations for a system behaving correctly.
+            //
+            // The invariant this test exists for is the other half of its
+            // name: whoever wins, no waiter is left stuck.
+            do {
+                let delivered = try await receive.value
+                #expect(delivered == racedPacket)
+            } catch {
+                #expect(error is CancellationError)
+            }
             #expect(!(await session.hasPendingReceiveWaiterForTesting()))
             await session.close()
         }
