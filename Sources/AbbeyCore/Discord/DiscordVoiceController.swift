@@ -120,6 +120,14 @@ public protocol DiscordVoiceUDPDiscoverySession: Sendable {
 /// through diagnostics.
 public protocol DiscordVoiceMediaDatagramTransport: Sendable {
     func sendProtectedPacket(_ bytes: [UInt8]) async throws
+    /// Suspends until one datagram arrives.
+    ///
+    /// **Must be cancellation-aware.** `DiscordVoiceReceiveLoop.stop()` drains
+    /// its pump before returning and does not own the socket, so cancelling the
+    /// pump task is the only thing that can unblock a receive in flight. An
+    /// implementation that ignores cancellation turns the controller's ordered
+    /// teardown into a hang. `DiscordVoiceUDPSession` satisfies this by
+    /// resuming its receive waiter with `CancellationError`.
     func receiveProtectedPacket() async throws -> [UInt8]
     func disconnect() async
 }
@@ -131,15 +139,21 @@ public struct DiscordVoiceSessionComponents: Sendable {
     /// plane as `gateway`. `nil` preserves the injected `admit()` /
     /// `nextAudioFrame()` path used by portable factories and tests.
     public let captureLoop: (any DiscordVoiceCaptureLoopControlling)?
+    /// Optional production receive loop bound to the same session-owned media
+    /// plane and datagram transport as `gateway`. `nil` means this session
+    /// receives nothing, which is what every portable factory does today.
+    public let receiveLoop: (any DiscordVoiceReceiveLoopControlling)?
 
     public init(
         gateway: any DiscordVoiceGatewaySessionClient,
         udp: any DiscordVoiceUDPDiscoverySession,
-        captureLoop: (any DiscordVoiceCaptureLoopControlling)? = nil
+        captureLoop: (any DiscordVoiceCaptureLoopControlling)? = nil,
+        receiveLoop: (any DiscordVoiceReceiveLoopControlling)? = nil
     ) {
         self.gateway = gateway
         self.udp = udp
         self.captureLoop = captureLoop
+        self.receiveLoop = receiveLoop
     }
 }
 
@@ -182,6 +196,11 @@ public enum DiscordVoiceControllerFailure: String, Error, Equatable, Sendable {
     /// (permission, device loss, or a protected-send failure). The session's
     /// signaling stays up; the microphone fails closed to disabled.
     case captureUnavailable
+    /// The production receive loop could not start or terminated on its own
+    /// (terminal transport failure, malformed RTP framing, or a playback
+    /// failure). The session's signaling stays up; receive fails closed to
+    /// inactive rather than silently half-running.
+    case receiveUnavailable
 }
 
 /// Immutable and intentionally redacted. It contains no guild/channel/user IDs,
@@ -192,6 +211,9 @@ public struct DiscordVoiceControllerSnapshot: Equatable, Sendable, CustomStringC
     public let microphoneEnabled: Bool
     public let cameraEnabled: Bool
     public let screenShareEnabled: Bool
+    /// Whether the session's receive loop is pumping. Always `false` for
+    /// sessions with no receive loop installed.
+    public let receiveActive: Bool
     public let queuedAudioFrames: Int
     public let queuedVideoFrames: Int
     public let droppedAudioFrames: UInt64
@@ -201,7 +223,7 @@ public struct DiscordVoiceControllerSnapshot: Equatable, Sendable, CustomStringC
 
     public var description: String {
         let failureDescription = failure?.rawValue ?? "none"
-        return "DiscordVoiceControllerSnapshot(phase: \(phase.rawValue), generation: \(generation), microphone: \(microphoneEnabled), camera: \(cameraEnabled), screen: \(screenShareEnabled), audioQueued: \(queuedAudioFrames), videoQueued: \(queuedVideoFrames), failure: \(failureDescription), mediaAdapterAvailable: \(mediaAdapterAvailable))"
+        return "DiscordVoiceControllerSnapshot(phase: \(phase.rawValue), generation: \(generation), microphone: \(microphoneEnabled), camera: \(cameraEnabled), screen: \(screenShareEnabled), receiveActive: \(receiveActive), audioQueued: \(queuedAudioFrames), videoQueued: \(queuedVideoFrames), failure: \(failureDescription), mediaAdapterAvailable: \(mediaAdapterAvailable))"
     }
 }
 
@@ -292,12 +314,13 @@ private struct DiscordVoiceDetachedSession: Sendable {
     let gateway: (any DiscordVoiceGatewaySessionClient)?
     let udp: (any DiscordVoiceUDPDiscoverySession)?
     let captureLoop: (any DiscordVoiceCaptureLoopControlling)?
+    let receiveLoop: (any DiscordVoiceReceiveLoopControlling)?
     let bridge: any DiscordVoiceGatewayPairBridge
     let guildID: String?
     let requestLease: DiscordVoiceBridgeRequestLease?
 
     var needsTeardown: Bool {
-        gateway != nil || udp != nil || captureLoop != nil
+        gateway != nil || udp != nil || captureLoop != nil || receiveLoop != nil
             || guildID != nil || requestLease != nil
     }
 }
@@ -329,6 +352,7 @@ public actor DiscordVoiceController {
     private var gatewayClient: (any DiscordVoiceGatewaySessionClient)?
     private var udpSession: (any DiscordVoiceUDPDiscoverySession)?
     private var captureLoop: (any DiscordVoiceCaptureLoopControlling)?
+    private var receiveLoop: (any DiscordVoiceReceiveLoopControlling)?
     private var microphoneTransitionInFlight = false
     /// Desired microphone state recorded while a transition is suspended in
     /// `captureLoop.start`/`stop`. Reconciled by the in-flight transition
@@ -340,6 +364,15 @@ public actor DiscordVoiceController {
     /// Set when the capture loop reported a terminal failure during that
     /// suspended start, i.e. before `microphoneEnabled` could be set.
     private var captureTerminalDuringStart = false
+    /// Receive mirrors the capture-start reentrancy mechanism rather than
+    /// inventing a second one: `receiveLoop.start` is a cross-actor call and
+    /// therefore suspends, so a terminal verdict can land before
+    /// `receiveActive` is set. It is recorded here and reconciled by the
+    /// resuming start. There is deliberately no pending-desired-state loop —
+    /// unlike the microphone, receive has no operator toggle to race.
+    private var receiveStartInFlightGeneration: UInt64?
+    private var receiveTerminalDuringStart = false
+    private var receiveActive = false
     private var acceptsFrames = false
     private var nextTeardownID: UInt64 = 0
     private var teardownTasks: [UInt64: Task<Void, Never>] = [:]
@@ -683,6 +716,7 @@ public actor DiscordVoiceController {
         gatewayClient = gateway
         udpSession = udp
         captureLoop = components.captureLoop
+        receiveLoop = components.receiveLoop
         transition(to: .connectingVoiceGateway)
 
         let ready: DiscordVoiceGatewayTransportReady
@@ -727,6 +761,16 @@ public actor DiscordVoiceController {
             guard generation == localGeneration else { return makeSnapshot() }
         }
 
+        if let receiveLoop = components.receiveLoop {
+            await receiveLoop.setTerminalHandler { [weak self] in
+                await self?.handleReceiveLoopTerminal(generation: localGeneration)
+            }
+            guard generation == localGeneration else { return makeSnapshot() }
+            guard await startReceiveLoop(receiveLoop, generation: localGeneration) else {
+                return makeSnapshot()
+            }
+        }
+
         acceptsFrames = true
         // Capture permission is never inferred from a previous generation.
         microphoneEnabled = false
@@ -767,6 +811,80 @@ public actor DiscordVoiceController {
             phase = .readyMuted
         }
         publish()
+    }
+
+    /// Starts the session's receive loop for `localGeneration`.
+    ///
+    /// Unlike the microphone, receive has no operator toggle: the bot hears the
+    /// channel for as long as it is in it, so this runs once per established
+    /// generation. `receiveLoop.start` is a cross-actor call and therefore
+    /// suspends, so the same two reentrancy hazards the capture path fixed apply
+    /// here and are handled by the same mechanism:
+    ///
+    /// * superseded while starting — stop the loop so a late-started pump never
+    ///   outlives its generation, and let the replacement own state;
+    /// * a terminal verdict landing mid-start — recorded in
+    ///   `receiveTerminalDuringStart` and honored here, rather than publishing
+    ///   an active receive over an already-failed loop.
+    ///
+    /// A receive failure never fails the join: signaling stays up and the
+    /// failure is operator-visible, exactly as a capture failure is.
+    ///
+    /// Returns `false` when this generation was superseded and the caller must
+    /// abandon the join.
+    private func startReceiveLoop(
+        _ receiveLoop: any DiscordVoiceReceiveLoopControlling,
+        generation localGeneration: UInt64
+    ) async -> Bool {
+        receiveStartInFlightGeneration = localGeneration
+        receiveTerminalDuringStart = false
+        do {
+            try await receiveLoop.start(generation: localGeneration)
+        } catch {
+            receiveStartInFlightGeneration = nil
+            receiveTerminalDuringStart = false
+            guard generation == localGeneration else { return false }
+            receiveActive = false
+            failure = .receiveUnavailable
+            return true
+        }
+        // INVARIANT: no suspension point between reading the recorded terminal
+        // verdict and settling `receiveActive`. Clearing the in-flight marker
+        // stops the terminal handler from recording, and `receiveActive` is not
+        // yet true, so a verdict landing in between would be neither recorded
+        // nor acted on.
+        let terminalRacedStart = receiveTerminalDuringStart
+        receiveStartInFlightGeneration = nil
+        receiveTerminalDuringStart = false
+        guard generation == localGeneration else {
+            await receiveLoop.stop()
+            return false
+        }
+        guard !terminalRacedStart else {
+            receiveActive = false
+            failure = .receiveUnavailable
+            await receiveLoop.stop()
+            return generation == localGeneration
+        }
+        receiveActive = true
+        return true
+    }
+
+    /// Invoked by the receive loop when it fails closed on its own (terminal
+    /// transport failure, malformed RTP framing, or a playback failure). Receive
+    /// drops to inactive and the failure is operator-visible; the established
+    /// signaling session is left up.
+    private func handleReceiveLoopTerminal(generation localGeneration: UInt64) {
+        guard generation == localGeneration else { return }
+        guard receiveActive else {
+            if receiveStartInFlightGeneration == localGeneration {
+                receiveTerminalDuringStart = true
+            }
+            return
+        }
+        receiveActive = false
+        failure = .receiveUnavailable
+        publishUnlessSuperseded()
     }
 
     /// Watches the live gateway session and drives the bounded full-reconnect
@@ -855,6 +973,7 @@ public actor DiscordVoiceController {
         microphoneEnabled = false
         cameraEnabled = false
         screenShareEnabled = false
+        receiveActive = false
         audioQueue.removeAll()
         videoQueue.removeAll()
         failure = nil
@@ -877,6 +996,7 @@ public actor DiscordVoiceController {
         microphoneEnabled = false
         cameraEnabled = false
         screenShareEnabled = false
+        receiveActive = false
         audioQueue.removeAll()
         videoQueue.removeAll()
         failure = nil
@@ -885,6 +1005,7 @@ public actor DiscordVoiceController {
             gateway: gatewayClient,
             udp: udpSession,
             captureLoop: captureLoop,
+            receiveLoop: receiveLoop,
             bridge: bridge,
             guildID: guildID,
             requestLease: bridgeRequestLease
@@ -892,6 +1013,7 @@ public actor DiscordVoiceController {
         gatewayClient = nil
         udpSession = nil
         captureLoop = nil
+        receiveLoop = nil
         bridgeGuildID = nil
         bridgeRequestLease = nil
         if clearTarget { target = nil }
@@ -908,6 +1030,7 @@ public actor DiscordVoiceController {
             // media plane and its key-bearing state before the retained
             // discovery/media socket is allowed to close.
             await session.captureLoop?.stop()
+            await session.receiveLoop?.stop()
             await session.gateway?.disconnect()
             await session.udp?.disconnect()
             if let requestLease = session.requestLease,
@@ -938,9 +1061,11 @@ public actor DiscordVoiceController {
         let gateway = gatewayClient
         let udp = udpSession
         let detachedCaptureLoop = captureLoop
+        let detachedReceiveLoop = receiveLoop
         gatewayClient = nil
         udpSession = nil
         captureLoop = nil
+        receiveLoop = nil
         let guildID = bridgeGuildID
         let requestLease = bridgeRequestLease
         bridgeGuildID = nil
@@ -949,6 +1074,7 @@ public actor DiscordVoiceController {
         microphoneEnabled = false
         cameraEnabled = false
         screenShareEnabled = false
+        receiveActive = false
         audioQueue.removeAll()
         videoQueue.removeAll()
         self.failure = failure
@@ -959,6 +1085,7 @@ public actor DiscordVoiceController {
                 gateway: gateway,
                 udp: udp,
                 captureLoop: detachedCaptureLoop,
+                receiveLoop: detachedReceiveLoop,
                 bridge: bridge,
                 guildID: guildID,
                 requestLease: requestLease
@@ -980,6 +1107,7 @@ public actor DiscordVoiceController {
             microphoneEnabled: microphoneEnabled,
             cameraEnabled: cameraEnabled,
             screenShareEnabled: screenShareEnabled,
+            receiveActive: receiveActive,
             queuedAudioFrames: audioQueue.count,
             queuedVideoFrames: videoQueue.count,
             droppedAudioFrames: audioQueue.droppedCount,
