@@ -577,7 +577,7 @@ Seven findings on the merged PR #64 diff. Each is being fixed by a
 worktree-isolated agent; none is closed until its gate is green here and the
 thread is answered on GitHub. Comment ids kept so replies can be posted.
 
-- [ ] **P1 `TwitchBridge.swift`** (3822336981) — the `#if canImport(Darwin)`
+- [x] **P1 `TwitchBridge.swift`** (3822336981) — FIXED `83b5e96` — byte transport split behind `TwitchIRCByteStream`; CFStream keeps TLS unconditionally (no cleartext mode at all), a non-gated POSIX loopback socket restores the Linux test path, and three barriers keep the token off the wire including a hardcoded loopback literal with no resolver. AbbeyCoreTests 342/342. ORIGINAL: — the `#if canImport(Darwin)`
       guard added for the CFNetwork TLS break wraps the WHOLE `connect`, so it
       also throws for `useTLS == false`. Both real-socket tests call
       `connectInsecureLoopbackForTesting` and would fail on Linux, and Linux CI
@@ -585,23 +585,23 @@ thread is answered on GitHub. Comment ids kept so replies can be posted.
       guard only the TLS setup, keep plaintext loopback working, keep
       production TLS fail-closed (plaintext to a real host would put the
       OAuth token on the wire).
-- [ ] **P1 `DiscordVoiceController.swift`** (3822336984) — an operator mute that
+- [x] **P1 `DiscordVoiceController.swift`** (3822336984) — FIXED `5b2e5c0` — `pendingMicrophoneDesiredState` + reconcile loop; mute path clears the flag before `stop()` suspends. Red baseline proved first. ORIGINAL: — an operator mute that
       lands while `captureLoop.start` is suspended is dropped; the resuming
       start then enables the microphone after the mute appeared to succeed. A
       privacy action must never be lost to actor reentrancy.
-- [ ] **P2 `DiscordVoiceController.swift`** (3822336997) — a capture loop that
+- [x] **P2 `DiscordVoiceController.swift`** (3822336997) — FIXED `5b2e5c0` — terminal-during-start is recorded and the resuming start fails closed on it. ORIGINAL: — a capture loop that
       fails immediately can fire its terminal handler before the controller has
       set `microphoneEnabled`; the guard drops the event and the microphone is
       then published as enabled while the loop is already failed.
-- [ ] **P2 `DiscordVoiceController.swift`** (3822337010) — a successful retry
+- [x] **P2 `DiscordVoiceController.swift`** (3822337010) — FIXED `5b2e5c0` — a provably-successful start clears a stale `.captureUnavailable`. ORIGINAL: — a successful retry
       after `captureLoop.start` throws does not clear `.captureUnavailable`, so
       the snapshot reports an enabled microphone AND a capture failure for the
       rest of the generation.
-- [ ] **P2 `DiscordVoiceNativeMediaPlane.swift`** (3822337023) — `installVideoSource`
+- [x] **P2 `DiscordVoiceNativeMediaPlane.swift`** (3822337023) — FIXED `63a6f6e` — video-only `videoRevision` counter re-checked at all four suspension points, so a superseded source cannot transmit under the obsolete SSRC. Chosen over bumping `revision` (would kill legitimate in-flight audio sends). Red-proved by removing the guards: a packet under the old SSRC did reach the transport. ORIGINAL: — `installVideoSource`
       replaces the source without advancing `revision` or cancelling in-flight
       sends, so a `sendVideoFrame` suspended on announcement/DAVE work can still
       transmit with the obsolete SSRC and codec after a source switch.
-- [ ] **P2 `VoiceGatewayV8StateMachine.swift`** (3822337037) — Opcode 12
+- [x] **P2 `VoiceGatewayV8StateMachine.swift`** (3822337037) — FIXED `63a6f6e` — Ready indexed as primary→derived-RTX; both halves must match, and the top-level `video_ssrc`/`rtx_ssrc` too. Red-proved: removing the guard fails exactly the three foreign-RTX assertions. ORIGINAL: — Opcode 12
       validation checks only each stream's primary SSRC, so an arbitrary
       explicit `rtx_ssrc` can be announced despite the method's stated
       allocation guarantee. Validate primary AND RTX against Ready.
