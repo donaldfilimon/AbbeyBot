@@ -5,11 +5,42 @@ import Leaf
 import LeafKit
 import Vapor
 
+/// Startup failures that mean the server's own bundled resources are not where
+/// the build put them. Carries the probed paths, because the useful question is
+/// always "where did it look?".
+enum AbbeyServerResourceError: Error, CustomStringConvertible {
+    case bundleResourcesMissing(candidates: [String])
+    case viewsDirectoryMissing(path: String)
+
+    var description: String {
+        switch self {
+        case .bundleResourcesMissing(let candidates):
+            "AbbeyServer bundle resources not found. Looked in: \(candidates.joined(separator: ", "))"
+        case .viewsDirectoryMissing(let path):
+            "AbbeyServer Leaf views directory not found at \(path)"
+        }
+    }
+}
+
 public func configure(_ app: Application) async throws {
     let resourcesRoot = resourcesRootURL()
 
-    var viewsPath = resourcesRoot.appendingPathComponent("Views").path
+    // Fail loudly if the bundle's resources cannot be found at all. Continuing
+    // here is what made the Linux failure so hard to see: FileMiddleware would
+    // be handed a directory that gets CREATED empty below, Leaf would be handed
+    // a views directory with no templates, and the only symptom was a 500 from
+    // `GET /` at render time.
+    guard resolvedResourcesRootURL() != nil else {
+        throw AbbeyServerResourceError.bundleResourcesMissing(
+            candidates: resourcesRootCandidates().map(\.path)
+        )
+    }
+
+    var viewsPath = resourcesViewsDirectory().path
     if !viewsPath.hasSuffix("/") { viewsPath += "/" }
+    guard FileManager.default.fileExists(atPath: viewsPath) else {
+        throw AbbeyServerResourceError.viewsDirectoryMissing(path: viewsPath)
+    }
     app.directory.viewsDirectory = viewsPath
     // Leaf's default source refuses this directory outright. Two of its
     // default limits fight a SwiftPM resource bundle: `.toSandbox` sandboxes
@@ -33,7 +64,11 @@ public func configure(_ app: Application) async throws {
     app.views.use(.leaf)
 
     let publicPath = resourcesPublicDirectory().path
-    // FileMiddleware requires the directory to exist at registration time.
+    // FileMiddleware requires the directory to exist at registration time, and
+    // the SPA is legitimately absent until `bun run build` has run — so this
+    // create stays. It is only safe because the resources root was verified
+    // above; without that check it silently manufactured a plausible-looking
+    // path and hid a misresolved bundle.
     try FileManager.default.createDirectory(atPath: publicPath, withIntermediateDirectories: true)
     app.middleware.use(FileMiddleware(publicDirectory: publicPath))
 

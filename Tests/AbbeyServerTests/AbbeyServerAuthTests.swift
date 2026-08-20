@@ -157,7 +157,14 @@ struct AbbeyServerAuthTests {
                 "/",
                 headers: bearerHeaders("secret-token")
             ) { res in
-                #expect(res.status == .ok)
+                // Report WHY on failure. This passes on macOS and has failed on
+                // Linux, where the CI log is the only diagnostic channel there
+                // is — a bare status comparison says nothing about whether the
+                // template was missing, the path wrong, or the renderer refused.
+                #expect(
+                    res.status == .ok,
+                    "GET / returned \(res.status): \(res.body.string.prefix(400))"
+                )
             }
         }
     }
