@@ -19,8 +19,9 @@ struct TwitchBridgeConnectionStateTests {
         let listener = try LoopbackListener()
         defer { listener.closeListener() }
 
+        let closeGate = DispatchSemaphore(value: 0)
         let acceptTask = Task.detached {
-            listener.acceptOnceThenCloseAfterFirstRead()
+            listener.acceptDrainHandshakeThenClose(afterTestSignals: closeGate)
         }
 
         let bridge = TwitchBridge()
@@ -32,7 +33,11 @@ struct TwitchBridgeConnectionStateTests {
             port: Int(listener.port)
         )
 
+        // Deterministic even under heavy load: the listener holds its close until closeGate
+        // is signaled below, so pump() cannot have observed EOF yet and .connected must
+        // still be the state here. (Without the gate this assertion raced the peer close.)
         #expect(await bridge.state == .connected)
+        closeGate.signal()
 
         await acceptTask.value
 
@@ -72,8 +77,9 @@ struct TwitchBridgeConnectionStateTests {
     @Test func disconnectDuringBackoffWaitCancelsTheScheduledReconnect() async throws {
         let port = try LoopbackListener.ephemeralPort()
         let firstListener = try LoopbackListener(port: port)
+        let closeGate = DispatchSemaphore(value: 0)
         let firstAccept = Task.detached {
-            firstListener.acceptOnceThenCloseAfterFirstRead()
+            firstListener.acceptDrainHandshakeThenClose(afterTestSignals: closeGate)
         }
 
         // Long enough that this test's own disconnect() call always lands well inside the
@@ -86,7 +92,10 @@ struct TwitchBridgeConnectionStateTests {
             host: "127.0.0.1",
             port: Int(port)
         )
+        // Same gate pattern as the EOF test above: the peer close cannot happen until this
+        // assertion has run, so it can't race the state flip under load.
         #expect(await bridge.state == .connected)
+        closeGate.signal()
 
         await firstAccept.value
         firstListener.closeListener()
@@ -185,12 +194,33 @@ private final class LoopbackListener: @unchecked Sendable {
     }
 
     /// Blocks (on whatever thread calls this — call from a detached Task) until one client
-    /// connects, reads whatever it sends (PASS/NICK/JOIN), then closes cleanly.
-    func acceptOnceThenCloseAfterFirstRead() {
+    /// connects, drains the whole IRC handshake (PASS/NICK/JOIN), waits for the test to
+    /// signal `gate`, then closes cleanly.
+    ///
+    /// Two load-sensitive races made the old single-read-then-immediately-close version
+    /// flaky under a busy machine (e.g. the full gate running a concurrent desktop build):
+    /// 1. The bridge's three handshake `send`s can be split across reads; closing after
+    ///    reading only PASS leaves unread bytes in the receive buffer, so `close` emits an
+    ///    RST (or fails a later write) instead of the clean FIN/EOF these tests are about.
+    ///    Draining through the CRLF-terminated JOIN line — the last thing the bridge sends —
+    ///    guarantees the buffer is empty and the close is a clean EOF.
+    /// 2. Closing before the test asserted `.connected` let `pump()` observe the EOF first
+    ///    and flip state to `.failed` out from under the assertion, even though connect had
+    ///    succeeded. Holding the close until the test signals `gate` (right after its
+    ///    `.connected` assertion) makes that assertion deterministic.
+    /// The close is still a real clean FIN on a real socket — only its timing is coordinated.
+    func acceptDrainHandshakeThenClose(afterTestSignals gate: DispatchSemaphore) {
         let client = accept(listenSocket, nil, nil)
         guard client >= 0 else { return }
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        _ = read(client, &buffer, buffer.count)
+        var received = Data()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while !String(decoding: received, as: UTF8.self).contains("JOIN #testchannel\r\n") {
+            let n = read(client, &chunk, chunk.count)
+            guard n > 0 else { break }
+            received.append(contentsOf: chunk.prefix(n))
+        }
+        // The timeout is a hang-safety net only; the test signals promptly after asserting.
+        _ = gate.wait(timeout: .now() + 30)
         close(client)
     }
 
