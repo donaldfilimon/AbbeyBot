@@ -319,6 +319,51 @@ private actor MediaSessionCompletionProbe {
     func isCompleted() -> Bool { completed }
 }
 
+private struct MuteDeafenCall: Equatable, Sendable {
+    let selfMute: Bool
+    let selfDeaf: Bool
+}
+
+/// Hermetic double for `VoicePresencePort`: no live Discord gateway is ever
+/// touched. `setMuteState` only mutates the tracked presence when the caller
+/// configures a `.requested` result, so tests can prove a failed send does not
+/// optimistically flip local mute/deaf state.
+private actor FakeVoicePresencePort: VoicePresencePort {
+    private var presence: VoicePresenceSnapshot
+    private var muteStateResult: VoiceUpdateResult
+    private(set) var muteStateCalls: [MuteDeafenCall] = []
+
+    init(
+        presence: VoicePresenceSnapshot = .unconfirmed,
+        muteStateResult: VoiceUpdateResult = .requested
+    ) {
+        self.presence = presence
+        self.muteStateResult = muteStateResult
+    }
+
+    func currentPresence() async -> VoicePresenceSnapshot { presence }
+
+    func setMuteState(selfMute: Bool, selfDeaf: Bool) async -> VoiceUpdateResult {
+        muteStateCalls.append(MuteDeafenCall(selfMute: selfMute, selfDeaf: selfDeaf))
+        if muteStateResult == .requested {
+            presence = VoicePresenceSnapshot(
+                confirmedInChannel: presence.confirmedInChannel,
+                selfMute: selfMute,
+                selfDeaf: selfDeaf
+            )
+        }
+        return muteStateResult
+    }
+
+    func setPresence(_ newPresence: VoicePresenceSnapshot) {
+        presence = newPresence
+    }
+
+    func setMuteStateResult(_ result: VoiceUpdateResult) {
+        muteStateResult = result
+    }
+}
+
 @Suite("Media Session Model")
 @MainActor
 struct MediaSessionModelTests {
@@ -817,5 +862,137 @@ struct MediaSessionModelTests {
             presentationTimeNanoseconds: UInt64(marker),
             bytes: Data(repeating: marker, count: 4)
         )
+    }
+
+    // MARK: - Mute/deafen presence
+
+    @Test("Mute/deafen toggle sends the requested self-mute/self-deaf flags once Discord confirms presence")
+    func muteDeafenSendsRequestedFlagsWhenConfirmed() async throws {
+        let presencePort = FakeVoicePresencePort(
+            presence: VoicePresenceSnapshot(confirmedInChannel: true, selfMute: true, selfDeaf: true)
+        )
+        let model = MediaSessionModel(
+            controller: try makeController(),
+            platform: FakeMediaSessionPlatform(),
+            presencePort: presencePort
+        )
+        await model.refreshVoicePresence()
+        #expect(model.voicePresenceConfirmed)
+        #expect(model.voiceSelfMute)
+        #expect(model.voiceSelfDeaf)
+
+        await model.setMuteDeafen(selfMute: false, selfDeaf: true)
+
+        #expect(await presencePort.muteStateCalls == [MuteDeafenCall(selfMute: false, selfDeaf: true)])
+        #expect(model.voiceSelfMute == false)
+        #expect(model.voiceSelfDeaf)
+        #expect(model.operatorError == nil)
+        #expect(model.muteDeafenLabel.contains("self-mute: off"))
+        #expect(model.muteDeafenLabel.contains("self-deaf: on"))
+        await model.shutdown()
+    }
+
+    @Test("Mute/deafen toggle is refused before Discord confirms voice presence and never sends a flag")
+    func muteDeafenRefusedWithoutConfirmedPresence() async throws {
+        let presencePort = FakeVoicePresencePort(presence: .unconfirmed)
+        let model = MediaSessionModel(
+            controller: try makeController(),
+            platform: FakeMediaSessionPlatform(),
+            presencePort: presencePort
+        )
+
+        await model.setMuteDeafen(selfMute: true, selfDeaf: true)
+
+        #expect(await presencePort.muteStateCalls.isEmpty)
+        #expect(model.operatorError == DiscordCopy.voiceMuteDeafenNotConfirmed)
+        #expect(model.voiceSelfMute == false)
+        #expect(model.voiceSelfDeaf == false)
+        await model.shutdown()
+    }
+
+    @Test("A failed mute/deafen send surfaces an operator-visible error and never optimistically flips state")
+    func muteDeafenFailedSendDoesNotOptimisticallyUpdate() async throws {
+        let presencePort = FakeVoicePresencePort(
+            presence: VoicePresenceSnapshot(confirmedInChannel: true, selfMute: false, selfDeaf: false),
+            muteStateResult: .gatewayUnavailable
+        )
+        let model = MediaSessionModel(
+            controller: try makeController(),
+            platform: FakeMediaSessionPlatform(),
+            presencePort: presencePort
+        )
+        await model.refreshVoicePresence()
+
+        await model.setMuteDeafen(selfMute: true, selfDeaf: true)
+
+        #expect(await presencePort.muteStateCalls == [MuteDeafenCall(selfMute: true, selfDeaf: true)])
+        #expect(model.operatorError == DiscordCopy.voiceMuteDeafenGatewayUnavailable)
+        #expect(model.voiceSelfMute == false)
+        #expect(model.voiceSelfDeaf == false)
+        await model.shutdown()
+    }
+
+    @Test("refreshVoicePresence pulls Discord's confirmed self-mute/self-deaf state, not a local guess")
+    func refreshVoicePresencePullsConfirmedState() async throws {
+        let presencePort = FakeVoicePresencePort(presence: .unconfirmed)
+        let model = MediaSessionModel(
+            controller: try makeController(),
+            platform: FakeMediaSessionPlatform(),
+            presencePort: presencePort
+        )
+        await model.refreshVoicePresence()
+        #expect(model.voicePresenceConfirmed == false)
+        #expect(model.muteDeafenLabel == "Not confirmed in a voice channel yet")
+
+        await presencePort.setPresence(
+            VoicePresenceSnapshot(confirmedInChannel: true, selfMute: true, selfDeaf: false)
+        )
+        await model.refreshVoicePresence()
+
+        #expect(model.voicePresenceConfirmed)
+        #expect(model.voiceSelfMute)
+        #expect(model.voiceSelfDeaf == false)
+        await model.shutdown()
+    }
+
+    // MARK: - Connection phase
+
+    @Test("Connection phase label surfaces the controller's real intermediate states, not a connected/disconnected binary")
+    func connectionPhaseLabelTracksControllerTransitions() async throws {
+        let bridge = SuspendingMediaSessionBridge()
+        let platform = FakeMediaSessionPlatform()
+        let controller = try DiscordVoiceController(
+            bridge: bridge,
+            factory: MediaSessionTestFactory(),
+            configuration: DiscordVoiceControllerConfiguration()
+        )
+        let model = MediaSessionModel(controller: controller, platform: platform)
+        #expect(model.connectionPhaseLabel == "Not connected to voice")
+
+        let join = Task { @MainActor in
+            await model.joinSignaling(guildID: "guild", channelID: "channel")
+        }
+        for _ in 0..<100 {
+            if await bridge.didStartRequest() { break }
+            await Task.yield()
+        }
+        #expect(await bridge.didStartRequest())
+        for _ in 0..<100 {
+            if model.connectionPhaseLabel != "Not connected to voice" { break }
+            await Task.yield()
+        }
+        // Distinct, named intermediate phase — never a collapsed "Connected".
+        #expect(model.connectionPhaseLabel == "Requesting main-Gateway voice state (opcode 4 sent)")
+        #expect(model.snapshot.phase == .requestingGatewayState)
+
+        await bridge.resumeRequest()
+        await join.value
+
+        // The fake bridge's awaitGatewayPair() throws, so the controller fails
+        // closed rather than ever claiming a ready/connected voice state.
+        #expect(model.snapshot.phase == .failed)
+        #expect(model.snapshot.failure == .bridgeUnavailable)
+        #expect(model.connectionPhaseLabel == "Failed — bridgeUnavailable")
+        await model.shutdown()
     }
 }

@@ -67,6 +67,55 @@ struct MediaSessionVoiceSnapshot: Equatable, Sendable {
     }
 }
 
+/// Redacted presence-only snapshot of the bot's gateway `VOICE_STATE_UPDATE`.
+/// No guild, channel, or other identifier crosses into the app layer — only
+/// whether Discord has confirmed the bot in a channel and the last confirmed
+/// self-mute/self-deaf bits. There is no Opus/UDP audio; these flags change
+/// what Discord and other members observe, not what is heard.
+struct VoicePresenceSnapshot: Equatable, Sendable {
+    let confirmedInChannel: Bool
+    let selfMute: Bool
+    let selfDeaf: Bool
+
+    static let unconfirmed = Self(confirmedInChannel: false, selfMute: false, selfDeaf: false)
+}
+
+/// Thin port over the Discord gateway's presence-only voice-state update so the
+/// mute/deafen toggle is hermetically testable without a live gateway.
+protocol VoicePresencePort: Sendable {
+    func currentPresence() async -> VoicePresenceSnapshot
+    func setMuteState(selfMute: Bool, selfDeaf: Bool) async -> VoiceUpdateResult
+}
+
+/// Production adapter: forwards to `DiscordBridge`'s confirmed self voice state
+/// and its presence-only mute/deafen update, without exposing guild/channel IDs.
+struct DiscordBridgeVoicePresencePort: VoicePresencePort {
+    let bridge: DiscordBridge
+
+    func currentPresence() async -> VoicePresenceSnapshot {
+        // A single actor-isolated read — never three separate hops that could
+        // tear across a concurrent leave.
+        let state = await bridge.voicePresenceState()
+        return VoicePresenceSnapshot(
+            confirmedInChannel: state.confirmedInChannel,
+            selfMute: state.selfMute,
+            selfDeaf: state.selfDeaf
+        )
+    }
+
+    func setMuteState(selfMute: Bool, selfDeaf: Bool) async -> VoiceUpdateResult {
+        await bridge.updateVoiceMuteState(selfMute: selfMute, selfDeaf: selfDeaf)
+    }
+}
+
+/// Default port before any Discord bridge is wired (matches the construction-
+/// is-passive contract other `MediaSessionModel` tests rely on): reports
+/// unconfirmed presence and refuses mute/deafen sends rather than guessing.
+private struct UnavailableVoicePresencePort: VoicePresencePort {
+    func currentPresence() async -> VoicePresenceSnapshot { .unconfirmed }
+    func setMuteState(selfMute: Bool, selfDeaf: Bool) async -> VoiceUpdateResult { .gatewayUnavailable }
+}
+
 protocol MediaSessionPlatform: Sendable {
     func isMediaDisabled() async -> Bool
     func authorizationStatus(for kind: MediaPermissionKind) async -> MediaAuthorizationStatus
@@ -236,6 +285,33 @@ enum MediaSessionCopy {
         }
     }
 
+    /// One literal phrase per `DiscordVoiceControllerPhase` case — the honest
+    /// intermediate connection-lifecycle state, not a collapsed connected/
+    /// disconnected binary. Complements `signaling`/`transport`, which describe
+    /// what each phase means for the Gateway/UDP legs specifically.
+    static func connectionPhase(_ snapshot: MediaSessionVoiceSnapshot) -> String {
+        switch snapshot.phase {
+        case .idle: "Not connected to voice"
+        case .requestingGatewayState: "Requesting main-Gateway voice state (opcode 4 sent)"
+        case .awaitingGatewayPair: "Awaiting Discord's Voice Gateway credentials"
+        case .connectingVoiceGateway: "Connecting to Voice Gateway v8"
+        case .negotiatingTransport: "Voice Gateway connected — negotiating UDP transport"
+        case .negotiatingDAVE: "UDP transport selected — negotiating DAVE media"
+        case .readyMuted: "Signaling ready — presence muted"
+        case .readySpeaking: "Signaling ready — presence unmuted"
+        case .reconnecting: "Reconnecting"
+        case .failed:
+            snapshot.failure == .mediaUnavailable
+                ? "Stopped safely — DAVE media unavailable, no media sent"
+                : "Failed — \(snapshot.failure?.rawValue ?? "unknown reason")"
+        }
+    }
+
+    static func muteDeafen(confirmed: Bool, selfMute: Bool, selfDeaf: Bool) -> String {
+        guard confirmed else { return "Not confirmed in a voice channel yet" }
+        return "self-mute: \(selfMute ? "on" : "off"), self-deaf: \(selfDeaf ? "on" : "off") (presence only — no audio exists to silence)"
+    }
+
     static func transport(_ snapshot: MediaSessionVoiceSnapshot) -> String {
         switch snapshot.phase {
         case .negotiatingTransport: "Discovering persistent UDP route"
@@ -266,6 +342,7 @@ enum MediaSessionCopy {
 final class MediaSessionModel {
     private let controller: DiscordVoiceController
     private let platform: any MediaSessionPlatform
+    private let presencePort: any VoicePresencePort
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
     @ObservationIgnored private var captureEventTask: Task<Void, Never>?
     @ObservationIgnored private var activeCaptureGeneration: UInt64?
@@ -285,9 +362,29 @@ final class MediaSessionModel {
     private(set) var operatorError: String?
     /// Latest LOCAL camera preview frame. Rendered in-app only; never transmitted.
     private(set) var cameraPreviewImage: CGImage?
+    /// True once Discord's own self `VOICE_STATE_UPDATE` has confirmed the bot
+    /// in a channel. Independent of `snapshot.phase`, which tracks the fuller
+    /// signaling/transport/DAVE probe rather than raw gateway presence.
+    private(set) var voicePresenceConfirmed = false
+    /// Discord-confirmed self-mute/self-deaf presence bits. Presence only —
+    /// there is no Opus/UDP audio yet, so these never imply real audio is muted.
+    private(set) var voiceSelfMute = false
+    private(set) var voiceSelfDeaf = false
 
     var signalingLabel: String { MediaSessionCopy.signaling(snapshot) }
     var transportLabel: String { MediaSessionCopy.transport(snapshot) }
+    /// One literal phrase per connection-lifecycle phase the controller actually
+    /// models (idle → requesting → awaiting pair → connecting → negotiating
+    /// transport → negotiating DAVE → ready → failed), never a collapsed
+    /// connected/disconnected binary.
+    var connectionPhaseLabel: String { MediaSessionCopy.connectionPhase(snapshot) }
+    var muteDeafenLabel: String {
+        MediaSessionCopy.muteDeafen(
+            confirmed: voicePresenceConfirmed,
+            selfMute: voiceSelfMute,
+            selfDeaf: voiceSelfDeaf
+        )
+    }
     var daveLabel: String { MediaSessionCopy.daveUnavailable }
     var captureLabel: String { MediaSessionCopy.captureUnavailable }
     var localPreviewLabel: String { MediaSessionCopy.localPreviewOnly }
@@ -298,9 +395,14 @@ final class MediaSessionModel {
         runtime.cameraCapturing || runtime.screenCapturing
     }
 
-    init(controller: DiscordVoiceController, platform: any MediaSessionPlatform) {
+    init(
+        controller: DiscordVoiceController,
+        platform: any MediaSessionPlatform,
+        presencePort: any VoicePresencePort = UnavailableVoicePresencePort()
+    ) {
         self.controller = controller
         self.platform = platform
+        self.presencePort = presencePort
         snapshot = .idle
         permissions = Dictionary(
             uniqueKeysWithValues: MediaPermissionKind.allCases.map { ($0, .notDetermined) }
@@ -331,7 +433,11 @@ final class MediaSessionModel {
         } catch {
             preconditionFailure("Static voice-controller queue configuration is invalid")
         }
-        self.init(controller: controller, platform: MacOSMediaSessionPlatform())
+        self.init(
+            controller: controller,
+            platform: MacOSMediaSessionPlatform(),
+            presencePort: DiscordBridgeVoicePresencePort(bridge: discordBridge)
+        )
     }
 
     func joinSignaling(guildID: String, channelID: String) async {
@@ -355,6 +461,7 @@ final class MediaSessionModel {
         if snapshot.phase == .failed, snapshot.failure == .mediaUnavailable {
             operatorError = "Signaling and UDP negotiation stopped safely because DAVE media is unavailable. No media was sent."
         }
+        await refreshVoicePresence()
     }
 
     func leave() async {
@@ -370,6 +477,7 @@ final class MediaSessionModel {
         runtime = stoppedRuntime
         isOperationInFlight = false
         operatorError = nil
+        await refreshVoicePresence()
     }
 
     func disconnect() async {
@@ -385,6 +493,7 @@ final class MediaSessionModel {
         runtime = stoppedRuntime
         isOperationInFlight = false
         operatorError = nil
+        await refreshVoicePresence()
     }
 
     /// Awaited kill path: capture stops first, then generation invalidation and socket teardown.
@@ -401,6 +510,7 @@ final class MediaSessionModel {
         runtime = stoppedRuntime
         isOperationInFlight = false
         operatorError = nil
+        await refreshVoicePresence()
     }
 
     func shutdown() async {
@@ -425,6 +535,42 @@ final class MediaSessionModel {
                 : await platform.authorizationStatus(for: kind)
         }
         runtime = await platform.runtimeSnapshot()
+    }
+
+    /// Pulls Discord's confirmed self voice-state presence (channel
+    /// confirmation plus self-mute/self-deaf). Independent of the
+    /// signaling/transport/DAVE probe tracked by `snapshot`; call alongside the
+    /// periodic Discord status refresh so this reflects Discord's own echo
+    /// rather than an optimistic local guess.
+    func refreshVoicePresence() async {
+        let presence = await presencePort.currentPresence()
+        voicePresenceConfirmed = presence.confirmedInChannel
+        voiceSelfMute = presence.selfMute
+        voiceSelfDeaf = presence.selfDeaf
+    }
+
+    /// Sends a presence-only self-mute/self-deaf `VOICE_STATE_UPDATE`. There is
+    /// no Opus/UDP audio yet, so this changes only what Discord and other
+    /// members observe about the bot's voice state — never local capture.
+    /// `voiceSelfMute`/`voiceSelfDeaf` update only after Discord's echo is
+    /// picked up by a following `refreshVoicePresence()`.
+    func setMuteDeafen(selfMute: Bool, selfDeaf: Bool) async {
+        guard !isOperationInFlight else { return }
+        guard voicePresenceConfirmed else {
+            operatorError = DiscordCopy.voiceMuteDeafenNotConfirmed
+            return
+        }
+        switch await presencePort.setMuteState(selfMute: selfMute, selfDeaf: selfDeaf) {
+        case .requested:
+            operatorError = nil
+        case .gatewayUnavailable:
+            operatorError = DiscordCopy.voiceMuteDeafenGatewayUnavailable
+        case .invalidIdentifiers:
+            operatorError = DiscordCopy.voiceMuteDeafenNotConfirmed
+        case .requestInProgress:
+            operatorError = VoicePresence.requestInProgressMessage
+        }
+        await refreshVoicePresence()
     }
 
     func requestPermission(_ kind: MediaPermissionKind) async {

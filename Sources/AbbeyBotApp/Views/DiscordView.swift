@@ -129,6 +129,7 @@ struct DiscordView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            LabeledContent("Connection phase") { Text(engine.mediaSession.connectionPhaseLabel) }
             LabeledContent("Signaling") { Text(engine.mediaSession.signalingLabel) }
             LabeledContent("Transport") { Text(engine.mediaSession.transportLabel) }
             LabeledContent("DAVE") {
@@ -178,7 +179,58 @@ struct DiscordView: View {
             if let error = engine.mediaSession.operatorError {
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
+
+            Divider()
+
+            Text("Gateway presence only — self-mute/self-deaf change what Discord and other members see, not what is heard. There is no Opus/UDP audio.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Probe transport above always ends by leaving (DAVE media is unavailable), so these stay disabled after it. They enable only while presence is held via Discord's `/voice join` slash command.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            LabeledContent("Presence") { Text(engine.mediaSession.muteDeafenLabel) }
+            HStack {
+                Toggle("Self-mute", isOn: muteBinding)
+                    .accessibilityLabel("Discord self-mute presence")
+                Toggle("Self-deafen", isOn: deafenBinding)
+                    .accessibilityLabel("Discord self-deafen presence")
+            }
+            .disabled(
+                !engine.mediaSession.voicePresenceConfirmed
+                    || engine.mediaSession.isOperationInFlight
+            )
+            Text("Reflects Discord's confirmed state — after a toggle, it may briefly show the old value until Discord's echo arrives (polled every 2s).")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
+    }
+
+    private var muteBinding: Binding<Bool> {
+        Binding(
+            get: { engine.mediaSession.voiceSelfMute },
+            set: { value in
+                Task {
+                    statusMessage = await engine.setVoiceMuteDeafen(
+                        selfMute: value,
+                        selfDeaf: engine.mediaSession.voiceSelfDeaf
+                    )
+                }
+            }
+        )
+    }
+
+    private var deafenBinding: Binding<Bool> {
+        Binding(
+            get: { engine.mediaSession.voiceSelfDeaf },
+            set: { value in
+                Task {
+                    statusMessage = await engine.setVoiceMuteDeafen(
+                        selfMute: engine.mediaSession.voiceSelfMute,
+                        selfDeaf: value
+                    )
+                }
+            }
+        )
     }
 
     @ViewBuilder

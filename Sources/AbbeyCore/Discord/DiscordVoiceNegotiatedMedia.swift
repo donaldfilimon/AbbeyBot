@@ -116,6 +116,14 @@ public protocol DiscordVoiceMediaPlane: Sendable {
         generation: UInt64
     ) async throws -> DiscordVoiceMediaCapabilities
 
+    /// Lets the Voice Gateway session supply a callback the media plane invokes
+    /// exactly once, before the first protected packet of an installed
+    /// generation, to emit Discord's Speaking signal ahead of media. Planes
+    /// without a packet-send path can ignore this via the default no-op.
+    func attachSpeakingSignal(
+        _ signal: @escaping @Sendable () async throws -> Void
+    ) async
+
     func reset() async
 }
 
@@ -126,6 +134,10 @@ public extension DiscordVoiceMediaPlane {
     ) async throws -> DiscordVoiceMediaCapabilities {
         DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
     }
+
+    func attachSpeakingSignal(
+        _ signal: @escaping @Sendable () async throws -> Void
+    ) async {}
 }
 
 /// Redacted, in-memory generation gate shared by portable tests and native

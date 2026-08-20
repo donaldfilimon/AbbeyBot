@@ -7,6 +7,9 @@ public enum DiscordVoiceGatewaySessionPhase: String, Equatable, Sendable {
     case awaitingSessionDescription
     /// Voice Gateway signaling is established; media readiness is separately attested.
     case established
+    /// Signaling dropped on a resumable close after being established; a
+    /// bounded buffered-resume attempt is reconnecting the same session.
+    case resuming
     case disconnecting
     case disconnected
     case failed
@@ -86,11 +89,16 @@ public struct DiscordVoiceGatewaySessionConfiguration: Equatable, Sendable {
     public let maximumMessageBytes: Int
     public let heartbeatPollMilliseconds: UInt64
     public let maximumDAVEProtocolVersion: Int
+    /// Bounded buffered-resume budget per outage window. Zero disables
+    /// in-session resume entirely; every socket loss then takes the
+    /// credential-dropping teardown path.
+    public let maximumResumeAttempts: Int
 
     public init(
         maximumMessageBytes: Int = VoiceGatewayV8Decoder.maximumPayloadBytes,
         heartbeatPollMilliseconds: UInt64 = 25,
-        maximumDAVEProtocolVersion: Int = 0
+        maximumDAVEProtocolVersion: Int = 0,
+        maximumResumeAttempts: Int = 3
     ) {
         self.maximumMessageBytes = min(
             max(1, maximumMessageBytes),
@@ -101,6 +109,7 @@ public struct DiscordVoiceGatewaySessionConfiguration: Equatable, Sendable {
             max(0, maximumDAVEProtocolVersion),
             Int(UInt16.max)
         )
+        self.maximumResumeAttempts = min(max(0, maximumResumeAttempts), 10)
     }
 }
 
@@ -126,6 +135,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private let mediaPlane: any DiscordVoiceMediaPlane
     private let daveControlHandler: VoiceGatewayDAVEControlHandler
     private let configuration: DiscordVoiceGatewaySessionConfiguration
+    private let resumeBackoff: VoiceGatewayReconnectBackoff
 
     private var phase: DiscordVoiceGatewaySessionPhase = .idle
     private var generation: UInt64 = 0
@@ -144,6 +154,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private var lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
     private var mediaLifecycleRevision: UInt64 = 0
     private var disconnectRequested = false
+    private var resumeAttempts = 0
 
     public init(
         transport: VoiceGatewayClientTransport = .live(),
@@ -151,10 +162,12 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         mediaAttestation: DiscordVoiceMediaCapabilityAttestation = .portableUnavailable,
         mediaPlane: (any DiscordVoiceMediaPlane)? = nil,
         daveControlHandler: VoiceGatewayDAVEControlHandler = .unavailable,
-        configuration: DiscordVoiceGatewaySessionConfiguration = .init()
+        configuration: DiscordVoiceGatewaySessionConfiguration = .init(),
+        resumeBackoff: VoiceGatewayReconnectBackoff = .continuous
     ) {
         self.transport = transport
         self.clock = clock
+        self.resumeBackoff = resumeBackoff
         self.mediaPlane = mediaPlane ?? DiscordVoiceAttestedMediaPlane(attestation: mediaAttestation)
         self.daveControlHandler = daveControlHandler
         self.configuration = configuration
@@ -241,32 +254,73 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         self.readySignal = readySignal
         self.descriptionSignal = descriptionSignal
         machine = VoiceGatewayV8StateMachine(identity: identity)
+        // Re-attach every connect() so a reused session's callback always
+        // closes over the current generation rather than a stale one.
+        await mediaPlane.attachSpeakingSignal { [weak self] in
+            guard let self else { throw DiscordVoiceGatewaySessionError.disconnected }
+            try await self.sendSpeakingSignal(generation: connectionGeneration)
+        }
         selectedMode = nil
         negotiatedDAVEProtocolVersion = nil
         daveTransitionState.reset()
         lastCapabilities = DiscordVoiceMediaCapabilities(dave: false, aead: false, opus: false)
+        resumeAttempts = 0
 
         let transport = self.transport
         let maximumMessageBytes = configuration.maximumMessageBytes
         let task = Task { [self] in
-            do {
-                let close = try await transport.run(
-                    endpoint: endpoint,
-                    maximumMessageBytes: maximumMessageBytes
-                ) { session in
-                    try await self.runSession(session, generation: connectionGeneration)
+            // Buffered-resume transport loop: one iteration per Voice WebSocket.
+            // Only a `.resumeAfterBackoff` verdict from `transportDidFinish` —
+            // an established session, a resumable close, budget remaining, and
+            // no operator disconnect — re-runs the transport; every other
+            // outcome stops the loop after the verdict's own teardown.
+            var resuming = false
+            while true {
+                let resumeThisAttempt = resuming
+                let verdict: TransportFinishVerdict
+                do {
+                    let close = try await transport.run(
+                        endpoint: endpoint,
+                        maximumMessageBytes: maximumMessageBytes
+                    ) { session in
+                        try await self.runSession(
+                            session,
+                            generation: connectionGeneration,
+                            resuming: resumeThisAttempt
+                        )
+                    }
+                    verdict = await self.transportDidFinish(
+                        close: close,
+                        error: nil,
+                        generation: connectionGeneration
+                    )
+                } catch {
+                    verdict = await self.transportDidFinish(
+                        close: nil,
+                        error: error,
+                        generation: connectionGeneration
+                    )
                 }
-                await self.transportDidFinish(
-                    close: close,
-                    error: nil,
-                    generation: connectionGeneration
-                )
-            } catch {
-                await self.transportDidFinish(
-                    close: nil,
-                    error: error,
-                    generation: connectionGeneration
-                )
+                switch verdict {
+                case .stop:
+                    return
+                case .resumeAfterBackoff(let attempt):
+                    do {
+                        try await self.resumeBackoff.wait(attempt: attempt)
+                    } catch {
+                        // The only expected throw is cancellation from
+                        // `disconnect()`, which owns the remaining teardown.
+                        // Route through the cancellation branch so a spurious
+                        // backoff failure still leaves a coherent final state.
+                        _ = await self.transportDidFinish(
+                            close: nil,
+                            error: CancellationError(),
+                            generation: connectionGeneration
+                        )
+                        return
+                    }
+                    resuming = true
+                }
             }
         }
         transportTask = task
@@ -408,12 +462,13 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
 
     private func runSession(
         _ session: VoiceGatewayClientSession,
-        generation connectionGeneration: UInt64
+        generation connectionGeneration: UInt64,
+        resuming: Bool = false
     ) async throws {
         guard generation == connectionGeneration, !disconnectRequested, var machine else {
             throw DiscordVoiceGatewaySessionError.staleConnection
         }
-        try machine.opened()
+        try machine.opened(resuming: resuming)
         self.machine = machine
         activeSession = session
         defer {
@@ -648,6 +703,18 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
                 lastCapabilities = capabilities
                 phase = .established
                 await descriptionSignal?.resolve(.success(capabilities))
+
+            case .resumed:
+                // The machine has already validated this against its own
+                // resuming phase, resume eligibility, and retained Ready and
+                // mode evidence. Same session, same SSRC namespace, same
+                // transport keys: nothing is reinstalled, the attempt budget
+                // refills for the next independent outage.
+                guard phase == .resuming else {
+                    throw DiscordVoiceGatewaySessionError.staleConnection
+                }
+                resumeAttempts = 0
+                phase = .established
 
             case .clientsConnect(let payload):
                 if daveControlHandler.isAvailable {
@@ -1016,6 +1083,21 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         }
     }
 
+    /// Invoked by the media plane immediately before its first protected
+    /// packet of a generation. A stale generation, disconnect, or missing
+    /// session fails closed so a superseded connection cannot emit Speaking
+    /// on behalf of a newer (or torn-down) one.
+    private func sendSpeakingSignal(generation connectionGeneration: UInt64) async throws {
+        guard generation == connectionGeneration,
+              !disconnectRequested,
+              phase == .established,
+              let activeSession,
+              let machine
+        else { throw DiscordVoiceGatewaySessionError.staleConnection }
+        let outbound = try machine.speaking(flags: 1)
+        try await send(outbound, through: activeSession)
+    }
+
     private func send(
         _ outbound: VoiceGatewayV8Outbound,
         through session: VoiceGatewayClientSession
@@ -1045,30 +1127,67 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         return numeric
     }
 
+    private enum TransportFinishVerdict {
+        case stop
+        case resumeAfterBackoff(attempt: Int)
+    }
+
     private func transportDidFinish(
         close: VoiceGatewayClientClose?,
         error: (any Error)?,
         generation connectionGeneration: UInt64
-    ) async {
-        guard generation == connectionGeneration else { return }
+    ) async -> TransportFinishVerdict {
+        guard generation == connectionGeneration else { return .stop }
         activeSession = nil
-        mediaLifecycleRevision &+= 1
-        await mediaPlane.reset()
 
         if disconnectRequested || error is CancellationError {
+            mediaLifecycleRevision &+= 1
+            await mediaPlane.reset()
             let failure = DiscordVoiceGatewaySessionError.disconnected
             await readySignal?.resolve(.failure(failure))
             await descriptionSignal?.resolve(.failure(failure))
             phase = .disconnected
-            return
+            return .stop
         }
+
+        // Buffered-resume gate. An abrupt loss (transport closed, missed
+        // heartbeat ACK) is treated as close code 1006; the machine's own
+        // close-code policy then decides. Only a `.resume` disposition — which
+        // requires `resumeEligible`, i.e. an established session — may retain
+        // credentials, transport key material, and the installed media plane,
+        // and only within the bounded per-outage budget. Every other outcome
+        // falls through to the credential-dropping teardown below, exactly as
+        // before this loop existed.
+        let effectiveCloseCode: Int?
+        if let close {
+            effectiveCloseCode = close.code
+        } else if let transportError = error as? VoiceGatewayClientTransportError,
+                  case .connectionClosed = transportError {
+            effectiveCloseCode = 1006
+        } else if let voiceError = error as? VoiceGatewayV8Error,
+                  case .missedHeartbeatAcknowledgement = voiceError {
+            effectiveCloseCode = 1006
+        } else {
+            effectiveCloseCode = nil
+        }
+
+        var closeDisposition: VoiceGatewayV8StateMachine.CloseDisposition?
+        if var machine, let code = effectiveCloseCode {
+            closeDisposition = machine.handleClose(code: code)
+            self.machine = machine
+        }
+        if case .resume = closeDisposition,
+           resumeAttempts < configuration.maximumResumeAttempts {
+            resumeAttempts += 1
+            phase = .resuming
+            return .resumeAfterBackoff(attempt: resumeAttempts)
+        }
+
+        mediaLifecycleRevision &+= 1
+        await mediaPlane.reset()
 
         let failure: any Error
         if let close {
-            if var machine {
-                _ = machine.handleClose(code: close.code)
-                self.machine = machine
-            }
             failure = DiscordVoiceGatewaySessionError.connectionClosed(close.code)
         } else if let voiceError = error as? VoiceGatewayV8Error {
             failure = voiceError
@@ -1098,8 +1217,9 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         daveConnectionContext = nil
         recognizedDAVEUserIDs.removeAll(keepingCapacity: false)
         await daveControlHandler.reset()
-        guard generation == connectionGeneration else { return }
+        guard generation == connectionGeneration else { return .stop }
         transportTask = nil
+        return .stop
     }
 
     /// Every locally initiated Voice WebSocket close passes this boundary so
