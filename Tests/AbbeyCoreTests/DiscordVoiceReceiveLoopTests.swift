@@ -116,6 +116,33 @@ private actor ReceiveDecoderDouble: DiscordVoiceAudioFrameDecoder {
         self.sampleCount = sampleCount
     }
 
+    private var recorder: ReceiveOrderRecorder?
+    private var gateAfterDecodeCount: Int?
+    private var gateEntered = false
+    private var gateReleased = false
+    private var gateEntryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var gateReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Parks the pump *inside* `decodeAudioFrame` once `count` decodes have
+    /// already happened, so a test can call `stop()` with a frame genuinely in
+    /// flight across the media-plane seam.
+    func gateDecodesAfter(_ count: Int, recorder: ReceiveOrderRecorder) {
+        gateAfterDecodeCount = count
+        self.recorder = recorder
+    }
+
+    func waitForGateEntry() async {
+        if gateEntered { return }
+        await withCheckedContinuation { gateEntryWaiters.append($0) }
+    }
+
+    func releaseGate() {
+        gateReleased = true
+        let waiters = gateReleaseWaiters
+        gateReleaseWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
     /// Makes the plane reject any packet whose last byte matches — the
     /// fail-closed AEAD/DAVE stand-in.
     func failPacketsTagged(_ tag: UInt8) { failingPayloads.insert(tag) }
@@ -126,6 +153,17 @@ private actor ReceiveDecoderDouble: DiscordVoiceAudioFrameDecoder {
     func decodeAudioFrame(packet: [UInt8]) async throws -> DiscordVoiceDecodedAudio {
         if let tag = packet.last, failingPayloads.contains(tag) {
             throw ReceiveLoopTestError.decodeFailed
+        }
+        if let gateAfterDecodeCount, decodedPackets.count == gateAfterDecodeCount {
+            self.gateAfterDecodeCount = nil
+            gateEntered = true
+            let waiters = gateEntryWaiters
+            gateEntryWaiters = []
+            for waiter in waiters { waiter.resume() }
+            if !gateReleased {
+                await withCheckedContinuation { gateReleaseWaiters.append($0) }
+            }
+            await recorder?.record("decodeCompleted")
         }
         decodedPackets.append(packet)
         let header = try DiscordVoiceRTPCodec().decodeHeader(from: packet)
@@ -145,12 +183,9 @@ private actor ReceiveDecoderDouble: DiscordVoiceAudioFrameDecoder {
     }
 }
 
-/// Playback double with a frame-count expectation, so tests await exactly the
-/// progress they need instead of polling or sleeping.
+/// Playback double recording every mixed frame it was handed, in order.
 private actor PlaybackSinkDouble: DiscordVoicePlaybackSink {
     private var frames: [[Int16]] = []
-    private var expectedCount: Int?
-    private var waiters: [CheckedContinuation<Void, Never>] = []
     private var failFromFrameIndex: Int?
 
     func failFromFrame(_ index: Int) { failFromFrameIndex = index }
@@ -160,38 +195,37 @@ private actor PlaybackSinkDouble: DiscordVoicePlaybackSink {
             throw ReceiveLoopTestError.playbackFailed
         }
         frames.append(pcm)
-        if let expectedCount, frames.count >= expectedCount {
-            self.expectedCount = nil
-            let pending = waiters
-            waiters = []
-            for waiter in pending { waiter.resume() }
-        }
     }
 
     func recorded() -> [[Int16]] { frames }
+    func frameCount() -> Int { frames.count }
+}
 
-    func waitForFrames(_ count: Int) async {
-        if frames.count >= count { return }
-        expectedCount = count
-        await withCheckedContinuation { waiters.append($0) }
-    }
+private actor ReceiveOrderRecorder {
+    private var values: [String] = []
+    func record(_ value: String) { values.append(value) }
+    func snapshot() -> [String] { values }
 }
 
 private actor TerminalRecorder {
     private(set) var count = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func record() { count += 1 }
+}
 
-    func record() {
-        count += 1
-        let pending = waiters
-        waiters = []
-        for waiter in pending { waiter.resume() }
+/// Bounded cooperative wait for the asynchronous pump to reach a state.
+///
+/// Deliberately *not* a sleep: it yields to the scheduler a large but finite
+/// number of times, so a regression fails the test with a message instead of
+/// hanging the whole suite, and a healthy run returns after a handful of turns.
+@discardableResult
+private func awaitCondition(
+    _ condition: @Sendable () async -> Bool
+) async -> Bool {
+    for _ in 0..<200_000 {
+        if await condition() { return true }
+        await Task.yield()
     }
-
-    func wait() async {
-        if count > 0 { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
+    return false
 }
 
 // MARK: - Packet construction
@@ -287,7 +321,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in UInt16(0)...UInt16(7) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(4)
+        #expect(await awaitCondition { await sink.frameCount() >= 4 }, "playback never reached 4 frame(s)")
         await loop.stop()
         #expect(await sink.recorded() == [[0, 0], [1, 1], [2, 2], [3, 3]])
     }
@@ -306,7 +340,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in [0, 1, 3, 2, 4, 6, 5, 7] as [UInt16] {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(4)
+        #expect(await awaitCondition { await sink.frameCount() >= 4 }, "playback never reached 4 frame(s)")
         await loop.stop()
         #expect(await sink.recorded() == [[0, 0], [1, 1], [2, 2], [3, 3]])
     }
@@ -326,7 +360,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in [0, 2, 3, 4, 5, 6, 7] as [UInt16] {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(4)
+        #expect(await awaitCondition { await sink.frameCount() >= 4 }, "playback never reached 4 frame(s)")
         await loop.stop()
         // -1 is the concealment frame, in sequence 1's own slot.
         #expect(await sink.recorded() == [[0, 0], [-1, -1], [2, 2], [3, 3]])
@@ -347,7 +381,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in [0, 1, 2, 1, 3, 4, 5, 6, 7] as [UInt16] {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(4)
+        #expect(await awaitCondition { await sink.frameCount() >= 4 }, "playback never reached 4 frame(s)")
         await loop.stop()
         #expect(await sink.recorded() == [[0, 0], [1, 1], [2, 2], [3, 3]])
     }
@@ -366,7 +400,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in [65_532, 65_533, 65_534, 65_535, 0, 1, 2, 3] as [UInt16] {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(4)
+        #expect(await awaitCondition { await sink.frameCount() >= 4 }, "playback never reached 4 frame(s)")
         await loop.stop()
         // Int16(truncatingIfNeeded:) of 65532...65535 is -4...-1.
         #expect(await sink.recorded() == [[-4, -4], [-3, -3], [-2, -2], [-1, -1]])
@@ -390,7 +424,7 @@ struct DiscordVoiceReceiveLoopTests {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 22))
         }
-        await sink.waitForFrames(2)
+        #expect(await awaitCondition { await sink.frameCount() >= 2 }, "playback never reached 2 frame(s)")
         await loop.stop()
         let played = await sink.recorded()
         #expect(played.first == [Int16.max, Int16.max])
@@ -424,7 +458,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in UInt16(0)...UInt16(5) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(2)
+        #expect(await awaitCondition { await sink.frameCount() >= 2 }, "playback never reached 2 frame(s)")
         let snapshot = await loop.snapshot()
         await loop.stop()
         #expect(snapshot.phase == .receiving)
@@ -447,7 +481,10 @@ struct DiscordVoiceReceiveLoopTests {
         try await loop.start(generation: 1)
         // Truncated below the 12-byte base header.
         await transport.enqueue([0x80, 0x78, 0x00])
-        await terminal.wait()
+        #expect(
+            await awaitCondition { await terminal.count > 0 },
+            "the terminal handler never fired"
+        )
         #expect(await loop.snapshot().phase == .failed)
         await loop.stop()
     }
@@ -465,7 +502,10 @@ struct DiscordVoiceReceiveLoopTests {
         await loop.setTerminalHandler { await terminal.record() }
         try await loop.start(generation: 1)
         await transport.enqueueFailure()
-        await terminal.wait()
+        #expect(
+            await awaitCondition { await terminal.count > 0 },
+            "the terminal handler never fired"
+        )
         #expect(await loop.snapshot().phase == .failed)
         await loop.stop()
     }
@@ -490,7 +530,7 @@ struct DiscordVoiceReceiveLoopTests {
                 makeRTPPacket(sequence: sequence, ssrc: 11, tag: sequence == 1 ? 0xEE : 0)
             )
         }
-        await sink.waitForFrames(3)
+        #expect(await awaitCondition { await sink.frameCount() >= 3 }, "playback never reached 3 frame(s)")
         let snapshot = await loop.snapshot()
         await loop.stop()
         #expect(await terminal.count == 0)
@@ -517,9 +557,10 @@ struct DiscordVoiceReceiveLoopTests {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
         // Nothing can ever play; wait on the drop counter reaching the releases.
-        while await loop.snapshot().droppedPacketCount < 4 {
-            await Task.yield()
-        }
+        #expect(
+            await awaitCondition { await loop.snapshot().droppedPacketCount >= 4 },
+            "the misattributed frames were never dropped"
+        )
         await loop.stop()
         #expect(await sink.recorded().isEmpty)
     }
@@ -541,7 +582,10 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in UInt16(0)...UInt16(5) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await terminal.wait()
+        #expect(
+            await awaitCondition { await terminal.count > 0 },
+            "the terminal handler never fired"
+        )
         #expect(await loop.snapshot().phase == .failed)
         await loop.stop()
     }
@@ -567,20 +611,75 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in UInt16(0)...UInt16(5) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(2)
+        // Wait until the pump is parked in its *next* receive, not merely until
+        // playback progressed. Stopping while the pump is mid-packet lets it
+        // exit through the `Task.isCancelled` guard, which would hide a stop
+        // that forgot to bump the revision before cancelling.
+        #expect(
+            await awaitCondition { await transport.receiveCallCount >= 7 },
+            "the pump never parked waiting for the next datagram"
+        )
+        for _ in 0..<1_000 { await Task.yield() }
         await loop.stop()
 
         let callsAtStop = await transport.receiveCallCount
         #expect(await loop.snapshot().phase == .stopped)
-        #expect(await terminal.count == 0, "a deliberate stop is not a terminal failure")
 
-        // Nothing may be consumed after stop() returned.
+        // Nothing may be consumed after stop() returned, and the stopped verdict
+        // must stay settled. A stop that cancelled without bumping the revision
+        // first, or returned without draining the pump, leaves the pump in
+        // flight: it observes its own cancellation as a transport failure and
+        // flips this to `.failed` with the terminal handler fired, moments after
+        // `stop()` already returned. Yielding past that window is what makes the
+        // ordering — not the timing — the thing under test.
         for sequence in UInt16(6)...UInt16(20) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await Task.yield()
+        for _ in 0..<5_000 { await Task.yield() }
+        #expect(await loop.snapshot().phase == .stopped)
+        #expect(await terminal.count == 0, "a deliberate stop is not a terminal failure")
         #expect(await transport.receiveCallCount == callsAtStop)
         #expect(await sink.recorded().count == 2)
+    }
+
+    /// The other half of ordered teardown: `stop()` must not return while work
+    /// is still crossing the media-plane seam. The owner resets the media plane
+    /// the moment `stop()` returns, so a frame still in flight would race that
+    /// reset.
+    @Test("stop() does not return while a decode is still in flight")
+    func stopDrainsInFlightDecode() async throws {
+        let transport = ReceiveTransportDouble()
+        let decoder = ReceiveDecoderDouble()
+        let sink = PlaybackSinkDouble()
+        let recorder = ReceiveOrderRecorder()
+        let loop = try makeLoop(
+            transport: transport,
+            decoder: decoder,
+            sink: sink,
+            clock: ManualReceiveClock()
+        )
+        // The very first decode parks inside the decoder.
+        await decoder.gateDecodesAfter(0, recorder: recorder)
+        try await loop.start(generation: 1)
+        for sequence in UInt16(0)...UInt16(7) {
+            await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
+        }
+        await decoder.waitForGateEntry()
+
+        let stopTask = Task {
+            await loop.stop()
+            await recorder.record("stopReturned")
+        }
+        // Give a stop that fails to drain every chance to return early.
+        for _ in 0..<1_000 { await Task.yield() }
+        await recorder.record("gateReleased")
+        await decoder.releaseGate()
+        await stopTask.value
+
+        #expect(
+            await recorder.snapshot() == ["gateReleased", "decodeCompleted", "stopReturned"],
+            "stop() returned before the in-flight decode finished"
+        )
     }
 
     @Test("Idle streams are evicted on the injected clock, never a wall clock")
@@ -599,7 +698,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in UInt16(0)...UInt16(5) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 11))
         }
-        await sink.waitForFrames(2)
+        #expect(await awaitCondition { await sink.frameCount() >= 2 }, "playback never reached 2 frame(s)")
         #expect(await loop.snapshot().activeStreamCount == 1)
 
         // Speaker 11 goes quiet; time passes only because the test says so.
@@ -607,7 +706,7 @@ struct DiscordVoiceReceiveLoopTests {
         for sequence in UInt16(0)...UInt16(5) {
             await transport.enqueue(makeRTPPacket(sequence: sequence, ssrc: 22))
         }
-        await sink.waitForFrames(4)
+        #expect(await awaitCondition { await sink.frameCount() >= 4 }, "playback never reached 4 frame(s)")
         let snapshot = await loop.snapshot()
         await loop.stop()
         #expect(snapshot.activeStreamCount == 1, "the idle speaker's state must be gone")
@@ -629,9 +728,10 @@ struct DiscordVoiceReceiveLoopTests {
         for ssrc in UInt32(1)...UInt32(20) {
             await transport.enqueue(makeRTPPacket(sequence: 0, ssrc: ssrc))
         }
-        while await loop.snapshot().receivedPacketCount < 20 {
-            await Task.yield()
-        }
+        #expect(
+            await awaitCondition { await loop.snapshot().receivedPacketCount >= 20 },
+            "the pump never consumed every packet"
+        )
         let snapshot = await loop.snapshot()
         await loop.stop()
         #expect(snapshot.activeStreamCount == 2)
