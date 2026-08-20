@@ -128,12 +128,25 @@ status: in_progress
   file referencing URLSession/URLRequest/HTTPURLResponse was audited; this was the only gap).
   Verified locally: AbbeyCoreTests 314/314, AbbeyBotAppTests 70/70, native gate
   NATIVE_MEDIA_SMOKE_GREEN + STATIC_SECURITY_GREEN in debug and release, all EXIT:0.
-  **NOT closed this pass:** Phase 6a capture composition. Its agent was killed by a session limit
-  before compiling anything; ~1,324 lines of draft (capture loop, microphone source, controller
-  wiring, four test files) are preserved as an explicitly UNVERIFIED wip commit on
-  `worktree-agent-a539f40c0a65c7d78` — never built, never gated, not landed. Nothing in production
-  calls `sendAudioFrame` yet, so the native factory still honestly reports `.unavailable` and
-  DAVE 0. Live join/speak/hear/reconnect/leave evidence remains operator-blocked.
+  (c) **Phase 6a capture composition landed** — with a correction to this entry's first draft. Its
+  agent was killed by a session limit before it could run any gate, so the work was first preserved
+  as an explicitly unverified commit; on review it turned out to be complete and correct, not
+  half-written (it built clean and its own suite passed on first run — the agent died before
+  *reporting*, not before *working*). Reviewed by hand, then integrated: `DiscordVoiceCaptureLoop`
+  (revision-guarded, fail-closed on malformed framing / send failure / unexpected stream end,
+  ordered teardown that drains the pump before the media plane may reset, redacted diagnostics,
+  no key material), `MicrophoneCaptureSource`, controller mute-gating, and the native factory
+  binding the loop to the session's own media plane.
+  **This closes the composition boundary: `sendAudioFrame` now has a production caller** — capture
+  → 20 ms PCM → Opus → DAVE protect → RTP → AEAD → UDP composes end to end in the shipped path,
+  where before this pass nothing called it. **What that does NOT mean:** it has never been
+  exercised against Discord. `mediaAdapterAvailability` stays `.unavailable` and the advertised
+  DAVE version stays 0, deliberately — receive/playback do not exist, and composition is not
+  evidence of interoperability. Live join/speak/hear/reconnect/leave evidence remains
+  operator-blocked (no token/guild in this environment) and was not attempted.
+  Full integrated verification: AbbeyCoreTests 327/327, AbbeyBotAppTests 74/74, native gate 75
+  tests in 8 suites in debug AND release, STATIC_SECURITY_GREEN, NATIVE_MEDIA_SMOKE_GREEN, all
+  EXIT:0.
 
 ## Complete Discord video and Go Live
 status: in_progress

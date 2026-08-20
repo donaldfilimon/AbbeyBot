@@ -248,10 +248,38 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
       (debug + release), output secrecy and `STATIC_SECURITY_GREEN`, `NATIVE_MEDIA_SMOKE_GREEN`; the
       four non-desktop targets 472/472 (`AbbeyCoreTests` 303 + `AbbeyServerKitTests` 117 +
       `AbbeyCLITests` 30 + `AbbeyServerTests` 22), `EXIT:0`.
-- [ ] Phase 6: wire a real capture loop (microphone or a deterministic test source) that actually
-      calls `sendAudioFrame` in production, so the native factory can honestly stop reporting
-      `.unavailable`. This is the `AVAudioEngine` capture/playback composition item below, not a
-      separate task.
+- [x] Phase 6a (capture composition, 2026-08-20): production now has a capture loop that calls
+      `sendAudioFrame`. New portable `DiscordVoiceCaptureLoop` actor
+      (`Sources/AbbeyCore/Discord/DiscordVoiceCaptureLoop.swift`) pumps exact 20 ms 48 kHz stereo
+      Int16 frames from an injected `DiscordVoiceCaptureSource` into a
+      `DiscordVoiceAudioFrameSender` — `DiscordVoiceNativeMediaPlane` conforms, so the loop drives
+      the full Phase 5 protected path (Opus → DAVE protect → RTP → AEAD → retained socket) and can
+      never bypass it. Composition: `DiscordVoiceNativeControlSessionFactory` accepts an optional
+      capture source and binds a loop to the session-owned media plane in its components;
+      `DiscordVoiceController` owns the gating — enabling the microphone starts capture for the
+      current established generation, muting stops capture at the device boundary, a start failure
+      or loop terminal fails closed to mic-disabled with the new operator-visible
+      `.captureUnavailable` failure, and teardown stops capture *before* the gateway disconnect
+      resets the media plane. Desktop wiring: `MicrophoneCaptureSource` (AbbeyBotApp) bridges the
+      shared `AVAudioEngineAdapter` (same instance as the platform's device selection/kill switch)
+      to the loop; permission preflight stays inside the adapter, and any engine interruption or
+      device/configuration change finishes the stream so the loop fails closed — no automatic
+      restart. Loop fail-closed rules covered by tests: stale/zero generation rejection (equal
+      generation restarts across a mute cycle), double-start rejection, malformed frame, sender
+      failure, unexpected capture end, start failure with retry, ordered stop with nothing sent
+      after it. Verified this tree: non-desktop 493/493 (`AbbeyCoreTests` 324 incl. 13 new +
+      `AbbeyServerKitTests` 117 + `AbbeyCLITests` 30 + `AbbeyServerTests` 22) `EXIT:0`; desktop
+      604/604 across 6 bundles (incl. 4 new `MicrophoneCaptureSourceTests`) `EXIT:0`; native bundle
+      61/61 in 8 suites `EXIT:0` (2 new composition tests prove fake-source → loop → real plane →
+      2 ordered protected wire packets with Speaking exactly once, and a pre-negotiation loop sends
+      nothing); `STATIC_SECURITY_GREEN`.
+- [ ] Phase 6 remains open for the honest availability flip: the native factory still reports
+      `.unavailable` and advertises DAVE 0 **deliberately** — receive/decode/playback, jitter
+      handling, reconnect behavior for the capture path, PTT/VAD and UI capture controls, and live
+      DAVE-enabled call evidence are still missing, so send-side capture composition alone must not
+      be presented as shipped audio. (Because availability is unchanged, the controller never
+      reaches `readyMuted` in production yet; the capture path is exercised by deterministic tests
+      only.)
 
 ### Voice audit snapshot (2026-08-01, read-only, two parallel agents)
 
