@@ -571,6 +571,50 @@ Nothing checkable; graded against `2a423e1`:
 - Considered and rejected as a finding: backward client clock moving the cursor back. Causes a
   refetch, not row loss.
 
+## PR #64 automated-review findings (2026-08-20) — dispatched, not yet verified
+
+Seven findings on the merged PR #64 diff. Each is being fixed by a
+worktree-isolated agent; none is closed until its gate is green here and the
+thread is answered on GitHub. Comment ids kept so replies can be posted.
+
+- [ ] **P1 `TwitchBridge.swift`** (3822336981) — the `#if canImport(Darwin)`
+      guard added for the CFNetwork TLS break wraps the WHOLE `connect`, so it
+      also throws for `useTLS == false`. Both real-socket tests call
+      `connectInsecureLoopbackForTesting` and would fail on Linux, and Linux CI
+      runs the full `AbbeyCoreTests` bundle. **This one is self-inflicted** —
+      guard only the TLS setup, keep plaintext loopback working, keep
+      production TLS fail-closed (plaintext to a real host would put the
+      OAuth token on the wire).
+- [ ] **P1 `DiscordVoiceController.swift`** (3822336984) — an operator mute that
+      lands while `captureLoop.start` is suspended is dropped; the resuming
+      start then enables the microphone after the mute appeared to succeed. A
+      privacy action must never be lost to actor reentrancy.
+- [ ] **P2 `DiscordVoiceController.swift`** (3822336997) — a capture loop that
+      fails immediately can fire its terminal handler before the controller has
+      set `microphoneEnabled`; the guard drops the event and the microphone is
+      then published as enabled while the loop is already failed.
+- [ ] **P2 `DiscordVoiceController.swift`** (3822337010) — a successful retry
+      after `captureLoop.start` throws does not clear `.captureUnavailable`, so
+      the snapshot reports an enabled microphone AND a capture failure for the
+      rest of the generation.
+- [ ] **P2 `DiscordVoiceNativeMediaPlane.swift`** (3822337023) — `installVideoSource`
+      replaces the source without advancing `revision` or cancelling in-flight
+      sends, so a `sendVideoFrame` suspended on announcement/DAVE work can still
+      transmit with the obsolete SSRC and codec after a source switch.
+- [ ] **P2 `VoiceGatewayV8StateMachine.swift`** (3822337037) — Opcode 12
+      validation checks only each stream's primary SSRC, so an arbitrary
+      explicit `rtx_ssrc` can be announced despite the method's stated
+      allocation guarantee. Validate primary AND RTX against Ready.
+- [ ] **P2 `MediaSessionModel.swift`** (3822337045) — the UI kill switch calls
+      `audio.stopNow()` directly, bypassing `MicrophoneCaptureSource.stopCapture()`.
+      The adapter's stream stays open, the capture loop never sees a terminal
+      event, and the controller keeps reporting the microphone enabled after the
+      device has stopped.
+
+Note: the three controller findings are one underlying shape — actor reentrancy
+across the `await` in capture startup — and are being fixed as one mechanism
+rather than three patches.
+
 ## Verification evidence
 
 - [x] Non-desktop, re-verified after the `.ignoreExisting()` fix: 255 tests green, exit 0
