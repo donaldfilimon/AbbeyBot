@@ -105,3 +105,34 @@ Agent 3 builds the packetizer but does **not** wire it into the media plane; tha
 small follow-up after merge. This split is deliberate: on 2026-08-20 two agents both editing the
 media plane produced a merge conflict *and* silently reintroduced two bugs that had just been
 fixed, because the second agent modeled its code on the pre-fix shape.
+
+
+---
+
+## §4 correction (2026-08-20): the negotiation premise was wrong
+
+§4 said codec selection should come "from what Ready / Session Description actually negotiated."
+**They carry nothing about codecs.** Verified by reading the models, not assumed:
+`VoiceGatewayV8Ready` has `ssrc`/`ip`/`port`/`modes`/`streams`; `VoiceGatewayV8Stream` has
+`type`/`rid`/`quality`/`active`/bitrate/framerate/resolution/`ssrc`/`rtx_ssrc`;
+`VoiceGatewayV8SessionDescription` has `mode`/`secret_key`/`dave_protocol_version`. A repo-wide
+grep for `video_codec|audio_codec|payload_type` returns zero hits.
+
+The right response was **not** to add a `video_codec` CodingKey — that would check an unverified
+protocol claim into the repo, which AGENTS.md forbids. Instead the resolver
+(`DiscordVoiceVideoCodecNegotiation`) is the single route from a codec name to a payload type and
+fails closed on `nil`, blank, unmapped, and out-of-offer-table inputs. Since no payload supplies a
+name today, the only reachable input is `nil` → throws. **That is the correct state: no video
+codec is negotiated, so no video may be sent.**
+
+Discovering where the negotiated codec name actually arrives requires verification against live
+Discord, and is now a separate open question rather than an assumption baked into code.
+
+The packetizer is unaffected by this and landed as specified: one shared timestamp per frame,
+contiguous sequence numbers, marker bit on the final fragment only, MTU 1200 measured on the
+*sealed* datagram with the AEAD's exact 20-byte expansion (16-byte tag + 4-byte counter; the
+nonce is not on the wire) subtracted from every fragment budget.
+
+**Known gap this leaves:** fragments are opaque byte ranges. There is no H.264 FU-A, VP8 payload
+descriptor, or AV1 OBU aggregation header — a real Discord receiver needs those, and no receiver
+interoperability is claimed.
