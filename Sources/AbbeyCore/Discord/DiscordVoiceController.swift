@@ -524,6 +524,45 @@ public actor DiscordVoiceController {
     /// * a start that provably succeeds clears a `.captureUnavailable` left by
     ///   an earlier failed start, so a recovered session never reports an
     ///   enabled microphone and a capture failure at the same time.
+    /// Starts or stops decrypting and playing other members' audio.
+    ///
+    /// Off by default and never implied by joining a channel: receiving means
+    /// decrypting other people's speech, so it is an explicit operator action,
+    /// the same posture the microphone has. A failure to start fails closed —
+    /// `receiveActive` stays false and the failure is operator-visible — rather
+    /// than leaving the session in a state that looks like it is listening.
+    @discardableResult
+    public func setReceiveEnabled(_ enabled: Bool) async -> DiscordVoiceControllerSnapshot {
+        guard let receiveLoop else {
+            // No receive loop was composed for this session (no playback sink,
+            // or a portable build). Refuse rather than report success.
+            if enabled { failure = .receiveUnavailable }
+            return makeSnapshot()
+        }
+        guard acceptsFrames else {
+            if enabled { failure = .receiveUnavailable }
+            return makeSnapshot()
+        }
+        if enabled == receiveActive { return makeSnapshot() }
+
+        let localGeneration = generation
+        if enabled {
+            guard await startReceiveLoop(receiveLoop, generation: localGeneration) else {
+                return makeSnapshot()
+            }
+        } else {
+            // Ordered teardown: the loop drains before this returns, so no
+            // packet can race a later media reset.
+            await receiveLoop.stop()
+            guard generation == localGeneration else { return makeSnapshot() }
+            receiveActive = false
+            // A clean operator stop is not a failure.
+            if failure == .receiveUnavailable { failure = nil }
+        }
+        publish()
+        return makeSnapshot()
+    }
+
     @discardableResult
     public func setMicrophoneEnabled(_ enabled: Bool) async -> DiscordVoiceControllerSnapshot {
         guard !microphoneTransitionInFlight else {
@@ -780,13 +819,16 @@ public actor DiscordVoiceController {
                 await self?.handleReceiveLoopTerminal(generation: localGeneration)
             }
             guard generation == localGeneration else { return makeSnapshot() }
-            guard await startReceiveLoop(receiveLoop, generation: localGeneration) else {
-                return makeSnapshot()
-            }
+            // Deliberately NOT started here. Receiving decrypts other members'
+            // speech, so joining a channel must not silently begin doing it —
+            // receive is operator-gated and off by default, exactly like the
+            // microphone below. `setReceiveEnabled(true)` is the only way in.
         }
 
         acceptsFrames = true
-        // Capture permission is never inferred from a previous generation.
+        // Neither capture nor receive is ever inferred from a previous
+        // generation: both are privacy actions the operator must take again.
+        receiveActive = false
         microphoneEnabled = false
         cameraEnabled = false
         screenShareEnabled = false

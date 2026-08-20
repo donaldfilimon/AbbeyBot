@@ -181,8 +181,8 @@ struct DiscordVoiceControllerReceiveTests {
         )
     }
 
-    @Test("A ready session starts the receive loop for its own generation")
-    func receiveLoopStartsOnReady() async throws {
+    @Test("A ready session does NOT start receive; the operator toggle does")
+    func receiveLoopStartsOnlyWhenOperatorEnablesIt() async throws {
         let loop = ControllerReceiveLoopDouble()
         let factory = ControllerReceiveFactory(
             gateway: ControllerReceiveGateway(),
@@ -192,10 +192,22 @@ struct DiscordVoiceControllerReceiveTests {
         let controller = try makeController(bridge: ControllerReceiveBridge(), factory: factory)
         let snapshot = await controller.join(guildID: "g", channelID: "c")
         #expect(snapshot.phase == .readyMuted)
-        #expect(snapshot.receiveActive)
+        // Receiving decrypts other members' speech, so joining a channel must
+        // never start it implicitly. The terminal handler is registered up
+        // front, but no start has happened.
+        #expect(!snapshot.receiveActive)
         #expect(snapshot.failure == nil)
-        #expect(await loop.startGenerations == [snapshot.generation])
+        #expect(await loop.startGenerations.isEmpty)
         #expect(await loop.hasTerminalHandler())
+
+        let enabled = await controller.setReceiveEnabled(true)
+        #expect(enabled.receiveActive)
+        #expect(await loop.startGenerations == [snapshot.generation])
+
+        // And the operator can turn it back off, with the loop drained.
+        let disabled = await controller.setReceiveEnabled(false)
+        #expect(!disabled.receiveActive)
+        #expect(await loop.stopCount >= 1)
         await controller.shutdown()
     }
 
@@ -236,7 +248,10 @@ struct DiscordVoiceControllerReceiveTests {
             receiveLoop: loop
         )
         let controller = try makeController(bridge: ControllerReceiveBridge(), factory: factory)
-        let snapshot = await controller.join(guildID: "g", channelID: "c")
+        _ = await controller.join(guildID: "g", channelID: "c")
+        // The failure surfaces when the operator asks for receive, since that
+        // is the only thing that starts the loop now.
+        let snapshot = await controller.setReceiveEnabled(true)
         #expect(snapshot.phase == .readyMuted, "signaling must survive a receive failure")
         #expect(!snapshot.receiveActive)
         #expect(snapshot.failure == .receiveUnavailable)
@@ -253,6 +268,8 @@ struct DiscordVoiceControllerReceiveTests {
         )
         let controller = try makeController(bridge: ControllerReceiveBridge(), factory: factory)
         _ = await controller.join(guildID: "g", channelID: "c")
+        // A terminal verdict only means anything once receive is running.
+        _ = await controller.setReceiveEnabled(true)
         await loop.fireTerminal()
         let snapshot = await controller.currentSnapshot()
         #expect(!snapshot.receiveActive)
@@ -274,14 +291,17 @@ struct DiscordVoiceControllerReceiveTests {
             receiveLoop: loop
         )
         let controller = try makeController(bridge: ControllerReceiveBridge(), factory: factory)
+        _ = await controller.join(guildID: "g", channelID: "c")
+        // The start window now opens on the operator's explicit enable, not on
+        // join — receive no longer starts implicitly.
         await loop.gateNextStart()
 
-        let join = Task { await controller.join(guildID: "g", channelID: "c") }
+        let enable = Task { await controller.setReceiveEnabled(true) }
         await loop.waitForStartEntry()
         // The controller is suspended inside `await receiveLoop.start(...)`.
         await loop.fireTerminal()
         await loop.releaseStart()
-        let snapshot = await join.value
+        let snapshot = await enable.value
 
         #expect(!snapshot.receiveActive, "an already-failed loop must not read as active")
         #expect(snapshot.failure == .receiveUnavailable)
@@ -307,8 +327,8 @@ struct DiscordVoiceControllerReceiveTests {
         await controller.shutdown()
     }
 
-    @Test("A rejoin starts the receive loop for the new generation only")
-    func rejoinRestartsReceiveLoop() async throws {
+    @Test("A rejoin does not silently resume receiving; it must be re-enabled")
+    func rejoinRequiresReceiveToBeReEnabled() async throws {
         let loop = ControllerReceiveLoopDouble()
         let factory = ControllerReceiveFactory(
             gateway: ControllerReceiveGateway(),
@@ -317,11 +337,19 @@ struct DiscordVoiceControllerReceiveTests {
         )
         let controller = try makeController(bridge: ControllerReceiveBridge(), factory: factory)
         let first = await controller.join(guildID: "g", channelID: "c")
+        _ = await controller.setReceiveEnabled(true)
         let second = await controller.join(guildID: "g", channelID: "c")
         #expect(second.generation > first.generation)
-        #expect(second.receiveActive)
-        #expect(await loop.startGenerations == [first.generation, second.generation])
+        // A privacy action is never inherited across generations: the new
+        // session starts silent even though the previous one was receiving.
+        #expect(!second.receiveActive)
+        #expect(await loop.startGenerations == [first.generation])
         #expect(await loop.stopCount >= 1)
+
+        // Re-enabling starts the loop for the NEW generation only.
+        let resumed = await controller.setReceiveEnabled(true)
+        #expect(resumed.receiveActive)
+        #expect(await loop.startGenerations == [first.generation, second.generation])
         await controller.shutdown()
     }
 }
