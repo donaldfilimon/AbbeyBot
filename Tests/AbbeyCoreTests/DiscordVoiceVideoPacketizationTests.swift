@@ -322,6 +322,27 @@ struct DiscordVoiceVideoPacketizationTests {
         #expect(clock.timestamp == 1)
     }
 
+    @Test("A frame claiming the whole sequence space still aliases nothing")
+    func maximumFragmentReservationDoesNotAlias() throws {
+        // The upper bound is exactly `UInt16.max`, not the 65536-wide space:
+        // a frame of N fragments occupies base..<base+N and the next frame
+        // starts at base+N, so N == 65535 leaves exactly one free slot and
+        // N == 65536 would land the next frame on this frame's first
+        // fragment. This pins that the boundary is where it belongs.
+        let maximum = Int(UInt16.max)
+        var clock = try DiscordVoiceVideoRTPClock(initialSequence: 1_000, initialTimestamp: 0)
+        let tick = try clock.nextFrame(fragmentCount: maximum)
+        #expect(tick.sequence == 1_000)
+
+        var claimed = Set<UInt16>()
+        for index in 0..<maximum {
+            claimed.insert(1_000 &+ UInt16(index))
+        }
+        #expect(claimed.count == maximum)
+        #expect(!claimed.contains(clock.sequence))
+        #expect(clock.sequence == 1_000 &+ UInt16(maximum))
+    }
+
     // MARK: - Codec negotiation
 
     @Test("A negotiated codec resolves to the payload type this client offered")
