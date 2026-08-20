@@ -94,6 +94,17 @@ status: in_progress
   the four non-desktop targets 472/472, `STATIC_SECURITY_GREEN`, all `EXIT:0`. This goal remains
   `in_progress` — reconnect/resume and AVAudioEngine capture composition (Phase 6) are the next
   slices, and live evidence stays operator-blocked.
+- **`/goal continue` 2026-08-20: buffered resume landed (the reconnect/resume residual's
+  in-session half).** `DiscordVoiceGatewaySession` gained a bounded transport loop: a resumable
+  close on an established session retains credentials/keys/media plane, backs off through an
+  injected `VoiceGatewayReconnectBackoff`, reopens the same endpoint, and resumes via op-7/op-9
+  with the attempt budget refilled only by a successful Resumed; every other outcome (including
+  budget exhaustion and operator disconnect mid-backoff) takes the pre-existing credential-dropping
+  teardown. New `.resuming` session phase keeps snapshots honest. Verified: five new multi-attempt
+  harness tests, full `AbbeyCoreTests` 312 green, desktop smoke green (see todo bullet for the
+  in-log evidence). Explicitly NOT closed: automatic controller-level full-reconnect
+  (`DiscordVoiceController.reconnect()` remains production-uninvoked), induced UDP/invalid-session/
+  channel-move/shutdown verification, and live-network resume evidence (operator-blocked).
 
 ## Complete Discord video and Go Live
 status: in_progress

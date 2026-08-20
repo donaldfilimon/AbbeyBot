@@ -76,6 +76,22 @@ Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 - [ ] Add Voice Gateway buffered resume and full reconnect fallback, re-establish UDP/media state
       safely, stop audio on explicit leave, and verify induced WebSocket loss, UDP loss/reorder,
       invalid session, channel move, and process shutdown.
+      *(PARTIAL 2026-08-20 — in-session buffered resume landed in
+      `DiscordVoiceGatewaySession`: the transport now runs in a bounded loop; only a `.resume`
+      close disposition (which requires an established, `resumeEligible` session) retains
+      credentials, transport keys, and the installed media plane, re-opens the same endpoint
+      through injected backoff, sends op-7 Resume (never Identify) on Hello, and re-establishes
+      on op-9 Resumed — the attempt budget (`maximumResumeAttempts`, default 3, 0 disables)
+      refills only on a successful Resumed. Every other outcome — pre-established drops,
+      reidentify/terminal codes, protocol violations, budget exhaustion — takes the exact
+      credential-dropping teardown that existed before, and explicit `disconnect()` wins over an
+      in-flight backoff. New session phase `.resuming` is honest in snapshots
+      (`signalingEstablished == false` during the gap). Five new hermetic tests drive multi-attempt
+      scripted transports (`DiscordVoiceGatewayResumeHarness`); full `AbbeyCoreTests` 312 green.
+      Still open in this bullet: controller-level full-reconnect fallback is NOT auto-triggered —
+      `DiscordVoiceController.reconnect()` exists and is tested but nothing invokes it on session
+      failure; induced UDP loss/reorder, invalid-session, channel-move, and process-shutdown
+      verification remain unattempted; live-network resume evidence stays operator-blocked.)*
 - [ ] Expand `/voice` and the Discord SwiftUI surface with honest connection phases, guild/channel
       selection, join/leave/status, mute/deafen, PTT/VAD, device/volume controls, speaking meters,
       reconnect/error visibility, stage-channel state, permission preflight, privacy policy, and an
