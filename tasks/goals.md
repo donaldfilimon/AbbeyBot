@@ -259,6 +259,34 @@ status: in_progress
   `FoundationNetworking` failure was invisible to this gate. Docker/Linux remains the only real
   check for that class.
 
+## Make the Linux CI job actually pass
+status: in_progress
+- **Discovered 2026-08-20:** the `Abbey CI` linux job has **not succeeded in any of the last 30
+  runs, on any branch, including `main`.** It is not a regression from any one PR — the server
+  graph (`ABBEY_PACKAGE_ROLE=server`: AbbeyCore/AbbeyServerKit/AbbeyServer/AbbeyCLI) simply does
+  not build on Linux, and each fix only reveals the next break, because the compiler stops at the
+  first failing file.
+- Fixed this pass, all the same class (Darwin re-exports or provides something Linux does not):
+  `RemoteOpenAICompatibleProvider` needed `#if canImport(FoundationNetworking)` for `URLSession`;
+  `EngineMetrics` needed an explicit `import Observation` for `@Observable`; `TwitchBridge`'s
+  CFStream/CFNetwork TLS path is Darwin-only and is now `#if canImport(Darwin)`-guarded, failing
+  closed on Linux rather than falling back to plaintext IRC.
+- A full audit of the server graph for this class is now clean: no unguarded Darwin-only framework
+  imports, no unguarded `CF*`/`kCF*`/`Unmanaged`/`@objc` users, no `DispatchQueue` users missing
+  `import Dispatch`. `AppConfig.swift`'s `#if canImport(Security)` Keychain guard is the pattern
+  the other fixes follow.
+- **Acceptance:** one green linux run. Not claimable until observed — a clean audit is not a
+  passing build, and this job has proven it hides breakage one file at a time.
+- **Known gap in local tooling:** `Scripts/check-server-snapshot.sh` gives toolchain parity on
+  Darwin, not platform parity, so it cannot catch this class at all (it did not catch any of the
+  three). The only real pre-flight is a Linux build. There is no container runtime on this machine
+  (no docker/colima/podman) and the Swift static-Linux SDK URL tried for 6.3.2 returned 404, so
+  every fix currently costs one ~18-minute CI round trip. Worth solving before the next Linux
+  push: either install a container runtime or find the correct static-SDK artifact.
+- **Product decision surfaced, needs Donald:** Twitch IRC now explicitly does not work on Linux.
+  If the server is meant to run Twitch IRC on Linux, that needs a NIOSSL-based client (the repo
+  already depends on swift-nio-ssl) — a real piece of work, deliberately not bolted into a voice PR.
+
 ## Release and SwiftData hardening
 status: done
 - Preserve sync persistence and migration compatibility across previously released database and
