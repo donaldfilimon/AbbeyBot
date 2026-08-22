@@ -28,9 +28,8 @@ struct SocialIngestBodyDTO: Content {
 }
 
 enum SocialRoutes {
-    static func register(on app: Application) {
-        app.get("api", "social", "catalog") { req async throws -> SocialCatalogDTO in
-            try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    static func registerOperatorRoutes(on routes: RoutesBuilder) {
+        routes.get("social", "catalog") { _ async throws -> SocialCatalogDTO in
             let platforms = SocialAPICatalog.all.map { p in
                 SocialPlatformDTO(
                     id: p.platform.rawValue,
@@ -47,8 +46,7 @@ enum SocialRoutes {
             return SocialCatalogDTO(platforms: platforms)
         }
 
-        app.get("api", "social", "catalog", "markdown") { req async throws -> Response in
-            try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        routes.get("social", "catalog", "markdown") { _ async throws -> Response in
             var headers = HTTPHeaders()
             headers.contentType = .plainText
             return Response(
@@ -58,7 +56,12 @@ enum SocialRoutes {
             )
         }
 
-        // Generic social webhook: POST /api/social/:platform/webhook
+    }
+
+    static func registerGenericWebhooks(on app: Application) {
+        // Generic social webhook: POST /api/social/:platform/webhook. This is an explicit
+        // exception to the grouped operator API because its testing/dry-run bypass policy is
+        // narrower than the operator surface. It still fails closed without that explicit bypass.
         app.post("api", "social", ":platform", "webhook") { req async throws -> Response in
             try AbbeyAPIAuth.requireConfiguredToken(
                 req,

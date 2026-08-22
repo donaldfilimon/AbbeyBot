@@ -16,6 +16,8 @@ import VaporTesting
 struct AbbeyServerAuthTests {
     private func withApp(
         token: String?,
+        environment: Environment = .testing,
+        dryRun: Bool = false,
         eventSubSecret: String? = nil,
         allowUnsignedEventSubForTesting: Bool = false,
         allowUnsignedSocialForTesting: Bool = false,
@@ -44,9 +46,13 @@ struct AbbeyServerAuthTests {
         } else {
             unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
         }
-        unsetenv("ABBEY_DRY_RUN")
+        if dryRun {
+            setenv("ABBEY_DRY_RUN", "1", 1)
+        } else {
+            unsetenv("ABBEY_DRY_RUN")
+        }
 
-        let app = try await Application.make(.testing)
+        let app = try await Application.make(environment)
         do {
             try await configure(app)
             try await body(app)
@@ -55,6 +61,7 @@ struct AbbeyServerAuthTests {
             unsetenv("TWITCH_EVENTSUB_SECRET")
             unsetenv("ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING")
             unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
+            unsetenv("ABBEY_DRY_RUN")
             unsetenv("DATABASE_URL")
         } catch {
             try? await app.asyncShutdown()
@@ -62,6 +69,7 @@ struct AbbeyServerAuthTests {
             unsetenv("TWITCH_EVENTSUB_SECRET")
             unsetenv("ABBEY_ALLOW_UNSIGNED_TWITCH_EVENTSUB_FOR_TESTING")
             unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
+            unsetenv("ABBEY_DRY_RUN")
             unsetenv("DATABASE_URL")
             throw error
         }
@@ -121,20 +129,92 @@ struct AbbeyServerAuthTests {
         }
     }
 
-    /// Preserves the documented local-smoke convention: unset token means gated routes
-    /// stay open. A regression here would silently lock every local/dev boot out of these.
-    @Test func getStateUserStaysOpenWhenTokenUnset() async throws {
+    @Test func protectedAPIRoutesFailClosedWhenTokenUnset() async throws {
         try await withApp(token: nil) { app in
-            try await app.testing().test(.GET, "/api/state/user?guildId=g1&userId=u1") { res in
-                #expect(res.status == .ok)
+            let getPaths = [
+                "/",
+                "/api/status",
+                "/api/users?limit=1",
+                "/api/state/user?guildId=g1&userId=u1",
+                "/api/sync-status",
+                "/api/social/catalog",
+            ]
+            for path in getPaths {
+                try await app.testing().test(.GET, path) { res in
+                    #expect(res.status == .serviceUnavailable, "GET \(path) returned \(res.status)")
+                }
+            }
+
+            let postRequests = [
+                (
+                    "/api/ingest",
+                    #"{"content":"auth probe","channelId":"c1","guildId":"g1","authorId":"u1"}"#
+                ),
+                (
+                    "/api/state/remember",
+                    #"{"guildId":"g1","userId":"u1","fact":"auth probe"}"#
+                ),
+                (
+                    "/api/state/sync-status",
+                    #"{"pendingPushCount":0}"#
+                ),
+            ]
+            for (path, body) in postRequests {
+                try await app.testing().test(
+                    .POST,
+                    path,
+                    headers: jsonHeaders(),
+                    body: jsonBody(body)
+                ) { res in
+                    #expect(res.status == .serviceUnavailable, "POST \(path) returned \(res.status)")
+                }
             }
         }
     }
 
-    @Test func getStateChannelStaysOpenWhenTokenUnset() async throws {
+    @Test func protectedAPIRoutesTreatBlankConfiguredTokenAsMisconfiguration() async throws {
+        try await withApp(token: " \t\n ") { app in
+            try await app.testing().test(.GET, "/api/status") { res in
+                #expect(res.status == .serviceUnavailable)
+            }
+        }
+    }
+
+    @Test func everyAPIRegistrationExceptNativeSignedWebhookFailsClosedWithoutOperatorToken() async throws {
         try await withApp(token: nil) { app in
-            try await app.testing().test(.GET, "/api/state/channel?guildId=g1&channelId=c1") { res in
-                #expect(res.status == .ok)
+            let apiRoutes = app.routes.all.filter { $0.path.first == .constant("api") }
+            #expect(!apiRoutes.isEmpty)
+
+            let nativeSignedWebhookRoutes: Set<String> = ["POST /api/twitch/eventsub"]
+            for route in apiRoutes where !nativeSignedWebhookRoutes.contains(route.description) {
+                let concretePath = route.path.map { component in
+                    switch component {
+                    case .constant(let value): value
+                    case .parameter("platform"): "youtube"
+                    case .parameter, .anything, .catchall: "auth-probe"
+                    }
+                }.joined(separator: "/")
+
+                try await app.testing().test(route.method, "/\(concretePath)") { res in
+                    #expect(
+                        res.status == .serviceUnavailable,
+                        "\(route.description) bypassed fail-closed registration with \(res.status)"
+                    )
+                }
+            }
+        }
+    }
+
+    @Test func protectedAPIRoutesRejectWrongTokensWithoutLeakingLength() async throws {
+        try await withApp(token: "correct-token") { app in
+            for wrongToken in ["wrong-token!!", "x"] {
+                try await app.testing().test(
+                    .GET,
+                    "/api/status",
+                    headers: bearerHeaders(wrongToken)
+                ) { res in
+                    #expect(res.status == .unauthorized)
+                }
             }
         }
     }
@@ -143,6 +223,17 @@ struct AbbeyServerAuthTests {
         try await withApp(token: "secret-token") { app in
             try await app.testing().test(.GET, "/health") { res in
                 #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func healthAndStaticDashboardKeepTheirOwnPolicyWhenTokenUnset() async throws {
+        try await withApp(token: nil) { app in
+            try await app.testing().test(.GET, "/health") { res in
+                #expect(res.status == .ok)
+            }
+            try await app.testing().test(.GET, "/dashboard") { res in
+                #expect(res.status == .ok || res.status == .notFound)
             }
         }
     }
@@ -192,8 +283,19 @@ struct AbbeyServerAuthTests {
         }
     }
 
+    @Test func statusAcceptsCorrectXAbbeyTokenHeader() async throws {
+        try await withApp(token: "secret-token") { app in
+            var headers = HTTPHeaders()
+            headers.replaceOrAdd(name: "X-Abbey-Token", value: "secret-token")
+            try await app.testing().test(.GET, "/api/status", headers: headers) { res in
+                #expect(res.status == .ok)
+            }
+        }
+    }
+
     @Test func messageListPublishesExactCompoundCursorWithoutWrappingArrayBody() async throws {
-        try await withApp(token: nil) { app in
+        try await withApp(token: "cursor-test-token") { app in
+            let headers = bearerHeaders("cursor-test-token")
             let stamp = Date(timeIntervalSince1970: 1_700_000_000.25)
             let row = GuildMessage(
                 discordMessageId: "m-cursor-1",
@@ -208,7 +310,8 @@ struct AbbeyServerAuthTests {
 
             try await app.testing().test(
                 .GET,
-                "/api/messages?limit=1&since=0"
+                "/api/messages?limit=1&since=0",
+                headers: headers
             ) { res in
                 #expect(res.status == .ok)
                 #expect(res.body.string.first == "[")
@@ -224,7 +327,8 @@ struct AbbeyServerAuthTests {
             let encodedID = "m-cursor-1".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
             try await app.testing().test(
                 .GET,
-                "/api/messages?limit=1&since=\(stamp.timeIntervalSince1970)&after=\(encodedID)"
+                "/api/messages?limit=1&since=\(stamp.timeIntervalSince1970)&after=\(encodedID)",
+                headers: headers
             ) { res in
                 #expect(res.status == .ok)
                 #expect(res.body.string == "[]")
@@ -306,6 +410,23 @@ struct AbbeyServerAuthTests {
                 body: jsonBody(#"{"text":"dry run","channelId":"c1","author":"u1"}"#)
             ) { res in
                 #expect(res.status == .ok)
+            }
+        }
+    }
+
+    @Test func genericSocialWebhookBypassIsRejectedInDevelopmentWithoutDryRun() async throws {
+        try await withApp(
+            token: nil,
+            environment: .development,
+            allowUnsignedSocialForTesting: true
+        ) { app in
+            try await app.testing().test(
+                .POST,
+                "/api/social/youtube/webhook",
+                headers: jsonHeaders(),
+                body: jsonBody(#"{"text":"auth probe","channelId":"c1","author":"u1"}"#)
+            ) { res in
+                #expect(res.status == .serviceUnavailable)
             }
         }
     }
