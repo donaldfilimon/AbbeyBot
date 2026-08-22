@@ -18,9 +18,13 @@ var packageTargets: [Target] = [
             .product(name: "DiscordBM", package: "DiscordBM"),
             .product(name: "WSClient", package: "swift-websocket"),
             .product(name: "NIOCore", package: "swift-nio"),
-            .product(name: "NIOPosix", package: "swift-nio")
+            .product(name: "NIOPosix", package: "swift-nio"),
+            .product(name: "Crypto", package: "swift-crypto")
         ],
         path: "Sources/AbbeyCore",
+        resources: [
+            .copy("../../Contracts/Abbey")
+        ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
         ]

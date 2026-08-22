@@ -32,6 +32,21 @@ if [[ "${#duplicate_swift_sources[@]}" -gt 0 ]]; then
   exit 1
 fi
 
+echo "======== static: Abbey contract resource bounds ========"
+contract_root="Contracts/Abbey"
+if [[ ! -f "$contract_root/abbey-contracts.lock.json" || ! -f "$contract_root/corpus/manifest.json" ]]; then
+  echo "STATIC_FAIL: managed Abbey contract resource is incomplete" >&2
+  exit 1
+fi
+if find "$contract_root" -type l -print -quit | grep -q .; then
+  echo "STATIC_FAIL: symlink found in Abbey contract resource" >&2
+  exit 1
+fi
+if find "$contract_root" -type f -size +1048576c -print -quit | grep -q .; then
+  echo "STATIC_FAIL: Abbey contract artifact exceeds the 1 MiB native loader bound" >&2
+  exit 1
+fi
+
 echo "======== security: tracked filenames ========"
 bad_names=()
 while IFS= read -r -d '' path; do

@@ -75,6 +75,18 @@ The two scripts are **complementary, not redundant**: snapshot = macOS host, nig
 
 **Narrow smokes:** desktop → `run-smoke.sh`; server → `run-server-smoke.sh`; CLI → `run-cli-smoke.sh`.
 
+### Abbey contract corpus
+
+`Contracts/Abbey` vendors the data-only ABI Abbey v1 corpus at source revision
+`348754bdaaf59a40fbb858380f925e0aba95a23b` and aggregate SHA-256
+`72e241e34967df318376bf68f4a0e2db13f5ebf17d1a219709731f1f470dbe8e` (81 artifacts,
+88,328 bytes). `AbbeyCore` packages the same bytes as a resource and qualifies both repository and
+packaged copies using native Swift SHA-256, bounded file reads, closed `Codable` enums, schema and
+semantic fixture checks, and content-free synthetic operator reports. This is local C1 conformance
+evidence only: it does not prove production deployment, provider behavior, WDBX mutation, or a live
+Discord session. The approved corpus contains no positive canonical-CBOR fixture, so this adapter
+does not invent or claim canonical-CBOR decoding.
+
 ## Discord live path (desktop)
 
 1. Developer Portal bot + Message Content intent
