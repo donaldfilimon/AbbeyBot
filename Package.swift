@@ -85,7 +85,8 @@ var packageTargets: [Target] = [
             // VoiceGatewayClientTests.swift.
             .product(name: "WSClient", package: "swift-websocket"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
-            .product(name: "NIOWebSocket", package: "swift-nio")
+            .product(name: "NIOWebSocket", package: "swift-nio"),
+            .product(name: "Crypto", package: "swift-crypto")
         ],
         path: "Tests/AbbeyCoreTests",
         swiftSettings: [

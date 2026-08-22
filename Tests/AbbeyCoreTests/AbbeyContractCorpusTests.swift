@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Testing
 
@@ -68,6 +69,68 @@ struct AbbeyContractCorpusTests {
     }
   }
 
+  @Test("all manifest fixtures match their declared disposition")
+  func allFixtureDispositions() throws {
+    let corpus = try AbbeyContractCorpus.verify(at: Self.repositoryCorpusURL)
+    #expect(corpus.fixturePaths.count == 52)
+    for path in corpus.fixturePaths {
+      let disposition = try corpus.decodeFixture(path)
+      #expect(disposition.actual == disposition.expected, Comment(rawValue: path))
+    }
+  }
+
+  @Test("duplicate JSON members fail closed in fixtures and qualification metadata")
+  func duplicateMembersFailClosed() throws {
+    let corpus = try AbbeyContractCorpus.verify(at: Self.repositoryCorpusURL)
+    let fixture = try corpus.decodeFixture("v1/fixtures/invalid/jcs-duplicate-member.json")
+    #expect(fixture.actual == .duplicateMember)
+    #expect(fixture.actual == fixture.expected)
+
+    try Self.withScratchCorpus { scratch in
+      let lockURL = scratch.appending(path: "abbey-contracts.lock.json")
+      var lock = try String(contentsOf: lockURL, encoding: .utf8)
+      lock = lock.replacingOccurrences(
+        of: "{\n",
+        with: "{\n  \"source_revision\": \"1111111111111111111111111111111111111111\",\n",
+        options: [.anchored]
+      )
+      try Data(lock.utf8).write(to: lockURL)
+      #expect(throws: AbbeyContractError.lockInvalid(path: "abbey-contracts.lock.json")) {
+        try AbbeyContractCorpus.verify(at: scratch)
+      }
+    }
+  }
+
+  @Test("qualification rejects alternate source and recomputed corpus identities")
+  func exactIdentityIsRequired() throws {
+    try Self.withScratchCorpus { scratch in
+      let lockURL = scratch.appending(path: "abbey-contracts.lock.json")
+      var lock = try String(contentsOf: lockURL, encoding: .utf8)
+      lock = lock.replacingOccurrences(
+        of: sourceRevision, with: String(repeating: "1", count: 40))
+      try Data(lock.utf8).write(to: lockURL)
+      #expect(throws: AbbeyContractError.lockInvalid(path: "abbey-contracts.lock.json")) {
+        try AbbeyContractCorpus.verify(at: scratch)
+      }
+    }
+
+    try Self.withScratchCorpus { scratch in
+      let alternateDigest = try Self.rewriteWithAlternateQualifiedIdentity(at: scratch)
+      #expect(alternateDigest != aggregateDigest)
+      #expect(
+        try String(
+          contentsOf: scratch.appending(path: "abbey-contracts.lock.json"), encoding: .utf8
+        ).contains(alternateDigest))
+      #expect(
+        try String(
+          contentsOf: scratch.appending(path: "corpus/manifest.json"), encoding: .utf8
+        ).contains(alternateDigest))
+      #expect(throws: AbbeyContractError.lockInvalid(path: "abbey-contracts.lock.json")) {
+        try AbbeyContractCorpus.verify(at: scratch)
+      }
+    }
+  }
+
   @Test("tolerant metadata preserves bounded extensions")
   func extensionsArePreserved() throws {
     let corpus = try AbbeyContractCorpus.verify(at: Self.repositoryCorpusURL)
@@ -124,5 +187,60 @@ struct AbbeyContractCorpusTests {
       .deletingLastPathComponent()
       .deletingLastPathComponent()
       .appending(path: "Contracts/Abbey", directoryHint: .isDirectory)
+  }
+
+  private static func withScratchCorpus(_ body: (URL) throws -> Void) throws {
+    let scratch = FileManager.default.temporaryDirectory
+      .appending(path: "abbey-contract-swift-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    try FileManager.default.copyItem(at: repositoryCorpusURL, to: scratch)
+    try body(scratch)
+  }
+
+  private static func rewriteWithAlternateQualifiedIdentity(at root: URL) throws -> String {
+    let canonicalDigest = "72e241e34967df318376bf68f4a0e2db13f5ebf17d1a219709731f1f470dbe8e"
+    let manifestURL = root.appending(path: "corpus/manifest.json")
+    var manifest = try String(contentsOf: manifestURL, encoding: .utf8)
+    manifest = manifest.replacingOccurrences(
+      of: "\"redaction_profile\": \"abbey-contract-redaction-v1\"",
+      with: "\"redaction_profile\": \"alternate-contract-redaction-v1\""
+    )
+    let zeroed = manifest.replacingOccurrences(
+      of: canonicalDigest, with: String(repeating: "0", count: 64))
+    let object = try #require(
+      JSONSerialization.jsonObject(with: Data(manifest.utf8)) as? [String: Any]
+    )
+    let artifacts = try #require(object["artifacts"] as? [[String: Any]])
+    var entries = try artifacts.map { row -> (String, Int, String) in
+      (
+        try #require(row["path"] as? String), try #require(row["bytes"] as? Int),
+        try #require(row["sha256"] as? String)
+      )
+    }
+    entries.append(("manifest.json", zeroed.utf8.count, Self.sha256(Data(zeroed.utf8))))
+    entries.sort { $0.0.utf8.lexicographicallyPrecedes($1.0.utf8) }
+    var digest = SHA256()
+    digest.update(data: Data("abbey-contract-corpus-v1\0".utf8))
+    for entry in entries {
+      digest.update(data: Data(entry.0.utf8))
+      digest.update(data: Data([0]))
+      digest.update(data: Data(String(entry.1).utf8))
+      digest.update(data: Data([0]))
+      digest.update(data: Data(entry.2.utf8))
+      digest.update(data: Data([10]))
+    }
+    let alternateDigest = digest.finalize().map { String(format: "%02x", $0) }.joined()
+    manifest = manifest.replacingOccurrences(of: canonicalDigest, with: alternateDigest)
+    try Data(manifest.utf8).write(to: manifestURL)
+
+    let lockURL = root.appending(path: "abbey-contracts.lock.json")
+    let lock = try String(contentsOf: lockURL, encoding: .utf8)
+      .replacingOccurrences(of: canonicalDigest, with: alternateDigest)
+    try Data(lock.utf8).write(to: lockURL)
+    return alternateDigest
+  }
+
+  private static func sha256(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 }

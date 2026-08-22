@@ -7,6 +7,7 @@ public struct AbbeyQualifiedCorpus: Sendable {
   public let aggregateDigest: String
   public let artifactCount: Int
   public let totalBytes: Int
+  public let fixturePaths: [String]
 
   fileprivate let corpusURL: URL
   fileprivate let schemas: [String: [String: AnySendable]]
@@ -16,7 +17,7 @@ public struct AbbeyQualifiedCorpus: Sendable {
   }
 
   public func decodeFixture(at relativePath: String) throws -> AbbeyFixtureDisposition {
-    let fixture = try loadJSONObject(relativePath: relativePath)
+    let (fixture, hasDuplicateMember) = try loadFixture(relativePath: relativePath)
     guard Set(fixture.keys) == ["case_id", "schema", "expect", "document"],
       let caseID = fixture["case_id"] as? String,
       let schemaID = fixture["schema"] as? String,
@@ -28,7 +29,9 @@ public struct AbbeyQualifiedCorpus: Sendable {
     }
 
     let actual: AbbeyContractReasonCode
-    if !Self.isPrivacySafe(document) {
+    if hasDuplicateMember {
+      actual = .duplicateMember
+    } else if !Self.isPrivacySafe(document) {
       actual = .forbiddenContent
     } else if caseID == "jcs_number_outside_safe_domain", Self.containsUnsafeJCSNumber(document) {
       actual = .numericDomain
@@ -67,7 +70,7 @@ public struct AbbeyQualifiedCorpus: Sendable {
     guard disposition.actual == .valid, disposition.expected == .valid else {
       throw AbbeyContractError.fixtureInvalid(path: boundedPath(relativePath))
     }
-    let fixture = try loadJSONObject(relativePath: relativePath)
+    let (fixture, _) = try loadFixture(relativePath: relativePath)
     guard let document = fixture["document"] else {
       throw AbbeyContractError.fixtureInvalid(path: boundedPath(relativePath))
     }
@@ -78,14 +81,14 @@ public struct AbbeyQualifiedCorpus: Sendable {
     }
   }
 
-  private func loadJSONObject(relativePath: String) throws -> [String: Any] {
+  private func loadFixture(relativePath: String) throws -> ([String: Any], Bool) {
     let safePath = try validateRelativePath(relativePath)
     let data = try readBounded(corpusURL.appending(path: safePath), displayPath: safePath)
     do {
       guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         throw AbbeyContractError.fixtureInvalid(path: safePath)
       }
-      return object
+      return (object, try JSONDuplicateMemberScanner.containsDuplicate(in: data))
     } catch let error as AbbeyContractError {
       throw error
     } catch {
@@ -148,6 +151,19 @@ public struct AbbeyQualifiedCorpus: Sendable {
 
   private static func semanticReason(schemaID: String, document: Any) -> AbbeyContractReasonCode? {
     guard let object = document as? [String: Any] else { return nil }
+    if schemaID.hasSuffix("/identity/delegation-chain.schema.json"),
+      let hops = object["hops"] as? [[String: Any]],
+      let first = hops.first?["delegator_principal_id"] as? String
+    {
+      var seen: Set<String> = [first]
+      for hop in hops {
+        if let delegatee = hop["delegatee_principal_id"] as? String,
+          !seen.insert(delegatee).inserted
+        {
+          return .delegationCycle
+        }
+      }
+    }
     if schemaID.hasSuffix("/authorization/approval.schema.json"),
       object["approver_principal_id"] as? String == object["request_subject_principal_id"]
         as? String
@@ -364,6 +380,9 @@ public struct AbbeyQualifiedCorpus: Sendable {
 
 public enum AbbeyContractCorpus {
   private static let expectedRepository = "https://github.com/donaldfilimon/abi"
+  private static let expectedSourceRevision = "348754bdaaf59a40fbb858380f925e0aba95a23b"
+  private static let expectedAggregateDigest =
+    "72e241e34967df318376bf68f4a0e2db13f5ebf17d1a219709731f1f470dbe8e"
 
   public static func verify(at rootURL: URL) throws -> AbbeyQualifiedCorpus {
     let suppliedRoot = rootURL.standardizedFileURL
@@ -376,7 +395,10 @@ public enum AbbeyContractCorpus {
 
     let lockData = try readBounded(
       root.appending(path: "abbey-contracts.lock.json"), displayPath: "abbey-contracts.lock.json")
-    let lockObject = try strictJSONObject(lockData, path: "abbey-contracts.lock.json")
+    let lockObject: [String: Any]
+    do { lockObject = try strictJSONObject(lockData, path: "abbey-contracts.lock.json") } catch {
+      throw AbbeyContractError.lockInvalid(path: "abbey-contracts.lock.json")
+    }
     guard
       Set(lockObject.keys) == [
         "source_repository", "source_revision", "contract_major", "contract_revision",
@@ -388,15 +410,20 @@ public enum AbbeyContractCorpus {
       throw AbbeyContractError.lockInvalid(path: "abbey-contracts.lock.json")
     }
     guard lock.sourceRepository == expectedRepository,
-      lock.sourceRevision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil,
-      lock.aggregateDigest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+      lock.sourceRevision == expectedSourceRevision,
+      lock.contractMajor == 1,
+      lock.contractRevision == 1,
+      lock.aggregateDigest == expectedAggregateDigest
     else { throw AbbeyContractError.lockInvalid(path: "abbey-contracts.lock.json") }
 
     let corpus = root.appending(path: "corpus", directoryHint: .isDirectory)
     try requireDirectory(corpus, displayPath: "corpus")
     let manifestData = try readBounded(
       corpus.appending(path: "manifest.json"), displayPath: "manifest.json")
-    let manifestObject = try strictJSONObject(manifestData, path: "manifest.json")
+    let manifestObject: [String: Any]
+    do { manifestObject = try strictJSONObject(manifestData, path: "manifest.json") } catch {
+      throw AbbeyContractError.manifestInvalid(path: "manifest.json")
+    }
     guard
       Set(manifestObject.keys) == [
         "contract_major", "contract_revision", "algorithm", "redaction_profile", "artifacts",
@@ -411,6 +438,9 @@ public enum AbbeyContractCorpus {
       rawArtifacts.count == manifest.artifacts.count
     else { throw AbbeyContractError.manifestInvalid(path: "manifest.json") }
     guard manifest.algorithm == "abbey-contract-corpus-sha256-v1",
+      manifest.redactionProfile == "abbey-contract-redaction-v1",
+      manifest.contractMajor == 1,
+      manifest.contractRevision == 1,
       manifest.contractMajor == lock.contractMajor,
       manifest.contractRevision == lock.contractRevision,
       manifest.aggregateDigest == lock.aggregateDigest
@@ -469,6 +499,7 @@ public enum AbbeyContractCorpus {
       aggregateDigest: aggregate,
       artifactCount: indexed.count,
       totalBytes: totalBytes,
+      fixturePaths: indexed.keys.filter { $0.contains("/fixtures/") }.sorted(),
       corpusURL: corpus,
       schemas: schemas
     )
@@ -561,6 +592,138 @@ private struct AnySendable: @unchecked Sendable {
   init(_ value: Any) { self.value = value }
 }
 
+private struct JSONDuplicateMemberScanner {
+  private let bytes: [UInt8]
+  private var index = 0
+  private var duplicateFound = false
+
+  static func containsDuplicate(in data: Data) throws -> Bool {
+    var scanner = Self(bytes: Array(data))
+    try scanner.parseValue(depth: 0)
+    scanner.skipWhitespace()
+    guard scanner.index == scanner.bytes.count else { throw JSONScanError.invalid }
+    return scanner.duplicateFound
+  }
+
+  private mutating func parseValue(depth: Int) throws {
+    guard depth <= 128 else { throw JSONScanError.invalid }
+    skipWhitespace()
+    guard let byte = peek() else { throw JSONScanError.invalid }
+    switch byte {
+    case 0x7B: try parseObject(depth: depth + 1)
+    case 0x5B: try parseArray(depth: depth + 1)
+    case 0x22: _ = try parseString()
+    case 0x74: try consumeLiteral("true")
+    case 0x66: try consumeLiteral("false")
+    case 0x6E: try consumeLiteral("null")
+    case 0x2D, 0x30...0x39: parseNumber()
+    default: throw JSONScanError.invalid
+    }
+  }
+
+  private mutating func parseObject(depth: Int) throws {
+    try consume(0x7B)
+    skipWhitespace()
+    if consumeIfPresent(0x7D) { return }
+    var keys: Set<String> = []
+    while true {
+      skipWhitespace()
+      let key = try parseString()
+      if !keys.insert(key).inserted { duplicateFound = true }
+      skipWhitespace()
+      try consume(0x3A)
+      try parseValue(depth: depth)
+      skipWhitespace()
+      if consumeIfPresent(0x7D) { return }
+      try consume(0x2C)
+    }
+  }
+
+  private mutating func parseArray(depth: Int) throws {
+    try consume(0x5B)
+    skipWhitespace()
+    if consumeIfPresent(0x5D) { return }
+    while true {
+      try parseValue(depth: depth)
+      skipWhitespace()
+      if consumeIfPresent(0x5D) { return }
+      try consume(0x2C)
+    }
+  }
+
+  private mutating func parseString() throws -> String {
+    let start = index
+    try consume(0x22)
+    while let byte = peek() {
+      index += 1
+      if byte == 0x22 {
+        let encoded = Data(bytes[start..<index])
+        guard let value = try? JSONDecoder().decode(String.self, from: encoded) else {
+          throw JSONScanError.invalid
+        }
+        return value
+      }
+      if byte < 0x20 { throw JSONScanError.invalid }
+      if byte == 0x5C {
+        guard let escaped = peek() else { throw JSONScanError.invalid }
+        index += 1
+        if escaped == 0x75 {
+          guard index + 4 <= bytes.count,
+            bytes[index..<(index + 4)].allSatisfy(Self.isHexDigit)
+          else { throw JSONScanError.invalid }
+          index += 4
+        } else if ![0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74].contains(escaped) {
+          throw JSONScanError.invalid
+        }
+      }
+    }
+    throw JSONScanError.invalid
+  }
+
+  private mutating func parseNumber() {
+    while let byte = peek(),
+      byte == 0x2D || byte == 0x2B || byte == 0x2E || byte == 0x45 || byte == 0x65
+        || (0x30...0x39).contains(byte)
+    {
+      index += 1
+    }
+  }
+
+  private mutating func consumeLiteral(_ literal: String) throws {
+    let literalBytes = Array(literal.utf8)
+    guard index + literalBytes.count <= bytes.count,
+      Array(bytes[index..<(index + literalBytes.count)]) == literalBytes
+    else { throw JSONScanError.invalid }
+    index += literalBytes.count
+  }
+
+  private mutating func skipWhitespace() {
+    while let byte = peek(), [0x20, 0x09, 0x0A, 0x0D].contains(byte) { index += 1 }
+  }
+
+  private mutating func consume(_ byte: UInt8) throws {
+    guard consumeIfPresent(byte) else { throw JSONScanError.invalid }
+  }
+
+  private mutating func consumeIfPresent(_ byte: UInt8) -> Bool {
+    guard peek() == byte else { return false }
+    index += 1
+    return true
+  }
+
+  private func peek() -> UInt8? {
+    index < bytes.count ? bytes[index] : nil
+  }
+
+  private static func isHexDigit(_ byte: UInt8) -> Bool {
+    (0x30...0x39).contains(byte) || (0x41...0x46).contains(byte) || (0x61...0x66).contains(byte)
+  }
+}
+
+private enum JSONScanError: Error {
+  case invalid
+}
+
 private func validateRelativePath(_ path: String) throws -> String {
   guard !path.isEmpty, path.utf8.count <= 256, !path.contains("\\"), !path.hasPrefix("/"),
     !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: {
@@ -602,6 +765,9 @@ private func readBounded(_ url: URL, displayPath: String) throws -> Data {
 
 private func strictJSONObject(_ data: Data, path: String) throws -> [String: Any] {
   do {
+    guard try !JSONDuplicateMemberScanner.containsDuplicate(in: data) else {
+      throw AbbeyContractError.jsonInvalid(path: path)
+    }
     guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
       throw AbbeyContractError.jsonInvalid(path: path)
     }
