@@ -23,8 +23,6 @@ enum AbbeyServerResourceError: Error, CustomStringConvertible {
 }
 
 public func configure(_ app: Application) async throws {
-    let resourcesRoot = resourcesRootURL()
-
     // Fail loudly if the bundle's resources cannot be found at all. Continuing
     // here is what made the Linux failure so hard to see: FileMiddleware would
     // be handed a directory that gets CREATED empty below, Leaf would be handed
