@@ -374,7 +374,31 @@ public struct AbbeyQualifiedCorpus: Sendable {
   }
 
   private static func jsonEqual(_ lhs: Any, _ rhs: Any) -> Bool {
-    (lhs as AnyObject).isEqual(rhs)
+    if lhs is NSNull || rhs is NSNull {
+      return lhs is NSNull && rhs is NSNull
+    }
+    if let lhs = lhs as? String, let rhs = rhs as? String {
+      return lhs == rhs
+    }
+    if let lhs = lhs as? NSNumber, let rhs = rhs as? NSNumber {
+      let lhsIsBoolean = CFGetTypeID(lhs) == CFBooleanGetTypeID()
+      let rhsIsBoolean = CFGetTypeID(rhs) == CFBooleanGetTypeID()
+      if lhsIsBoolean || rhsIsBoolean {
+        return lhsIsBoolean && rhsIsBoolean && lhs.boolValue == rhs.boolValue
+      }
+      return lhs.compare(rhs) == .orderedSame
+    }
+    if let lhs = lhs as? [Any], let rhs = rhs as? [Any] {
+      return lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { jsonEqual($0, $1) }
+    }
+    if let lhs = lhs as? [String: Any], let rhs = rhs as? [String: Any] {
+      guard lhs.keys == rhs.keys else { return false }
+      return lhs.allSatisfy { key, value in
+        guard let other = rhs[key] else { return false }
+        return jsonEqual(value, other)
+      }
+    }
+    return false
   }
 }
 
