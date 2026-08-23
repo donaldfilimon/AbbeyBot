@@ -43,7 +43,7 @@ Run wrappers (load `.env` where relevant):
 bash Scripts/run.sh          # desktop
 bash Scripts/run-server.sh   # server
 bash Scripts/run-abbey.sh    # abbey CLI
-bash Scripts/swift-run.sh [serve|cli|…]   # raw SPM-style launch, Desktop-safe build path (prefer over bare `swift run` under Desktop/iCloud)
+bash Scripts/swift-run.sh [serve|cli|…]   # raw SPM-style launch with checkout-safe build path
 ```
 
 Dashboard SPA (`web/`, bun + Vite + React 19 + Biome + Vitest):
@@ -73,7 +73,7 @@ Optional Browserbase Functions (`functions/`, bun — not in verify-all): `cd fu
 
 **Sync cursor protocol:** desktop and CLI persist independent compound `(changedAt, stable ID)` cursors for all six entity streams. Incremental list requests use `since` + `after`; raw JSON-array responses publish the exact last-row boundary in `X-Abbey-Sync-Cursor-Time` / `X-Abbey-Sync-Cursor-ID`. Full pages advance only to that boundary, short pages advance through pull start, and legacy shared timestamps migrate automatically. Plain HTTP sync is accepted only for exact loopback hosts; remote sync requires HTTPS. This closes 500-row truncation and identical-timestamp loss. Remaining caveat: pull-start guards and LWW compare wall clocks, so significant desktop/server clock skew can still drop rows.
 
-**Build path note:** SwiftPM build dirs are redirected under `${TMPDIR}/AbbeyBot*.build` (see the run scripts) to avoid codesign failures from Desktop/iCloud extended attributes — don't expect `.build/` at the repo root to be authoritative.
+**Build path note:** SwiftPM build dirs are redirected under `${TMPDIR}/AbbeyBot*.build` (see the run scripts) to keep build output outside the checkout and avoid extended-attribute codesign failures — don't expect `.build/` at the repo root to be authoritative.
 
 ## Guardrails specific to this repo
 
