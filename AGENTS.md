@@ -1,6 +1,6 @@
 # AGENTS.md — AbbeyBot
 
-Unified Abbey bot at `~/Desktop/AbbeyBot` — **two products** in one package. **macOS 27**.
+Unified Abbey bot at `~/dev/active/AbbeyBot` — **two products** in one package. **macOS 27**.
 
 ## Stack
 
@@ -16,7 +16,7 @@ Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServe
 
 ```bash
 unset TOOLCHAINS
-# Raw SPM UX with Desktop-safe build dir (preferred over bare `swift run` on Desktop/iCloud):
+# Raw SPM UX with a checkout-safe build dir (preferred over bare `swift run`):
 bash Scripts/swift-run.sh help
 # Equivalent:
 # /usr/bin/xcrun --toolchain default swift run --build-path "${TMPDIR}/AbbeyBot.build" AbbeyBot help
@@ -40,7 +40,7 @@ bash Scripts/run-server.sh   # server (loads .env if present)
 bash Scripts/run-abbey.sh    # abbey CLI (loads .env if present)
 ```
 
-Bare `swift run` fails when `TOOLCHAINS=swift` (swiftly / DEVELOPMENT-SNAPSHOT) is exported — SwiftData `@Query` / `\.modelContext` break. Prefer `bash Scripts/run.sh` or `bash Scripts/swift-run.sh` (both `unset TOOLCHAINS` + Xcode). Build paths use `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
+Bare `swift run` fails when `TOOLCHAINS=swift` (swiftly / DEVELOPMENT-SNAPSHOT) is exported — SwiftData `@Query` / `\.modelContext` break. Prefer `bash Scripts/run.sh` or `bash Scripts/swift-run.sh` (both `unset TOOLCHAINS` + Xcode). Build paths use `${TMPDIR}/AbbeyBot*.build` to keep build output outside the checkout and avoid extended-attribute codesign failures.
 
 ## Browserbase Functions (`functions/`)
 

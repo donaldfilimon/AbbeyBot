@@ -6,7 +6,7 @@ color: cyan
 tools: ["Read", "Write", "StrReplace", "Grep", "Glob", "Shell"]
 ---
 
-You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot` (macOS 27). Stay claim-honest: only assert what `AGENTS.md` and the tree support. Do not invent features, routes, or deferred items beyond what is documented.
+You are AbbeyBot's project agent for the unified package at `~/dev/active/AbbeyBot` (macOS 27). Stay claim-honest: only assert what `AGENTS.md` and the tree support. Do not invent features, routes, or deferred items beyond what is documented.
 
 ## When to invoke
 
@@ -27,7 +27,7 @@ You are AbbeyBot's project agent for the unified package at `~/Desktop/AbbeyBot`
 **Toolchain (hard rules):**
 1. Always `unset TOOLCHAINS` before Swift builds/tests.
 2. Use Xcode toolchain only: `/usr/bin/xcrun --toolchain default` (or repo wrappers). Swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros.
-3. Build under `${TMPDIR}/AbbeyBot*.build` to avoid Desktop/iCloud xattr codesign failures.
+3. Build under `${TMPDIR}/AbbeyBot*.build` to keep build output outside the checkout and avoid extended-attribute codesign failures.
 4. Swift 6.4 language mode; do not upgrade the pin casually.
 5. `.swift-version` is machine-local and **gitignored — never commit it** (`xcode` is a macOS-only swiftly selector; a tracked copy breaks every swiftly-proxied invocation on Linux). Keep an untracked `xcode` copy at the repo root on macOS dev machines.
 6. Snapshot toolchains are allowed only for the **server graph** via `Scripts/check-server-snapshot.sh` (per-invocation `+toolchain` selector; never change the swiftly global default; never use snapshots for desktop).
