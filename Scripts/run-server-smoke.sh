@@ -42,6 +42,15 @@ fi
 export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
 export HTTP_HOSTNAME=127.0.0.1
 export HTTP_PORT=18080
+# Synthetic, per-run credential. It exists only in this smoke process tree and request headers;
+# never echo it, persist it, or add it to captured result files. The dedicated override lets the
+# security gate inject a known synthetic probe and prove the value never reaches captured output.
+ABBEY_API_TOKEN="${ABBEY_SERVER_SMOKE_TOKEN:-$(python3 -c 'import secrets; print("abbey-smoke-" + secrets.token_hex(32))')}"
+unset ABBEY_SERVER_SMOKE_TOKEN || true
+export ABBEY_API_TOKEN
+api_curl() {
+  curl -H "Authorization: Bearer ${ABBEY_API_TOKEN}" "$@"
+}
 
 echo "======== 3/8 boot server (db=$DATABASE_URL) ========"
 "$BIN" serve --hostname "$HTTP_HOSTNAME" --port "$HTTP_PORT" >/tmp/abbeyserver-smoke.log 2>&1 &
@@ -77,7 +86,7 @@ cat /tmp/abbeyserver-health.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-health.json")); assert d.get("status")=="ok", d'
 
 echo "======== 5/8 assert Leaf GET / + /dashboard ========"
-LEAF_STATUS="$(curl -s -o /tmp/abbeyserver-leaf.html -w '%{http_code}' "http://127.0.0.1:${HTTP_PORT}/")"
+LEAF_STATUS="$(api_curl -s -o /tmp/abbeyserver-leaf.html -w '%{http_code}' "http://127.0.0.1:${HTTP_PORT}/")"
 if [[ "$LEAF_STATUS" != "200" ]]; then
   echo "leaf_FAILED status=$LEAF_STATUS"
   head -c 400 /tmp/abbeyserver-leaf.html || true
@@ -96,10 +105,10 @@ else
 fi
 
 echo "======== 6/8 assert /api/status + ingest ========"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/status" >/tmp/abbeyserver-status.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/status" >/tmp/abbeyserver-status.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-status.json")); assert "databaseDialect" in d and d.get("messages", -1) >= 0, d'
 echo "status_ok dialect=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-status.json")).get("databaseDialect"))')"
-curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/ingest" \
+api_curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/ingest" \
   -H 'Content-Type: application/json' \
   -d '{"content":"hello abbey smoke","channelId":"smoke","guildId":"smoke","authorId":"smoke-user"}' \
   >/tmp/abbeyserver-ingest.json
@@ -107,76 +116,76 @@ python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-ingest.json")); asse
 echo "ingest_ok id=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-ingest.json")).get("discordMessageId"))')"
 # Retry the same discordMessageId — must report duplicate and leave the messages list unchanged.
 MSG_ID="$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-ingest.json")).get("discordMessageId",""))')"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-before-dedupe.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-before-dedupe.json
 BEFORE_COUNT="$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-messages-before-dedupe.json"))))')"
-curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/ingest" \
+api_curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/ingest" \
   -H 'Content-Type: application/json' \
   -d "{\"content\":\"hello abbey smoke retry\",\"channelId\":\"smoke\",\"guildId\":\"smoke\",\"authorId\":\"smoke-user\",\"discordMessageId\":\"${MSG_ID}\"}" \
   >/tmp/abbeyserver-ingest-dup.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-ingest-dup.json")); assert d.get("ok") is True and d.get("duplicate") is True, d'
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-after-dedupe.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-after-dedupe.json
 python3 -c 'import json,sys; before=int(sys.argv[1]); after=len(json.load(open("/tmp/abbeyserver-messages-after-dedupe.json"))); assert after==before, (before, after)' "$BEFORE_COUNT"
 echo "ingest_duplicate_ok count=${BEFORE_COUNT}"
 
 echo "======== 7/8 assert list APIs after ingest ========"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=10" >/tmp/abbeyserver-messages.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=10" >/tmp/abbeyserver-messages.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-messages.json")); assert isinstance(d, list) and len(d) >= 1, d'
 echo "messages_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-messages.json"))))')"
 # Ingest bumps channel, creates UserMemory + ReputationEvent, and logs InteractionLog.
 for path in users channels reputation interactions; do
-  curl -sf "http://127.0.0.1:${HTTP_PORT}/api/${path}?limit=10" >"/tmp/abbeyserver-${path}.json"
+  api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/${path}?limit=10" >"/tmp/abbeyserver-${path}.json"
   python3 -c "import json; d=json.load(open('/tmp/abbeyserver-${path}.json')); assert isinstance(d, list) and len(d) >= 1, d"
   echo "${path}_ok count=$(python3 -c "import json; print(len(json.load(open('/tmp/abbeyserver-${path}.json'))))")"
 done
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/equity?limit=10" >/tmp/abbeyserver-equity.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/equity?limit=10" >/tmp/abbeyserver-equity.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-equity.json")); assert isinstance(d, list), d'
 echo "equity_ok count=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-equity.json"))))')"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/metrics" >/tmp/abbeyserver-metrics.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/metrics" >/tmp/abbeyserver-metrics.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-metrics.json")); assert "messagesIngested" in d and d.get("messagesIngested", -1) >= 0, d'
 echo "metrics_ok messagesIngested=$(python3 -c 'import json; print(json.load(open("/tmp/abbeyserver-metrics.json")).get("messagesIngested"))')"
 
 echo "======== 8/8 assert /api/state remember + user + channel + tombstone ========"
-curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/remember" \
+api_curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/remember" \
   -H 'Content-Type: application/json' \
   -d '{"guildId":"smoke","userId":"smoke-user","fact":"likes smoke tests"}' \
   >/tmp/abbeyserver-remember.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-remember.json")); assert d.get("ok") is True, d'
 echo "remember_ok"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/state/user?guildId=smoke&userId=smoke-user" >/tmp/abbeyserver-state-user.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/state/user?guildId=smoke&userId=smoke-user" >/tmp/abbeyserver-state-user.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-state-user.json")); assert isinstance(d.get("facts"), list) and "likes smoke tests" in d["facts"], d'
 echo "state_user_ok facts=$(python3 -c 'import json; print(len(json.load(open("/tmp/abbeyserver-state-user.json"))["facts"]))')"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/state/channel?guildId=smoke&channelId=smoke" >/tmp/abbeyserver-state-channel.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/state/channel?guildId=smoke&channelId=smoke" >/tmp/abbeyserver-state-channel.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-state-channel.json")); assert "summary" in d, d'
 echo "state_channel_ok"
 
 # Soft-delete the smoke user; full list hides it, since=0 still returns the tombstone.
 SINCE_EPOCH="$(python3 -c 'import time; print(time.time()-30)')"
-curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/tombstone/user" \
+api_curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/tombstone/user" \
   -H 'Content-Type: application/json' \
   -d '{"guildId":"smoke","userId":"smoke-user"}' \
   >/tmp/abbeyserver-tombstone-user.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-tombstone-user.json")); assert d.get("ok") is True, d'
 echo "tombstone_user_ok"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10" >/tmp/abbeyserver-users-live.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10" >/tmp/abbeyserver-users-live.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-users-live.json")); assert isinstance(d, list) and all(u.get("deletedAt") in (None, "") for u in d) and not any(u.get("discordUserId")=="smoke-user" for u in d), d'
 echo "users_live_hides_tombstone_ok"
-curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10&since=${SINCE_EPOCH}" >/tmp/abbeyserver-users-since.json
+api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/users?limit=10&since=${SINCE_EPOCH}" >/tmp/abbeyserver-users-since.json
 python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-users-since.json")); assert any(u.get("discordUserId")=="smoke-user" and u.get("deletedAt") for u in d), d'
 echo "users_since_includes_tombstone_ok"
 
 # Soft-delete the smoke-ingest message (from step 5); full list hides it, since includes tombstone.
 MSG_ID="$(python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-ingest.json")); print(d.get("discordMessageId",""))')"
 if [[ -n "$MSG_ID" ]]; then
-  curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/tombstone/message" \
+  api_curl -sf -X POST "http://127.0.0.1:${HTTP_PORT}/api/state/tombstone/message" \
     -H 'Content-Type: application/json' \
     -d "{\"discordMessageId\":\"${MSG_ID}\"}" \
     >/tmp/abbeyserver-tombstone-message.json
   python3 -c 'import json; d=json.load(open("/tmp/abbeyserver-tombstone-message.json")); assert d.get("ok") is True, d'
   echo "tombstone_message_ok"
-  curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-live.json
+  api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50" >/tmp/abbeyserver-messages-live.json
   python3 -c 'import json,sys; mid=sys.argv[1]; d=json.load(open("/tmp/abbeyserver-messages-live.json")); assert isinstance(d, list) and not any(m.get("discordMessageId")==mid for m in d), d' "$MSG_ID"
   echo "messages_live_hides_tombstone_ok"
-  curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50&since=${SINCE_EPOCH}" >/tmp/abbeyserver-messages-since.json
+  api_curl -sf "http://127.0.0.1:${HTTP_PORT}/api/messages?limit=50&since=${SINCE_EPOCH}" >/tmp/abbeyserver-messages-since.json
   python3 -c 'import json,sys; mid=sys.argv[1]; d=json.load(open("/tmp/abbeyserver-messages-since.json")); assert any(m.get("discordMessageId")==mid and m.get("deletedAt") for m in d), d' "$MSG_ID"
   echo "messages_since_includes_tombstone_ok"
 else

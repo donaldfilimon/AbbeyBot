@@ -158,7 +158,7 @@ private struct StatusPageContext: Encodable {
 
 func routes(_ app: Application) throws {
     TwitchEventSubRoutes.register(on: app)
-    SocialRoutes.register(on: app)
+    SocialRoutes.registerGenericWebhooks(on: app)
 
     app.get("health") { req async -> HealthDTO in
         let runtime = req.application.botRuntime
@@ -176,7 +176,7 @@ func routes(_ app: Application) throws {
     /// surfaces, so the unauthorized case still refuses before touching the
     /// database.
     app.get { req async throws -> View in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        try AbbeyAPIAuth.requireConfiguredOperatorToken(req)
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
@@ -215,13 +215,17 @@ func routes(_ app: Application) throws {
         return try await req.fileio.asyncStreamFile(at: indexPath)
     }
 
-    app.get("api", "metrics") { req async throws -> MetricsDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    // All operator/state/sync/catalog API routes are registered through this one authenticated
+    // builder. Provider-native signed webhooks and the explicitly gated generic webhook are the
+    // only /api exceptions, registered above under their separate authentication policies.
+    let api = app.grouped("api").grouped(AbbeyOperatorAPIMiddleware())
+    SocialRoutes.registerOperatorRoutes(on: api)
+
+    api.get("metrics") { req async throws -> MetricsDTO in
         return await req.application.botRuntime.metricsSnapshot()
     }
 
-    app.get("api", "status") { req async throws -> StatusDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("status") { req async throws -> StatusDTO in
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)
@@ -243,8 +247,7 @@ func routes(_ app: Application) throws {
         )
     }
 
-    app.post("api", "ingest") { req async throws -> IngestResponseDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("ingest") { req async throws -> IngestResponseDTO in
         let body = try req.content.decode(IngestRequestDTO.self)
         let content = body.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else {
@@ -271,8 +274,7 @@ func routes(_ app: Application) throws {
 
     // Keyed shared-state reads/writes for the desktop app's sync client. Distinct from
     // the "recent N" list endpoints below, which aren't keyed by a specific user/channel.
-    app.get("api", "state", "user") { req async throws -> UserStateDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("state", "user") { req async throws -> UserStateDTO in
         guard let guildId = req.query[String.self, at: "guildId"], !guildId.isEmpty,
               let userId = req.query[String.self, at: "userId"], !userId.isEmpty
         else {
@@ -281,8 +283,7 @@ func routes(_ app: Application) throws {
         return await req.application.botRuntime.userState(userId: userId, guildId: guildId)
     }
 
-    app.get("api", "state", "channel") { req async throws -> ChannelStateDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("state", "channel") { req async throws -> ChannelStateDTO in
         guard let guildId = req.query[String.self, at: "guildId"], !guildId.isEmpty,
               let channelId = req.query[String.self, at: "channelId"], !channelId.isEmpty
         else {
@@ -291,8 +292,7 @@ func routes(_ app: Application) throws {
         return await req.application.botRuntime.channelState(channelId: channelId, guildId: guildId)
     }
 
-    app.post("api", "state", "remember") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "remember") { req async throws -> OkDTO in
         let body = try req.content.decode(RememberRequestDTO.self)
         let fact = body.fact.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !fact.isEmpty else {
@@ -302,8 +302,7 @@ func routes(_ app: Application) throws {
         return OkDTO(ok: true)
     }
 
-    app.post("api", "state", "forget") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "forget") { req async throws -> OkDTO in
         let body = try req.content.decode(ForgetRequestDTO.self)
         do {
             try await req.application.botRuntime.forget(userId: body.userId, guildId: body.guildId, index: body.index)
@@ -315,8 +314,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "tombstone", "user") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "tombstone", "user") { req async throws -> OkDTO in
         let body = try req.content.decode(TombstoneUserRequestDTO.self)
         do {
             try await req.application.botRuntime.tombstoneUser(userId: body.userId, guildId: body.guildId)
@@ -326,8 +324,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "tombstone", "channel") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "tombstone", "channel") { req async throws -> OkDTO in
         let body = try req.content.decode(TombstoneChannelRequestDTO.self)
         do {
             try await req.application.botRuntime.tombstoneChannel(channelId: body.channelId, guildId: body.guildId)
@@ -337,8 +334,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "tombstone", "message") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "tombstone", "message") { req async throws -> OkDTO in
         let body = try req.content.decode(TombstoneMessageRequestDTO.self)
         do {
             try await req.application.botRuntime.tombstoneMessage(discordMessageId: body.discordMessageId)
@@ -348,8 +344,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "tombstone", "reputation") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "tombstone", "reputation") { req async throws -> OkDTO in
         let body = try req.content.decode(TombstoneIdRequestDTO.self)
         do {
             try await req.application.botRuntime.tombstoneReputation(id: body.id)
@@ -359,8 +354,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "tombstone", "interaction") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "tombstone", "interaction") { req async throws -> OkDTO in
         let body = try req.content.decode(TombstoneIdRequestDTO.self)
         do {
             try await req.application.botRuntime.tombstoneInteraction(id: body.id)
@@ -370,8 +364,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "tombstone", "equity") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "tombstone", "equity") { req async throws -> OkDTO in
         let body = try req.content.decode(TombstoneEquityRequestDTO.self)
         do {
             try await req.application.botRuntime.tombstoneEquity(symbol: body.symbol)
@@ -381,8 +374,7 @@ func routes(_ app: Application) throws {
         }
     }
 
-    app.post("api", "state", "sync-status") { req async throws -> OkDTO in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.post("state", "sync-status") { req async throws -> OkDTO in
         let body = try req.content.decode(SyncStatusReportDTO.self)
         try await SyncStatusRepository.report(
             lastPullAt: body.lastPullAt,
@@ -395,13 +387,11 @@ func routes(_ app: Application) throws {
         return OkDTO(ok: true)
     }
 
-    app.get("api", "sync-status") { req async throws -> SyncStatusRecord in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("sync-status") { req async throws -> SyncStatusRecord in
         return try await SyncStatusRepository.current(on: req.db)
     }
 
-    app.get("api", "users") { req async throws -> Response in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("users") { req async throws -> Response in
         let highWatermark = Date()
         let cursor = syncCursorParam(req)
         let rows = try await MemoryRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
@@ -411,8 +401,7 @@ func routes(_ app: Application) throws {
         return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "channels") { req async throws -> Response in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("channels") { req async throws -> Response in
         let highWatermark = Date()
         let cursor = syncCursorParam(req)
         let rows = try await ChannelRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
@@ -422,8 +411,7 @@ func routes(_ app: Application) throws {
         return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "messages") { req async throws -> Response in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("messages") { req async throws -> Response in
         let highWatermark = Date()
         let cursor = syncCursorParam(req)
         let rows = try await MessageRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
@@ -435,8 +423,7 @@ func routes(_ app: Application) throws {
         return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "reputation") { req async throws -> Response in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("reputation") { req async throws -> Response in
         let highWatermark = Date()
         let cursor = syncCursorParam(req)
         let rows = try await ReputationRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
@@ -447,8 +434,7 @@ func routes(_ app: Application) throws {
         return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "interactions") { req async throws -> Response in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("interactions") { req async throws -> Response in
         let highWatermark = Date()
         let cursor = syncCursorParam(req)
         let rows = try await InteractionRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
@@ -459,8 +445,7 @@ func routes(_ app: Application) throws {
         return try syncListResponse(rows, boundary: boundary, highWatermark: highWatermark)
     }
 
-    app.get("api", "equity") { req async throws -> Response in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+    api.get("equity") { req async throws -> Response in
         let highWatermark = Date()
         let cursor = syncCursorParam(req)
         let rows = try await EquityRepository.recent(limit: clampedLimit(req), cursor: cursor, on: req.db)
@@ -473,7 +458,7 @@ func routes(_ app: Application) throws {
     }
 
     app.get { req async throws -> View in
-        try AbbeyAPIAuth.requireTokenIfConfigured(req)
+        try AbbeyAPIAuth.requireConfiguredOperatorToken(req)
         let runtime = req.application.botRuntime
         let metrics = await runtime.metricsSnapshot()
         let counts = try await StatusRepository.counts(on: req.db)

@@ -1,14 +1,23 @@
 import Foundation
 import Vapor
 
+struct AbbeyOperatorAPIMiddleware: AsyncMiddleware {
+    func respond(to request: Request, chainingTo next: AsyncResponder) async throws -> Response {
+        try AbbeyAPIAuth.requireConfiguredOperatorToken(request)
+        return try await next.respond(to: request)
+    }
+}
+
 enum AbbeyAPIAuth {
-    /// When `ABBEY_API_TOKEN` is set, require matching `Authorization: Bearer …` or `X-Abbey-Token`.
-    /// When unset (local smoke / desktop-adjacent), gated routes stay open for loopback ops.
-    /// Applied to mutating POSTs and list GET endpoints used by desktop pull sync.
-    /// When the token is set, `/dashboard` SPA list tabs also need that header (or leave the token unset for open local ops).
-    static func requireTokenIfConfigured(_ req: Request) throws {
+    /// Require both a non-blank server credential and a matching caller credential.
+    /// Missing server configuration is a service failure, while a missing or invalid caller
+    /// credential is an authentication failure. Health and static routes do not call this.
+    static func requireConfiguredOperatorToken(_ req: Request) throws {
         guard let expected = configuredToken else {
-            return
+            throw Abort(
+                .serviceUnavailable,
+                reason: "ABBEY_API_TOKEN must be configured before enabling operator API routes"
+            )
         }
         if let bearer = req.headers.bearerAuthorization?.token,
            constantTimeEqual(bearer, expected)
@@ -35,13 +44,7 @@ enum AbbeyAPIAuth {
             req.logger.warning("Webhook authentication bypass active via \(switchName)")
             return
         }
-        guard configuredToken != nil else {
-            throw Abort(
-                .serviceUnavailable,
-                reason: "ABBEY_API_TOKEN must be configured before enabling this webhook"
-            )
-        }
-        try requireTokenIfConfigured(req)
+        try requireConfiguredOperatorToken(req)
     }
 
     /// Used by provider-signed routes when missing provider credentials must fail closed.
