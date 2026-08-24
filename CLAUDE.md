@@ -59,7 +59,9 @@ bun run build      # tsc -b && vite build → packed into Sources/AbbeyServer/Re
 
 Optional Browserbase Functions (`functions/`, bun — not in verify-all): `cd functions && cp .env.example .env` then `bun run dev` / `bun run deploy`. See `functions/README.md`.
 
-**Gate of record:** see [`AGENTS.md` → Verify](./AGENTS.md#verify) — `verify-all.sh`, narrow smokes, CI secondary until billing unblocked.
+**Gate of record:** see [`AGENTS.md` → Verify](./AGENTS.md#verify) —
+`verify-all.sh`, narrow smokes, and hosted Linux CI as commit-specific secondary
+evidence. The disabled desktop job still requires a suitable macOS 27 runner.
 
 ## Architecture
 

@@ -9,7 +9,7 @@ Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Disco
 | Shared engine | `AbbeyServerKit` — Fluent-backed `BotRuntime` used by server + CLI |
 | CLI | `abbey` — terminal chat sharing the same brain, local SQLite |
 | Core | `AbbeyCore` — brain, personas, inference, DiscordBM |
-| Discord | DiscordBM gateway + REST (voice presence join/leave; audio deferred) |
+| Discord | DiscordBM gateway + REST; voice presence is verified, while consent-gated audio paths remain unverified in a live DAVE call |
 
 ## Run
 
@@ -60,7 +60,9 @@ bash Scripts/verify-all.sh         # complete local release gate
 
 CI (`.github/workflows/abbey-ci.yml`) runs the static/security check, lints/tests/builds the dashboard SPA, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`/`AbbeyServerTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
 
-**GitHub Actions billing:** this private repo's hosted workflows currently **`startup_failure` (0 jobs)** until Actions spending/quota is enabled under **Settings → Billing → Actions**. Use **`bash Scripts/verify-all.sh` locally** as the gate until then; after unblock, re-run **Abbey CI** (`abbey-ci`). CI is **not** green on GitHub today.
+Hosted Linux CI is operational; the latest documented PR runs passed. Treat
+those runs as evidence for their exact commits, not as a substitute for the
+local gate or for macOS desktop and live-service validation.
 
 ## Discord
 
@@ -74,7 +76,10 @@ Slash commands:
 - Memory and social brain: `/rep`, `/facts`, `/remember`, `/forget`, `/context`
 - Operations: `/status`, `/ping`, `/help`, `/industry`, `/persona`
 - Safety-scoped modules: `/mod` provides Abi moderation advice only; `/equity` is a synthetic factor screen, not market data or financial advice
-- Voice: `/voice join|leave` updates muted/deafened gateway presence only; no audio capture or playback
+- Voice: `/voice join|leave` controls gateway presence. Local capture, protected
+  send, receive, and playback paths are composed behind explicit operator gates,
+  but the advertised DAVE version remains `0` until a participant-consented live
+  Discord join/speak/hear/reconnect/leave run succeeds.
 
 Re-register slash commands after upgrading so Discord receives the expanded registry.
 
@@ -110,4 +115,21 @@ The `abbey` CLI also syncs with the same server: `/sync pull` (own persisted per
 
 ## Status
 
-Shipped: shared core helpers (`IngestScorer`, `ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA, desktop Interactions + sync feedback, voice **presence** (`/voice join|leave`), desktop↔server push + lossless compound-cursor pull with all-six-entity tombstones, CLI↔server sync (`/sync pull` + `/sync push`), and Twitch EventSub (HMAC verify, persistent replay dedup, chat + stream-lifecycle + follow/subscribe/cheer handling, env-gated six-type auto-subscribe — unverified against live Twitch). Still deferred: Discord Voice **audio** (Opus/UDP); true CRDT multi-writer merge (LWW + tombstones is the sync story instead).
+Verified shipped runtime: shared core helpers (`IngestScorer`,
+`ReputationMath`, `DiscordCopy`), AbbeyServerKit + CLI, `/dashboard` SPA,
+desktop Interactions + sync feedback, Discord voice presence, desktop↔server
+push + lossless compound-cursor pull with all-six-entity tombstones, CLI↔server
+sync (`/sync pull` + `/sync push`), and Twitch EventSub's locally tested HMAC,
+replay-dedup, chat, stream-lifecycle, follow, subscribe, and cheer paths.
+Implemented but not live-verified or claimed as shipped: consent-gated Discord
+audio send/receive/playback and Twitch service integration. Still deferred:
+true CRDT multi-writer merge (LWW + tombstones remains the sync story).
+
+## Related implementation
+
+The separate Rust `abbey-bot` repository is a serenity/poise Discord
+operational bot. It shares no runtime code or persistence with this Swift
+product. Do not combine their repositories or acceptance claims.
+Cross-language contract compatibility is reviewed through exact vendored
+corpus bytes and native consumer tests, not by importing one bot into the
+other.
