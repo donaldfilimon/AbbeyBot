@@ -19,6 +19,20 @@ enum AbbeyEntry {
         case "serve", "server":
             // Normalize role → Vapor `serve` (+ remaining vapor flags).
             await AbbeyServerMain.main(arguments: [program, "serve"] + rest)
+        case "quasar":
+            let quasarArgs = rest.first?.lowercased() == "serve" ? Array(rest.dropFirst()) : rest
+            do {
+                let configuration = try QuasarServePolicy.prepare(arguments: quasarArgs)
+                await AbbeyServerMain.main(
+                    arguments: [program, "serve"] + configuration.vaporArguments,
+                    mode: .quasarOnly(
+                        allowsTokenlessLoopback: configuration.allowsTokenlessLoopback
+                    )
+                )
+            } catch {
+                Self.writeStandardError("error: \(error.localizedDescription)\n")
+                Foundation.exit(2)
+            }
         case "cli", "abbey", "repl":
             do {
                 try await AbbeyCLIMain.main(arguments: [program] + rest)
@@ -77,6 +91,7 @@ enum AbbeyEntry {
           swift run                              desktop companion
           swift run AbbeyBot serve [vapor args]  AbbeyServer HTTP + Discord
           swift run AbbeyBot cli                 abbey terminal REPL
+          swift run AbbeyBot quasar serve        loopback Quasar API on port 4700
           swift run AbbeyBot help
 
         Wrappers: Scripts/swift-run.sh (TMPDIR build path) | run.sh | run-server.sh | run-abbey.sh

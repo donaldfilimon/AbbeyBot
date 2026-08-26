@@ -485,6 +485,82 @@ struct DiscordBridgeLifecycleTests {
         await bridge.disconnect()
     }
 
+    @Test("participant snapshots are ephemeral, content-free, and follow moves immediately")
+    func participantSnapshotTracksCurrentChannelWithoutExposingIDs() async throws {
+        let driver = FakeDiscordGatewayDriver()
+        let factory = FakeDiscordGatewayDriverFactory([driver])
+        let bridge = makeBridge(factory: factory)
+        try await connectReady(bridge: bridge, driver: driver, userID: "42")
+
+        for (user, channel) in [("100", "channel"), ("101", "channel"), ("102", "other")] {
+            await driver.emit(try voiceStateEvent(
+                guildID: "guild",
+                channelID: channel,
+                userID: user,
+                sessionID: "ephemeral"
+            ))
+        }
+        #expect(await eventually {
+            await bridge.voiceParticipantSnapshot(guildID: "guild", channelID: "channel").count == 2
+        })
+        let snapshot = await bridge.voiceParticipantSnapshot(guildID: "guild", channelID: "channel")
+        #expect(snapshot.participantDigests == [
+            LiveMediaQualificationCoordinator.participantDigest("100"),
+            LiveMediaQualificationCoordinator.participantDigest("101"),
+        ])
+        #expect(snapshot.participantDigests.allSatisfy { $0.count == 64 })
+        #expect(!snapshot.isComplete)
+
+        await driver.emit(try voiceStateEvent(
+            guildID: "guild",
+            channelID: "other",
+            userID: "100",
+            sessionID: "moved"
+        ))
+        #expect(await eventually {
+            await bridge.voiceParticipantSnapshot(guildID: "guild", channelID: "channel").count == 1
+        })
+
+        await bridge.disconnect()
+        #expect(await bridge.voiceParticipantSnapshot(guildID: "guild", channelID: "channel").count == 0)
+    }
+
+    @Test("GUILD_CREATE establishes completeness and a bounded-cache overflow revokes it")
+    func participantSnapshotCompletenessFailsClosedAtCapacity() async throws {
+        let driver = FakeDiscordGatewayDriver()
+        let factory = FakeDiscordGatewayDriverFactory([driver])
+        let bridge = makeBridge(factory: factory)
+        try await connectReady(bridge: bridge, driver: driver, userID: "42")
+
+        await bridge.installInitialVoiceStates(
+            guildID: "guild",
+            states: [
+                (userID: "42", channelID: "channel"),
+                (userID: "100", channelID: "channel"),
+            ]
+        )
+        let complete = await bridge.voiceParticipantSnapshot(
+            guildID: "guild",
+            channelID: "channel"
+        )
+        #expect(complete.isComplete)
+        #expect(complete.count == 1)
+
+        await bridge.installInitialVoiceStates(
+            guildID: "guild",
+            states: (0...2_048).map {
+                (userID: "participant-\($0)", channelID: Optional("channel"))
+            }
+        )
+        let overflowed = await bridge.voiceParticipantSnapshot(
+            guildID: "guild",
+            channelID: "channel"
+        )
+        #expect(!overflowed.isComplete)
+        #expect(overflowed.count <= 2_048)
+        await bridge.disconnect()
+    }
+
     @Test("a confirmed server-side channel move retargets later mute updates instead of moving the bot back")
     func serverSideChannelMoveRetargetsMuteUpdates() async throws {
         let driver = FakeDiscordGatewayDriver()

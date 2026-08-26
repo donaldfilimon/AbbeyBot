@@ -1,4 +1,5 @@
 import AbbeyCore
+import AbbeyQuasarKit
 import DiscordBM
 import Fluent
 import Foundation
@@ -108,7 +109,11 @@ public actor BotRuntime {
     let dqnAgent: DQNAgent
     let scheduler: FluentScheduler
     let personaRouter: ABIRouter
-    let inferenceRouter: InferenceRouter
+    public let inferenceRouter: InferenceRouter
+    public let knowledgeIndex: KnowledgeIndex
+    public let knowledgeInitializationError: String?
+    public let quasarService: QuasarService?
+    public let quasarInitializationError: String?
     let discordBridge = DiscordBridge()
     let twitchBridge = TwitchBridge()
     /// Local WDBX segment store (`~/.abbey/wdbx/`).
@@ -158,12 +163,27 @@ public actor BotRuntime {
             consolidationIntervalMinutes: { config.memoryConsolidationIntervalMinutes }
         )
         self.personaRouter = ABIRouter(eventBus: bus)
-        self.inferenceRouter = InferenceRouter(
+        let inferenceRouter = InferenceRouter(
             eventBus: bus,
             metrics: metrics,
             currentMode: { config.inferenceMode },
             remoteEndpoint: { config.remoteEndpoint }
         )
+        self.inferenceRouter = inferenceRouter
+        do {
+            self.knowledgeIndex = KnowledgeIndex(documents: try KnowledgeSnapshotLoader.loadVerified())
+            self.knowledgeInitializationError = nil
+        } catch {
+            self.knowledgeIndex = KnowledgeIndex()
+            self.knowledgeInitializationError = OperatorFacingError.message(error)
+        }
+        do {
+            self.quasarService = try QuasarService(planner: .abbey(router: inferenceRouter))
+            self.quasarInitializationError = nil
+        } catch {
+            self.quasarService = nil
+            self.quasarInitializationError = OperatorFacingError.message(error)
+        }
     }
 
     public func start() async {
@@ -224,6 +244,7 @@ public actor BotRuntime {
         await scheduler.stop()
         await twitchBridge.disconnect()
         await discordBridge.disconnect()
+        await quasarService?.shutdown()
         discordState = .disconnected
     }
 
@@ -426,7 +447,14 @@ public actor BotRuntime {
         let summary = (try? await ChannelRepository.summary(channelId: channelId, guildId: guildId, on: app.db)) ?? ""
         let facts = (try? await MemoryRepository.facts(userId: authorId, guildId: guildId, on: app.db)) ?? []
         let reputation = await socialBrain.reputation(userId: authorId, guildId: guildId)
-        return PersonaContext(channelSummary: summary, userFacts: facts, reputation: reputation)
+        return PersonaContext(
+            channelSummary: summary,
+            userFacts: facts,
+            reputation: reputation,
+            knowledgeIndex: knowledgeIndex,
+            knowledgeScopes: ["public"],
+            evidenceBudget: 4
+        )
     }
 
     private func auditSlashCommand(
@@ -769,6 +797,25 @@ public actor BotRuntime {
                     profile.rawValue,
                     suffixEmpty: profile.promptSuffix.isEmpty
                 )
+            },
+            knowledge: { [weak self] query, _, _ in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard (2...300).contains(trimmed.count) else { return "Knowledge queries must contain 2...300 characters." }
+                let hits = await self.knowledgeIndex.search(.init(text: trimmed, callerScope: "public", evidenceBudget: 4))
+                guard !hits.isEmpty else { return "No applicable signed-corpus evidence found." }
+                return hits.map { hit in
+                    "**\(hit.title)** [\(hit.provenance.rawValue)]\n\(hit.excerpt)\n`\(hit.sourceRepository)@\(hit.sourceRevision.prefix(12)):\(hit.sourcePath)`"
+                }.joined(separator: "\n\n")
+            },
+            quasar: { [weak self] request in
+                guard let self, let service = self.quasarService else { return self?.quasarInitializationError ?? DiscordCopy.engineUnavailable }
+                let facts = QuasarAuthorizationFacts.current(
+                    guildID: request.guildID,
+                    initiatorID: request.initiatorID,
+                    discordPermissionAllowed: request.managerAuthorized
+                )
+                return await service.handleDiscord(request, facts: facts)
             },
             audit: { [weak self] commandName, userId, guildId, succeeded, latencyMs in
                 guard let self else { return }

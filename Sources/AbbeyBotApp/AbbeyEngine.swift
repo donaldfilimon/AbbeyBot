@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 import Observation
 import AbbeyCore
+import AbbeyQuasarKit
 import AbbeyMediaMacOS
 
 /// SwiftUI façade over SwiftData + AbbeyCore actors.
@@ -23,6 +24,13 @@ final class AbbeyEngine {
     let confirmationGate: ConfirmationGate
     let personaRouter: ABIRouter
     let inferenceRouter: InferenceRouter
+    let knowledgeIndex: KnowledgeIndex
+    let knowledgeInitializationError: String?
+    private(set) var knowledgeSnapshotStatus: KnowledgeSnapshotOperatorStatus?
+    private(set) var knowledgeRefreshCandidate: KnowledgeRefreshCandidate?
+    private(set) var knowledgeRefreshError: String?
+    let quasarService: QuasarService?
+    let quasarInitializationError: String?
     var equityEngine = EquityResearchEngine()
     /// Local WDBX segment store (`~/.abbey/wdbx/`). Optional if init fails.
     let wdbxStore: WDBXStore?
@@ -104,12 +112,28 @@ final class AbbeyEngine {
         )
         self.confirmationGate = ConfirmationGate(eventBus: bus, requireConfirmation: { config.confirmationRequiredForDestructiveActions })
         self.personaRouter = ABIRouter(eventBus: bus)
-        self.inferenceRouter = InferenceRouter(
+        let inferenceRouter = InferenceRouter(
             eventBus: bus,
             metrics: metrics,
             currentMode: { config.inferenceMode },
             remoteEndpoint: { config.remoteEndpoint }
         )
+        self.inferenceRouter = inferenceRouter
+        do {
+            self.knowledgeIndex = KnowledgeIndex(documents: try KnowledgeSnapshotLoader.loadVerified())
+            self.knowledgeInitializationError = nil
+            self.knowledgeSnapshotStatus = try? KnowledgeRefreshOperator.bundledStatus()
+        } catch {
+            self.knowledgeIndex = KnowledgeIndex()
+            self.knowledgeInitializationError = OperatorFacingError.message(error)
+        }
+        do {
+            self.quasarService = try QuasarService(planner: .abbey(router: inferenceRouter))
+            self.quasarInitializationError = nil
+        } catch {
+            self.quasarService = nil
+            self.quasarInitializationError = OperatorFacingError.message(error)
+        }
         self.mediaSession = MediaSessionModel(discordBridge: discordBridge)
 
         if storeDegraded {
@@ -180,6 +204,71 @@ final class AbbeyEngine {
            config.dryRun || !config.discordBotToken.isEmpty {
             Task { await self.connectDiscord() }
         }
+    }
+
+    func searchKnowledge(_ query: String) async -> [KnowledgeHit] {
+        await knowledgeIndex.search(.init(text: query, requiredScopes: [], callerScope: "public"))
+    }
+
+    func stageKnowledgeRefresh() async {
+        do {
+            let root = try KnowledgeRefreshOperator.repositoryRoot()
+            let candidate = try await Task.detached(priority: .utility) {
+                try KnowledgeRefreshOperator.stage(root: root)
+            }.value
+            knowledgeRefreshCandidate = candidate
+            knowledgeRefreshError = nil
+        } catch {
+            knowledgeRefreshError = error.localizedDescription
+        }
+    }
+
+    func applyKnowledgeRefresh(reviewedDigest: String) async {
+        guard let candidate = knowledgeRefreshCandidate, candidate.digest == reviewedDigest else {
+            knowledgeRefreshError = "The reviewed digest must exactly match the staged candidate."
+            return
+        }
+        do {
+            let root = try KnowledgeRefreshOperator.repositoryRoot()
+            let documents = try await Task.detached(priority: .utility) {
+                try KnowledgeRefreshOperator.apply(root: root, reviewedDigest: reviewedDigest)
+            }.value
+            await knowledgeIndex.replace(with: documents)
+            let manifest = try JSONDecoder().decode(
+                KnowledgeManifest.self,
+                from: Data(contentsOf: root.appendingPathComponent("Sources/AbbeyCore/Resources/KnowledgeSnapshot/manifest.json"))
+            )
+            knowledgeSnapshotStatus = .init(
+                aggregateDigest: manifest.aggregateDigest,
+                entryCount: manifest.entries.count,
+                formatVersion: manifest.formatVersion,
+                snapshotPath: root.appendingPathComponent("Sources/AbbeyCore/Resources/KnowledgeSnapshot").path
+            )
+            knowledgeRefreshCandidate = nil
+            knowledgeRefreshError = nil
+        } catch {
+            knowledgeRefreshError = error.localizedDescription
+        }
+    }
+
+    func approveDiscordQuasarProposal(_ proposal: QuasarProposal) async throws -> String {
+        guard let quasarService else {
+            throw QuasarError.processFailed(quasarInitializationError ?? "Quasar is unavailable.")
+        }
+        let currentPermission = await discordBridge.currentManagerAuthorization(
+            guildID: proposal.facts.guildID,
+            userID: proposal.facts.initiatorID
+        )
+        let current = QuasarAuthorizationFacts.current(
+            guildID: proposal.facts.guildID,
+            initiatorID: proposal.facts.initiatorID,
+            discordPermissionAllowed: currentPermission
+        )
+        return try await quasarService.approveDiscordProposal(
+            id: proposal.id,
+            digest: proposal.digest,
+            revalidated: current
+        )
     }
 
     /// Best-effort pull from AbbeyServer list endpoints into SwiftData.
@@ -384,7 +473,14 @@ final class AbbeyEngine {
             FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == userKey })
         ).first?.facts) ?? []
         let reputation = await socialBrain.reputation(userId: authorId, guildId: guildId)
-        return PersonaContext(channelSummary: summary, userFacts: facts, reputation: reputation)
+        return PersonaContext(
+            channelSummary: summary,
+            userFacts: facts,
+            reputation: reputation,
+            knowledgeIndex: knowledgeIndex,
+            knowledgeScopes: ["public"],
+            evidenceBudget: 4
+        )
     }
 
     private func craftReply(
@@ -547,6 +643,7 @@ final class AbbeyEngine {
         eventListenerTask?.cancel()
         eventListenerTask = nil
         await scheduler.stop()
+        await quasarService?.shutdown()
         await mediaSession.shutdown()
         await discordBridge.disconnect()
         await refreshDiscordStatus()
@@ -814,6 +911,29 @@ final class AbbeyEngine {
                     profile.rawValue,
                     suffixEmpty: profile.promptSuffix.isEmpty
                 )
+            },
+            knowledge: { [weak self] query, _, guildID in
+                guard let self else { return DiscordCopy.engineUnavailable }
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard (2...300).contains(trimmed.count) else { return "Knowledge queries must contain 2...300 characters." }
+                let hits = await self.knowledgeIndex.search(.init(
+                    text: trimmed,
+                    callerScope: guildID == "DM" ? "public" : "public",
+                    evidenceBudget: 4
+                ))
+                guard !hits.isEmpty else { return "No applicable signed-corpus evidence found." }
+                return hits.map { hit in
+                    "**\(hit.title)** [\(hit.provenance.rawValue)]\n\(hit.excerpt)\n`\(hit.sourceRepository)@\(hit.sourceRevision.prefix(12)):\(hit.sourcePath)`"
+                }.joined(separator: "\n\n")
+            },
+            quasar: { [weak self] request in
+                guard let self, let service = self.quasarService else { return self?.quasarInitializationError ?? DiscordCopy.engineUnavailable }
+                let facts = QuasarAuthorizationFacts.current(
+                    guildID: request.guildID,
+                    initiatorID: request.initiatorID,
+                    discordPermissionAllowed: request.managerAuthorized
+                )
+                return await service.handleDiscord(request, facts: facts)
             },
             audit: { [weak self] commandName, userId, guildId, succeeded, latencyMs in
                 guard let self else { return }

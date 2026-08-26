@@ -13,8 +13,9 @@
 // WHAT THIS IS NOT. The frame is split into opaque byte ranges. This is not a
 // codec-specific RTP payload format: no H.264 FU-A fragmentation unit, no VP8
 // payload descriptor, no AV1 OBU aggregation header is written, and no
-// receiver interoperability is claimed. This file delivers the RTP framing and
-// the MTU budget only, and no video path in this repository works.
+// receiver interoperability is claimed. This lower-level primitive now
+// supplies the shared sealed-datagram budget used by the RFC 6184 H.264
+// packetizer; live H.264 frames are never fragmented by this opaque splitter.
 
 /// Failures at the video packetization boundary.
 public enum DiscordVoiceVideoPacketizationError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -158,7 +159,10 @@ public struct DiscordVoiceVideoPacketizer: Equatable, Sendable {
             throw DiscordVoiceVideoPacketizationError.emptyFrame
         }
         let budget = maximumFragmentByteCount
-        let count = (byteCount + budget - 1) / budget
+        // Overflow-safe ceiling division. `byteCount + budget - 1` traps for
+        // a hostile `Int.max` query even though the answer should simply fail
+        // the fragment bound.
+        let count = 1 + (byteCount - 1) / budget
         guard count <= maximumFragmentsPerFrame else {
             throw DiscordVoiceVideoPacketizationError.frameTooLarge(
                 fragments: count,

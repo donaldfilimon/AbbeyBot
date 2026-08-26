@@ -1,0 +1,23 @@
+{
+  "formatVersion": 1,
+  "sourceRepository": "mlai",
+  "sourceRevision": "e3ddd0966a86510b2f0bd895257832996148d50f",
+  "stack": {
+    "runtime": "Bun",
+    "framework": "Next.js 15",
+    "language": "TypeScript/TSX",
+    "react": "React 19",
+    "styling": "Tailwind CSS 4"
+  },
+  "files": {
+    ".gitignore": "d2a283258489d9b06ad583c185d9f94a9a66136252775c950bb9996f98b98c80",
+    "app/globals.css": "42070e0b45bb201b2b838a52aaaa6e965f964e0b542d97f1fe517fe59c4b75a8",
+    "app/layout.tsx": "30f18704e1911308341fe943b81c2d89030ba09d790c2b24f204eb0a4d36525a",
+    "app/page.tsx": "e848a4729e7aa1710f4bd6d5fed07406c03979152577763c785eb7da065163a5",
+    "bun.lock": "714e63210b52bd416b311cc1dc1753946e6d3aeca846e4e2d03b1cd8323d0f24",
+    "next.config.mjs": "450f0af4f4c1ecc4c7180f2e364c8a59bfed69dd350fb6b47bce8641c2a37786",
+    "package.json": "c1a7ec58bb42bd159efac2f5bcf313319bc2ac4b5f016bd7e3c61deca3d5870d",
+    "postcss.config.mjs": "a1a188221f064d964dd9958c3d48b0c23252fabbeb6099d95ee8e15c764718b0",
+    "tsconfig.json": "1519b3e409b0059442adaf1c0c663021214e914c0f80b40cbba705e378aa4537"
+  }
+}

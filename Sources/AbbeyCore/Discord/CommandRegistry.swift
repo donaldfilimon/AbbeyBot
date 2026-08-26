@@ -25,6 +25,14 @@ public enum CommandRegistry {
             .init(name: "mod", description: "Moderation advice only (no actions)", options: [situationOption]),
             .init(name: "ping", description: "Latency check"),
             .init(name: "help", description: "List AbbeyBot slash commands"),
+            .init(name: "knowledge", description: "Search AbbeyBot's signed ecosystem corpus", options: [knowledgeQueryOption]),
+            .init(
+                name: "quasar",
+                description: "Inspect sites or create a desktop-approved Quasar proposal",
+                options: quasarSubcommands,
+                default_member_permissions: [.administrator],
+                dm_permission: false
+            ),
             .init(
                 name: "voice",
                 description: "Join or leave voice (presence only — no audio)",
@@ -96,6 +104,27 @@ public enum CommandRegistry {
         name: "leave",
         description: "Leave voice (presence only — no audio)"
     )
+    public static let knowledgeQueryOption = ApplicationCommand.Option(
+        type: .string, name: "query", description: "Bounded search query", required: true
+    )
+    public static let quasarSiteOption = ApplicationCommand.Option(
+        type: .string, name: "site", description: "Quasar site identifier", required: true
+    )
+    public static let quasarNameOption = ApplicationCommand.Option(
+        type: .string, name: "name", description: "New site name", required: true
+    )
+    public static let quasarPromptOption = ApplicationCommand.Option(
+        type: .string, name: "prompt", description: "Requested site change", required: true
+    )
+    public static let quasarSubcommands: [ApplicationCommand.Option] = [
+        .init(type: .subCommand, name: "list", description: "List Quasar sites"),
+        .init(type: .subCommand, name: "status", description: "Show site status", options: [quasarSiteOption]),
+        .init(type: .subCommand, name: "create", description: "Propose creating a site", options: [quasarNameOption, quasarPromptOption]),
+        .init(type: .subCommand, name: "edit", description: "Propose editing a site", options: [quasarSiteOption, quasarPromptOption]),
+        .init(type: .subCommand, name: "archive", description: "Propose recoverable archival", options: [quasarSiteOption]),
+        .init(type: .subCommand, name: "preview-start", description: "Propose starting preview", options: [quasarSiteOption]),
+        .init(type: .subCommand, name: "preview-stop", description: "Propose stopping preview", options: [quasarSiteOption]),
+    ]
 
     public static func register(client: any DiscordClient, guildId: String?) async throws {
         if let guildId, !guildId.isEmpty {

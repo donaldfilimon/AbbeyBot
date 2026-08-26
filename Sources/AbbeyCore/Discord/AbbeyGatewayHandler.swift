@@ -1,6 +1,14 @@
 import DiscordBM
 
 extension AbbeyGatewayHandler {
+    func onGuildCreate(_ payload: Gateway.GuildCreate) async {
+        await bridge.handleGuildCreate(payload, generation: generation)
+    }
+
+    func onGuildDelete(_ payload: UnavailableGuild) async {
+        await bridge.handleGuildDelete(payload, generation: generation)
+    }
+
     func onVoiceStateUpdate(_ payload: VoiceState) async {
         await bridge.handleVoiceStateUpdate(payload, generation: generation)
     }

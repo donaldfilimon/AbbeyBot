@@ -164,11 +164,13 @@ if [[ $FAILED -ne 0 ]]; then echo "SERVER_LINUX_FAIL: build failed"; exit 1; fi
 # ---------------------------------------------------------------------------
 SERVER_GRAPH_PATHS=(
     Sources/AbbeyCore
+    Sources/AbbeyQuasarKit
     Sources/AbbeyServerKit
     Sources/AbbeyServer
     Sources/AbbeyCLI
     Sources/AbbeyEntry
     Tests/AbbeyCoreTests
+    Tests/AbbeyQuasarKitTests
     Tests/AbbeyCLITests
     Tests/AbbeyServerKitTests
     Tests/AbbeyServerTests

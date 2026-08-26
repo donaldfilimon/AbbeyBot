@@ -43,6 +43,8 @@ public struct InteractionRouter: Sendable {
         industry: @escaping DiscordSlashHandlers.IndustryHandler = {
             DiscordCopy.industryProfile(AppConfig.shared.industryProfile.rawValue, suffixEmpty: true)
         },
+        knowledge: @escaping DiscordSlashHandlers.KnowledgeHandler = { _, _, _ in DiscordCopy.engineUnavailable },
+        quasar: @escaping DiscordSlashHandlers.QuasarHandler = { _ in DiscordCopy.engineUnavailable },
         audit: @escaping DiscordSlashHandlers.AuditHandler = { _, _, _, _, _ in },
         accessPolicy: DiscordCommandAccessPolicy = .fromEnvironment()
     ) {
@@ -64,6 +66,8 @@ public struct InteractionRouter: Sendable {
             equity: equity,
             modAdvice: modAdvice,
             industry: industry,
+            knowledge: knowledge,
+            quasar: quasar,
             audit: audit
         )
         self.accessPolicy = accessPolicy
@@ -85,11 +89,23 @@ public struct InteractionRouter: Sendable {
     public static func shouldRespondEphemerally(for commandName: String) -> Bool {
         switch commandName {
         case "facts", "remember", "forget", "rep", "context", "summarize",
-             "persona", "model", "status", "voice":
+             "persona", "model", "status", "voice", "knowledge", "quasar":
             return true
         default:
             return false
         }
+    }
+
+    /// Audit success means an authorized command completed its handler path
+    /// and both Discord response writes succeeded. Domain-level refusals are
+    /// still valid command responses; transport failures and denied commands
+    /// must never be recorded as successful interactions.
+    public static func auditSucceeded(
+        authorized: Bool,
+        initialResponseSucceeded: Bool,
+        finalResponseSucceeded: Bool
+    ) -> Bool {
+        authorized && initialResponseSucceeded && finalResponseSucceeded
     }
 
     public func handle(_ interaction: Interaction, client: any DiscordClient) async {
@@ -120,13 +136,19 @@ public struct InteractionRouter: Sendable {
             ?? interaction.channel_id?.rawValue
             ?? ""
 
-        try? await client.createInteractionResponse(
-            id: interaction.id,
-            token: interaction.token,
-            payload: .deferredChannelMessageWithSource(
-                isEphemeral: Self.shouldRespondEphemerally(for: data.name)
-            )
-        ).guardSuccess()
+        let initialResponseSucceeded: Bool
+        do {
+            try await client.createInteractionResponse(
+                id: interaction.id,
+                token: interaction.token,
+                payload: .deferredChannelMessageWithSource(
+                    isEphemeral: Self.shouldRespondEphemerally(for: data.name)
+                )
+            ).guardSuccess()
+            initialResponseSucceeded = true
+        } catch {
+            initialResponseSucceeded = false
+        }
 
         let targetUserId = (try? data.option(named: "user")?.requireString()) ?? userId
         let requestedModel = try? data.option(named: "mode")?.requireString()
@@ -137,6 +159,7 @@ public struct InteractionRouter: Sendable {
             || permissions?.contains(.moderateMembers) == true
         let mutatesGlobalState = data.name == "persona"
             || data.name == "voice"
+            || data.name == "quasar"
             || (data.name == "model" && requestedModel != nil)
         let authorized = accessPolicy.allows(.init(
             commandName: data.name,
@@ -195,6 +218,16 @@ public struct InteractionRouter: Sendable {
             result = await handlers.ping()
         case "help":
             result = await handlers.help()
+        case "knowledge":
+            let query = (try? data.option(named: "query")?.requireString()) ?? ""
+            result = await handlers.knowledge(query, userId, guildId)
+        case "quasar":
+            result = await handleQuasar(
+                data: data,
+                userId: userId,
+                guildId: guildId,
+                managerAuthorized: isAdministrator || isModerator
+            )
         case "voice":
             result = await handleVoice(data: data, guildId: guildId)
         default:
@@ -204,17 +237,56 @@ public struct InteractionRouter: Sendable {
         // Discord hard limit 2000 chars
         let clipped = result.count > 1900 ? String(result.prefix(1890)) + "…" : result
 
-        try? await client.updateOriginalInteractionResponse(
-            token: interaction.token,
-            payload: .init(content: clipped)
-        ).guardSuccess()
+        let finalResponseSucceeded: Bool
+        do {
+            try await client.updateOriginalInteractionResponse(
+                token: interaction.token,
+                payload: .init(content: clipped)
+            ).guardSuccess()
+            finalResponseSucceeded = true
+        } catch {
+            finalResponseSucceeded = false
+        }
         await handlers.audit(
             data.name,
             userId,
             guildId,
-            authorized,
+            Self.auditSucceeded(
+                authorized: authorized,
+                initialResponseSucceeded: initialResponseSucceeded,
+                finalResponseSucceeded: finalResponseSucceeded
+            ),
             IngestScorer.latencyMilliseconds(since: started)
         )
+    }
+
+    private func handleQuasar(
+        data: Interaction.ApplicationCommand,
+        userId: String,
+        guildId: String,
+        managerAuthorized: Bool
+    ) async -> String {
+        guard let sub = data.options?.first else { return "Choose a Quasar subcommand." }
+        let action: DiscordQuasarAction
+        switch sub.name {
+        case "list": action = .list
+        case "status": action = .status
+        case "create": action = .create
+        case "edit": action = .edit
+        case "archive": action = .archive
+        case "preview-start": action = .previewStart
+        case "preview-stop": action = .previewStop
+        default: return "Unknown Quasar subcommand."
+        }
+        return await handlers.quasar(.init(
+            action: action,
+            siteID: try? sub.option(named: "site")?.requireString(),
+            name: try? sub.option(named: "name")?.requireString(),
+            prompt: try? sub.option(named: "prompt")?.requireString(),
+            initiatorID: userId,
+            guildID: guildId,
+            managerAuthorized: managerAuthorized
+        ))
     }
 
     private func handleVoice(

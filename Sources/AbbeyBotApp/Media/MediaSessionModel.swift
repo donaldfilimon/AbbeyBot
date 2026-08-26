@@ -85,8 +85,8 @@ struct MediaSessionVoiceSnapshot: Equatable, Sendable {
 /// Redacted presence-only snapshot of the bot's gateway `VOICE_STATE_UPDATE`.
 /// No guild, channel, or other identifier crosses into the app layer — only
 /// whether Discord has confirmed the bot in a channel and the last confirmed
-/// self-mute/self-deaf bits. There is no Opus/UDP audio; these flags change
-/// what Discord and other members observe, not what is heard.
+/// self-mute/self-deaf bits. These flags change what Discord and other members
+/// observe and remain independent of any separately qualified media lane.
 struct VoicePresenceSnapshot: Equatable, Sendable {
     let confirmedInChannel: Bool
     let selfMute: Bool
@@ -129,6 +129,52 @@ struct DiscordBridgeVoicePresencePort: VoicePresencePort {
 private struct UnavailableVoicePresencePort: VoicePresencePort {
     func currentPresence() async -> VoicePresenceSnapshot { .unconfirmed }
     func setMuteState(selfMute: Bool, selfDeaf: Bool) async -> VoiceUpdateResult { .gatewayUnavailable }
+}
+
+protocol VoiceQualificationPort: Sendable {
+    func participantSnapshot(guildID: String, channelID: String) async
+        -> DiscordVoiceParticipantSnapshot
+    func managerAuthorized(guildID: String, userID: String) async -> Bool
+    func participantSnapshots(guildID: String, channelID: String) async
+        -> AsyncStream<DiscordVoiceParticipantSnapshot>
+}
+
+extension VoiceQualificationPort {
+    func participantSnapshots(guildID: String, channelID: String) async
+        -> AsyncStream<DiscordVoiceParticipantSnapshot>
+    {
+        let snapshot = await participantSnapshot(guildID: guildID, channelID: channelID)
+        return AsyncStream { continuation in
+            continuation.yield(snapshot)
+            continuation.finish()
+        }
+    }
+}
+
+private struct UnavailableVoiceQualificationPort: VoiceQualificationPort {
+    func participantSnapshot(guildID: String, channelID: String) async
+        -> DiscordVoiceParticipantSnapshot
+    {
+        .init(count: 0, participantDigests: [], isComplete: false)
+    }
+    func managerAuthorized(guildID: String, userID: String) async -> Bool { false }
+}
+
+private struct DiscordBridgeVoiceQualificationPort: VoiceQualificationPort {
+    let bridge: DiscordBridge
+    func participantSnapshot(guildID: String, channelID: String) async
+        -> DiscordVoiceParticipantSnapshot
+    {
+        await bridge.voiceParticipantSnapshot(guildID: guildID, channelID: channelID)
+    }
+    func managerAuthorized(guildID: String, userID: String) async -> Bool {
+        await bridge.currentManagerAuthorization(guildID: guildID, userID: userID)
+    }
+    func participantSnapshots(guildID: String, channelID: String) async
+        -> AsyncStream<DiscordVoiceParticipantSnapshot>
+    {
+        await bridge.voiceParticipantSnapshots(guildID: guildID, channelID: channelID)
+    }
 }
 
 protocol MediaSessionPlatform: Sendable {
@@ -297,8 +343,8 @@ actor MacOSMediaSessionPlatform: MediaSessionPlatform {
 }
 
 enum MediaSessionCopy {
-    static let daveUnavailable = "DAVE unavailable — encrypted Discord media cannot start"
-    static let captureUnavailable = "Capture/transmit disabled — Discord media is not shipped"
+    static let daveUnavailable = "DAVE closed — ordinary sessions advertise version 0"
+    static let captureUnavailable = "Media lanes closed until a fresh qualified consent epoch"
     static let sessionOnlySelection = "Device selections are session-only and are not persisted"
     static let localPreviewOnly =
         "Local preview only — frames stay on this Mac and are not transmitted; Discord video is not shipped"
@@ -340,7 +386,7 @@ enum MediaSessionCopy {
 
     static func muteDeafen(confirmed: Bool, selfMute: Bool, selfDeaf: Bool) -> String {
         guard confirmed else { return "Not confirmed in a voice channel yet" }
-        return "self-mute: \(selfMute ? "on" : "off"), self-deaf: \(selfDeaf ? "on" : "off") (presence only — no audio exists to silence)"
+        return "self-mute: \(selfMute ? "on" : "off"), self-deaf: \(selfDeaf ? "on" : "off") (Gateway presence state; independent of media-lane consent)"
     }
 
     static func transport(_ snapshot: MediaSessionVoiceSnapshot) -> String {
@@ -374,12 +420,17 @@ final class MediaSessionModel {
     private let controller: DiscordVoiceController
     private let platform: any MediaSessionPlatform
     private let presencePort: any VoicePresencePort
+    private let qualificationPort: any VoiceQualificationPort
+    private let qualificationCoordinator: LiveMediaQualificationCoordinator
+    private let videoNegotiationProbe: DiscordVideoNegotiationProbe?
     @ObservationIgnored private var snapshotTask: Task<Void, Never>?
     @ObservationIgnored private var captureEventTask: Task<Void, Never>?
+    @ObservationIgnored private var participantObservationTask: Task<Void, Never>?
     @ObservationIgnored private var activeCaptureGeneration: UInt64?
     @ObservationIgnored private var activePreviewGeneration: UInt64?
     @ObservationIgnored private var localCaptureStartInFlight = false
     @ObservationIgnored private var operationGeneration: UInt64 = 0
+    @ObservationIgnored private var currentConsentAttestation = false
 
     private(set) var snapshot: MediaSessionVoiceSnapshot
     private(set) var permissions: [MediaPermissionKind: MediaAuthorizationStatus]
@@ -398,9 +449,19 @@ final class MediaSessionModel {
     /// signaling/transport/DAVE probe rather than raw gateway presence.
     private(set) var voicePresenceConfirmed = false
     /// Discord-confirmed self-mute/self-deaf presence bits. Presence only —
-    /// there is no Opus/UDP audio yet, so these never imply real audio is muted.
+    /// these never substitute for the separate media-lane consent controls.
     private(set) var voiceSelfMute = false
     private(set) var voiceSelfDeaf = false
+    private(set) var qualification = LiveMediaQualificationSnapshot(
+        canaryEnabled: false,
+        epoch: nil,
+        lastCloseReason: nil,
+        daveProtocolVersion: nil,
+        codec: nil
+    )
+    private(set) var qualificationParticipantCount = 0
+    private(set) var qualificationManagerAuthorized = false
+    private(set) var videoNegotiationObservations: [DiscordVideoNegotiationObservation] = []
 
     var signalingLabel: String { MediaSessionCopy.signaling(snapshot) }
     var transportLabel: String { MediaSessionCopy.transport(snapshot) }
@@ -416,8 +477,17 @@ final class MediaSessionModel {
             selfDeaf: voiceSelfDeaf
         )
     }
-    var daveLabel: String { MediaSessionCopy.daveUnavailable }
-    var captureLabel: String { MediaSessionCopy.captureUnavailable }
+    var daveLabel: String {
+        if qualification.epoch != nil, snapshot.mediaAdapterAvailable {
+            return "DAVE v\(qualification.daveProtocolVersion ?? 0) qualified canary"
+        }
+        return MediaSessionCopy.daveUnavailable
+    }
+    var captureLabel: String {
+        qualification.epoch == nil
+            ? MediaSessionCopy.captureUnavailable
+            : "Consent epoch open; only explicitly selected lanes may start"
+    }
     var localPreviewLabel: String { MediaSessionCopy.localPreviewOnly }
     var localCaptureActive: Bool {
         runtime.microphoneCapturing || runtime.cameraCapturing || runtime.screenCapturing
@@ -429,11 +499,22 @@ final class MediaSessionModel {
     init(
         controller: DiscordVoiceController,
         platform: any MediaSessionPlatform,
-        presencePort: any VoicePresencePort = UnavailableVoicePresencePort()
+        presencePort: any VoicePresencePort = UnavailableVoicePresencePort(),
+        qualificationPort: any VoiceQualificationPort = UnavailableVoiceQualificationPort(),
+        videoNegotiationProbe: DiscordVideoNegotiationProbe? = nil,
+        qualificationEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.controller = controller
         self.platform = platform
         self.presencePort = presencePort
+        self.qualificationPort = qualificationPort
+        self.videoNegotiationProbe = videoNegotiationProbe
+        self.qualificationCoordinator = LiveMediaQualificationCoordinator(
+            environment: qualificationEnvironment
+        ) { reason in
+            await platform.stopAllCapture()
+            _ = await controller.closeConsentEpoch()
+        }
         snapshot = .idle
         permissions = Dictionary(
             uniqueKeysWithValues: MediaPermissionKind.allCases.map { ($0, .notDetermined) }
@@ -444,11 +525,12 @@ final class MediaSessionModel {
     convenience init(discordBridge: DiscordBridge) {
         let configuration: DiscordVoiceControllerConfiguration
         do {
-            configuration = try DiscordVoiceControllerConfiguration()
+            configuration = try DiscordVoiceControllerConfiguration(requiresConsentEpoch: true)
         } catch {
             preconditionFailure("Static voice-controller configuration is invalid")
         }
         let controller: DiscordVoiceController
+        let videoNegotiationProbe = DiscordVideoNegotiationProbe()
         // One shared audio engine boundary: the platform's device selection,
         // kill switch, and runtime snapshot operate on the same adapter whose
         // capture frames feed the Discord capture loop.
@@ -466,7 +548,8 @@ final class MediaSessionModel {
 #if canImport(AbbeyMediaNative)
             factory = DiscordVoiceNativeControlSessionFactory(
                 captureSource: microphone,
-                playbackSink: speaker
+                playbackSink: speaker,
+                videoNegotiationProbe: videoNegotiationProbe
             )
 #else
             factory = DiscordVoicePortableSessionFactory()
@@ -482,11 +565,163 @@ final class MediaSessionModel {
         self.init(
             controller: controller,
             platform: MacOSMediaSessionPlatform(audio: audio, microphone: microphone),
-            presencePort: DiscordBridgeVoicePresencePort(bridge: discordBridge)
+            presencePort: DiscordBridgeVoicePresencePort(bridge: discordBridge),
+            qualificationPort: DiscordBridgeVoiceQualificationPort(bridge: discordBridge),
+            videoNegotiationProbe: videoNegotiationProbe
         )
     }
 
+    /// Opens a fresh, exact-participant consent epoch and uses its content-free
+    /// lease to construct one DAVE-capable canary connection. Manager authority
+    /// is fetched live; a checkbox can attest consent but can never substitute
+    /// for the current participant or permission facts.
+    func openQualificationAndJoin(
+        guildID: String,
+        channelID: String,
+        managerUserID: String,
+        allCurrentParticipantsConsented: Bool,
+        capabilities: Set<LiveMediaCapability>
+    ) async {
+        let guildID = guildID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let channelID = channelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let managerUserID = managerUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !guildID.isEmpty, !channelID.isEmpty, !managerUserID.isEmpty else {
+            operatorError = "Guild, channel, and authorizing manager user IDs are required."
+            return
+        }
+        guard !isOperationInFlight else { return }
+        operationGeneration &+= 1
+        let localGeneration = operationGeneration
+        isOperationInFlight = true
+        operatorError = nil
+        currentConsentAttestation = allCurrentParticipantsConsented
+        defer {
+            if operationGeneration == localGeneration { isOperationInFlight = false }
+        }
+        let participants = await qualificationPort.participantSnapshot(
+            guildID: guildID,
+            channelID: channelID
+        )
+        guard operationGeneration == localGeneration else { return }
+        let managerAuthorized = await qualificationPort.managerAuthorized(
+            guildID: guildID,
+            userID: managerUserID
+        )
+        guard operationGeneration == localGeneration else { return }
+        qualificationParticipantCount = participants.count
+        qualificationManagerAuthorized = managerAuthorized
+        do {
+            let epoch = try await qualificationCoordinator.open(
+                guildID: guildID,
+                guildAuthorizationClass: "discord-manager-authorized-canary",
+                participantDigests: participants.participantDigests,
+                participantSetComplete: participants.isComplete
+                    && participants.count == participants.participantDigests.count,
+                allCurrentParticipantsConsented: allCurrentParticipantsConsented,
+                managerAuthorized: managerAuthorized,
+                capabilities: capabilities,
+                daveProtocolVersion: 1,
+                codec: "H264"
+            )
+            guard operationGeneration == localGeneration else {
+                await qualificationCoordinator.close(.connectionReplaced)
+                return
+            }
+            let lease = try await qualificationCoordinator.qualificationLease()
+            guard operationGeneration == localGeneration else {
+                await qualificationCoordinator.close(.connectionReplaced)
+                return
+            }
+            let joined = MediaSessionVoiceSnapshot(await controller.join(
+                guildID: guildID,
+                channelID: channelID,
+                qualificationLease: lease
+            ))
+            guard operationGeneration == localGeneration else {
+                _ = await controller.leave()
+                await qualificationCoordinator.close(.connectionReplaced)
+                return
+            }
+            snapshot = joined
+            qualification = await qualificationCoordinator.snapshot()
+            observeParticipants(
+                guildID: guildID,
+                channelID: channelID,
+                epochHash: epoch.hash
+            )
+            videoNegotiationObservations = await videoNegotiationProbe?.observations() ?? []
+            if snapshot.phase == .failed {
+                stopParticipantObservation()
+                await qualificationCoordinator.close(.connectionReplaced)
+                qualification = await qualificationCoordinator.snapshot()
+                operatorError = "The qualified media connection failed closed. No media was sent."
+            }
+        } catch {
+            guard operationGeneration == localGeneration else { return }
+            qualification = await qualificationCoordinator.snapshot()
+            operatorError = Self.qualificationMessage(error)
+        }
+    }
+
+    /// Rechecks live permission and participant facts for an open epoch. Any
+    /// difference triggers the coordinator kill switch before the UI updates.
+    func refreshQualification(
+        guildID: String,
+        channelID: String,
+        managerUserID: String,
+        allCurrentParticipantsConsented: Bool
+    ) async {
+        qualification = await qualificationCoordinator.snapshot()
+        if qualification.epoch == nil { stopParticipantObservation() }
+        videoNegotiationObservations = await videoNegotiationProbe?.observations() ?? []
+        guard let epochHash = qualification.epoch?.hash else { return }
+        currentConsentAttestation = allCurrentParticipantsConsented
+        let participants = await qualificationPort.participantSnapshot(
+            guildID: guildID,
+            channelID: channelID
+        )
+        let managerAuthorized = await qualificationPort.managerAuthorized(
+            guildID: guildID,
+            userID: managerUserID
+        )
+        guard await qualificationCoordinator.snapshot().epoch?.hash == epochHash else { return }
+        qualificationParticipantCount = participants.count
+        qualificationManagerAuthorized = managerAuthorized
+        do {
+            try await qualificationCoordinator.revalidate(
+                expectedEpochHash: epochHash,
+                participantDigests: participants.participantDigests,
+                participantSetComplete: participants.isComplete
+                    && participants.count == participants.participantDigests.count,
+                managerAuthorized: managerAuthorized,
+                allCurrentParticipantsConsented: allCurrentParticipantsConsented
+            )
+        } catch {
+            operatorError = Self.qualificationMessage(error)
+        }
+        qualification = await qualificationCoordinator.snapshot()
+    }
+
+    func closeQualification(_ reason: LiveMediaEpochCloseReason = .operatorStop) async {
+        operationGeneration &+= 1
+        let localGeneration = operationGeneration
+        isOperationInFlight = true
+        currentConsentAttestation = false
+        stopParticipantObservation()
+        await qualificationCoordinator.close(reason)
+        guard operationGeneration == localGeneration else { return }
+        qualification = await qualificationCoordinator.snapshot()
+        runtime = await platform.runtimeSnapshot()
+        snapshot = MediaSessionVoiceSnapshot(await controller.currentSnapshot())
+        isOperationInFlight = false
+    }
+
     func joinSignaling(guildID: String, channelID: String) async {
+        if qualification.epoch != nil {
+            stopParticipantObservation()
+            await qualificationCoordinator.close(.connectionReplaced)
+            qualification = await qualificationCoordinator.snapshot()
+        }
         let guildID = guildID.trimmingCharacters(in: .whitespacesAndNewlines)
         let channelID = channelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !guildID.isEmpty, !channelID.isEmpty else {
@@ -511,6 +746,11 @@ final class MediaSessionModel {
     }
 
     func leave() async {
+        if qualification.epoch != nil {
+            stopParticipantObservation()
+            await qualificationCoordinator.close(.operatorStop)
+            qualification = await qualificationCoordinator.snapshot()
+        }
         operationGeneration &+= 1
         let localGeneration = operationGeneration
         isOperationInFlight = true
@@ -527,6 +767,11 @@ final class MediaSessionModel {
     }
 
     func disconnect() async {
+        if qualification.epoch != nil {
+            stopParticipantObservation()
+            await qualificationCoordinator.close(.connectionReplaced)
+            qualification = await qualificationCoordinator.snapshot()
+        }
         operationGeneration &+= 1
         let localGeneration = operationGeneration
         isOperationInFlight = true
@@ -544,6 +789,11 @@ final class MediaSessionModel {
 
     /// Awaited kill path: capture stops first, then generation invalidation and socket teardown.
     func stopAllMedia() async {
+        if qualification.epoch != nil {
+            stopParticipantObservation()
+            await qualificationCoordinator.close(.emergencyStop)
+            qualification = await qualificationCoordinator.snapshot()
+        }
         operationGeneration &+= 1
         let localGeneration = operationGeneration
         isOperationInFlight = true
@@ -565,7 +815,13 @@ final class MediaSessionModel {
         snapshotTask = nil
         captureEventTask?.cancel()
         captureEventTask = nil
+        participantObservationTask?.cancel()
+        participantObservationTask = nil
         invalidateLocalCapture()
+        if qualification.epoch != nil {
+            stopParticipantObservation()
+            await qualificationCoordinator.close(.operatorStop)
+        }
         await platform.stopAllCapture()
         await controller.shutdown()
         snapshot = MediaSessionVoiceSnapshot(await controller.currentSnapshot())
@@ -596,8 +852,8 @@ final class MediaSessionModel {
     }
 
     /// Sends a presence-only self-mute/self-deaf `VOICE_STATE_UPDATE`. There is
-    /// no Opus/UDP audio yet, so this changes only what Discord and other
-    /// members observe about the bot's voice state — never local capture.
+    /// this changes what Discord and other members observe about the bot's
+    /// presence and never authorizes, starts, or stops local media capture.
     /// `voiceSelfMute`/`voiceSelfDeaf` update only after Discord's echo is
     /// picked up by a following `refreshVoicePresence()`.
     func setMuteDeafen(selfMute: Bool, selfDeaf: Bool) async {
@@ -737,6 +993,47 @@ final class MediaSessionModel {
         }
     }
 
+    private func observeParticipants(
+        guildID: String,
+        channelID: String,
+        epochHash: String
+    ) {
+        participantObservationTask?.cancel()
+        let qualificationPort = qualificationPort
+        participantObservationTask = Task { [weak self] in
+            let stream = await qualificationPort.participantSnapshots(
+                guildID: guildID,
+                channelID: channelID
+            )
+            for await participants in stream {
+                guard !Task.isCancelled, let self else { return }
+                let current = await self.qualificationCoordinator.snapshot()
+                guard current.epoch?.hash == epochHash else { return }
+                self.qualification = current
+                self.qualificationParticipantCount = participants.count
+                do {
+                    try await self.qualificationCoordinator.revalidate(
+                        expectedEpochHash: epochHash,
+                        participantDigests: participants.participantDigests,
+                        participantSetComplete: participants.isComplete
+                            && participants.count == participants.participantDigests.count,
+                        managerAuthorized: self.qualificationManagerAuthorized,
+                        allCurrentParticipantsConsented: self.currentConsentAttestation
+                    )
+                } catch {
+                    self.operatorError = Self.qualificationMessage(error)
+                    self.qualification = await self.qualificationCoordinator.snapshot()
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopParticipantObservation() {
+        participantObservationTask?.cancel()
+        participantObservationTask = nil
+    }
+
     private func startLocalCapture(
         preview: Bool,
         _ operation: (any MediaSessionPlatform) async throws -> UInt64
@@ -835,6 +1132,9 @@ final class MediaSessionModel {
                 operatorError = "The local media operation failed. No media was sent."
             case .interrupted, .sourceUnavailable:
                 operatorError = "Local capture stopped safely. No media was sent."
+                if qualification.epoch != nil {
+                    Task { await self.closeQualification(.sourceInterrupted) }
+                }
             case .stopped, .starting, .capturing:
                 break
             }
@@ -892,6 +1192,28 @@ final class MediaSessionModel {
             "Local capture is already running. Stop it before starting another."
         default:
             "The local media operation failed. No media was sent."
+        }
+    }
+
+    private static func qualificationMessage(_ error: any Error) -> String {
+        switch error {
+        case LiveMediaQualificationError.canaryDisabled:
+            "Canary mode is disabled. Set ABBEY_MEDIA_QUALIFICATION_CANARY=1 for an authorized witnessed run."
+        case LiveMediaQualificationError.managerUnauthorized:
+            "Current Discord manager authorization could not be verified. Qualification stayed closed."
+        case LiveMediaQualificationError.emptyParticipantSet:
+            "No human participants are currently observed in that voice channel."
+        case LiveMediaQualificationError.participantSetIncomplete:
+            "Discord has not supplied a complete bounded participant set. Media stayed closed."
+        case LiveMediaQualificationError.consentIncomplete:
+            "Every currently observed participant must consent to the selected media capabilities."
+        case LiveMediaQualificationError.epochMismatch:
+            "The participant set changed. Media stopped and a fresh consent epoch is required."
+        case LiveMediaQualificationError.unsupportedCodec,
+             LiveMediaQualificationError.unsupportedDAVEVersion:
+            "The observed DAVE/codec combination is not qualified; media stayed closed."
+        default:
+            "Live media qualification failed closed. No media was sent."
         }
     }
 

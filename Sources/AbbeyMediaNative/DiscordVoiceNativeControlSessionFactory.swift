@@ -17,6 +17,7 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     /// Playback boundary for received audio. Injected because the concrete sink
     /// lives in AbbeyBotApp, which this target cannot depend on.
     private let playbackSink: (any DiscordVoicePlaybackSink)?
+    private let videoNegotiationProbe: DiscordVideoNegotiationProbe?
 
     /// `.locallyComposed` once BOTH directions are actually composed — capture
     /// in, playback out — because that is when real audio can flow on this
@@ -30,7 +31,8 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     public init(
         daveAdapter: NativeDAVEControlAdapter? = nil,
         captureSource: (any DiscordVoiceCaptureSource)? = nil,
-        playbackSink: (any DiscordVoicePlaybackSink)? = nil
+        playbackSink: (any DiscordVoicePlaybackSink)? = nil,
+        videoNegotiationProbe: DiscordVideoNegotiationProbe? = nil
     ) {
         if let daveAdapter {
             self.makeDAVEAdapter = { daveAdapter }
@@ -39,6 +41,7 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
         }
         self.captureSource = captureSource
         self.playbackSink = playbackSink
+        self.videoNegotiationProbe = videoNegotiationProbe
     }
 
     public func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient {
@@ -50,7 +53,8 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
         )
         return makeGatewayClient(
             daveAdapter: daveAdapter,
-            mediaPlane: mediaPlane
+            mediaPlane: mediaPlane,
+            availability: mediaAdapterAvailability
         )
     }
 
@@ -59,6 +63,12 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
     }
 
     public func makeSessionComponents() -> DiscordVoiceSessionComponents {
+        makeSessionComponents(qualificationLease: nil)
+    }
+
+    public func makeSessionComponents(
+        qualificationLease: DiscordVoiceQualificationLease?
+    ) -> DiscordVoiceSessionComponents {
         let daveAdapter = makeDAVEAdapter()
         let udp = DiscordVoiceUDPSessionAdapter()
         let mediaPlane = DiscordVoiceNativeMediaPlane(
@@ -77,7 +87,26 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
         // `any DiscordVoiceGatewaySessionClient` would risk dispatching to the
         // protocol extension's nil-returning default, and receive would then
         // never learn a sender — silently, with no error.
-        let gateway = makeGatewayClient(daveAdapter: daveAdapter, mediaPlane: mediaPlane)
+        let admittedLease: DiscordVoiceQualificationLease? = if
+            mediaAdapterAvailability.permitsLocalMedia,
+            let qualificationLease,
+            qualificationLease.consumeForConstruction()
+        { qualificationLease } else { nil }
+        let availability: DiscordVoiceMediaAdapterAvailability = if admittedLease != nil {
+            .fullyWired
+        } else {
+            mediaAdapterAvailability
+        }
+        let videoRequested = admittedLease?.capabilities.contains(where: {
+            $0 == .cameraSend || $0 == .cameraReceive
+                || $0 == .screenSend || $0 == .screenReceive
+        }) == true
+        let gateway = makeGatewayClient(
+            daveAdapter: daveAdapter,
+            mediaPlane: mediaPlane,
+            availability: availability,
+            videoCanaryRequested: videoRequested
+        )
 
         // Receive: UDP in -> AEAD open -> DAVE unprotect -> Opus decode ->
         // jitter/PLC/mix -> playback. `udp` is both the discovery session and
@@ -105,7 +134,8 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
             gateway: gateway,
             udp: udp,
             captureLoop: captureLoop,
-            receiveLoop: receiveLoop
+            receiveLoop: receiveLoop,
+            mediaAdapterAvailability: availability
         )
     }
 
@@ -124,17 +154,27 @@ public struct DiscordVoiceNativeControlSessionFactory: DiscordVoiceSessionFactor
 
     private func makeGatewayClient(
         daveAdapter: NativeDAVEControlAdapter,
-        mediaPlane: DiscordVoiceNativeMediaPlane
+        mediaPlane: DiscordVoiceNativeMediaPlane,
+        availability: DiscordVoiceMediaAdapterAvailability,
+        videoCanaryRequested: Bool = false
     ) -> DiscordVoiceGatewaySession {
-        DiscordVoiceGatewaySession(
+        let videoStreams: [VoiceGatewayV8Stream]?
+        if videoCanaryRequested {
+            videoStreams = try? [VoiceGatewayV8Stream(type: "video", rid: "100", quality: 100)]
+        } else {
+            videoStreams = nil
+        }
+        return DiscordVoiceGatewaySession(
             mediaAttestation: .portableUnavailable,
             mediaPlane: mediaPlane,
             daveControlHandler: daveAdapter.controlHandler,
             configuration: DiscordVoiceGatewaySessionConfiguration(
                 maximumDAVEProtocolVersion: Self.advertisedDAVEProtocolVersion(
-                    for: mediaAdapterAvailability
-                )
-            )
+                    for: availability
+                ),
+                videoStreams: videoStreams
+            ),
+            videoNegotiationProbe: videoNegotiationProbe
         )
     }
 }

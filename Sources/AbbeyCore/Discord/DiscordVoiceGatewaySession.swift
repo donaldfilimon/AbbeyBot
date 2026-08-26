@@ -89,6 +89,10 @@ public struct DiscordVoiceGatewaySessionConfiguration: Equatable, Sendable {
     public let maximumMessageBytes: Int
     public let heartbeatPollMilliseconds: UInt64
     public let maximumDAVEProtocolVersion: Int
+    /// Canary-only video Identify fields. A nonempty stream proposal enables
+    /// metadata observation and SSRC allocation; it does not qualify or select
+    /// a codec by itself.
+    public let videoStreams: [VoiceGatewayV8Stream]?
     /// Bounded buffered-resume budget per outage window. Zero disables
     /// in-session resume entirely; every socket loss then takes the
     /// credential-dropping teardown path.
@@ -98,6 +102,7 @@ public struct DiscordVoiceGatewaySessionConfiguration: Equatable, Sendable {
         maximumMessageBytes: Int = VoiceGatewayV8Decoder.maximumPayloadBytes,
         heartbeatPollMilliseconds: UInt64 = 25,
         maximumDAVEProtocolVersion: Int = 0,
+        videoStreams: [VoiceGatewayV8Stream]? = nil,
         maximumResumeAttempts: Int = 3
     ) {
         self.maximumMessageBytes = min(
@@ -109,6 +114,7 @@ public struct DiscordVoiceGatewaySessionConfiguration: Equatable, Sendable {
             max(0, maximumDAVEProtocolVersion),
             Int(UInt16.max)
         )
+        self.videoStreams = videoStreams?.isEmpty == false ? videoStreams : nil
         self.maximumResumeAttempts = min(max(0, maximumResumeAttempts), 10)
     }
 }
@@ -136,6 +142,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
     private let daveControlHandler: VoiceGatewayDAVEControlHandler
     private let configuration: DiscordVoiceGatewaySessionConfiguration
     private let resumeBackoff: VoiceGatewayReconnectBackoff
+    private let videoNegotiationProbe: DiscordVideoNegotiationProbe?
 
     private var phase: DiscordVoiceGatewaySessionPhase = .idle
     private var generation: UInt64 = 0
@@ -171,7 +178,8 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         mediaPlane: (any DiscordVoiceMediaPlane)? = nil,
         daveControlHandler: VoiceGatewayDAVEControlHandler = .unavailable,
         configuration: DiscordVoiceGatewaySessionConfiguration = .init(),
-        resumeBackoff: VoiceGatewayReconnectBackoff = .continuous
+        resumeBackoff: VoiceGatewayReconnectBackoff = .continuous,
+        videoNegotiationProbe: DiscordVideoNegotiationProbe? = nil
     ) {
         self.transport = transport
         self.clock = clock
@@ -179,6 +187,7 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
         self.mediaPlane = mediaPlane ?? DiscordVoiceAttestedMediaPlane(attestation: mediaAttestation)
         self.daveControlHandler = daveControlHandler
         self.configuration = configuration
+        self.videoNegotiationProbe = videoNegotiationProbe
         self.daveTransitionState = VoiceGatewayDAVETransitionStateMachine(
             maximumProtocolVersion: UInt16(configuration.maximumDAVEProtocolVersion)
         )
@@ -231,7 +240,9 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
             token: pair.token,
             maxDAVEProtocolVersion: daveControlHandler.isAvailable
                 ? configuration.maximumDAVEProtocolVersion
-                : 0
+                : 0,
+            video: configuration.videoStreams == nil ? nil : true,
+            streams: configuration.videoStreams
         )
         let pendingDAVEContext: VoiceGatewayDAVEConnectionContext?
         if daveControlHandler.isAvailable {
@@ -589,6 +600,10 @@ public actor DiscordVoiceGatewaySession: DiscordVoiceGatewaySessionClient,
 
             case .text(let text):
                 let data = Data(text.utf8)
+                await videoNegotiationProbe?.observe(
+                    data,
+                    daveProtocolVersion: negotiatedDAVEProtocolVersion
+                )
                 if DiscordVoiceGatewayOpcodeProbe.daveOpcode(in: data) != nil {
                     do {
                         let daveFrame = try VoiceGatewayDAVECodec.decodeServerJSON(data)

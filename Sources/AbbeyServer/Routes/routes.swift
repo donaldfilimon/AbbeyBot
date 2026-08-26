@@ -86,6 +86,9 @@ struct OkDTO: Content {
     var ok: Bool
 }
 
+extension KnowledgeHit: Content {}
+struct KnowledgeSearchDTO: Content { var hits: [KnowledgeHit] }
+
 private func clampedLimit(_ req: Request, default defaultLimit: Int = 100, max maxLimit: Int = 500) -> Int {
     let raw = req.query[Int.self, at: "limit"] ?? defaultLimit
     return min(max(raw, 1), maxLimit)
@@ -157,6 +160,10 @@ private struct StatusPageContext: Encodable {
 }
 
 func routes(_ app: Application) throws {
+    // The full server can be bound or reverse-proxied independently of the
+    // dedicated Quasar CLI policy, so its Quasar surface always requires the
+    // dedicated token even when the immediate peer is loopback.
+    quasarRoutes(app, allowsTokenlessLoopback: false)
     TwitchEventSubRoutes.register(on: app)
     SocialRoutes.registerGenericWebhooks(on: app)
 
@@ -245,6 +252,25 @@ func routes(_ app: Application) throws {
             inferenceFailures: metrics.inferenceFailures,
             twitchStreamLive: twitchStreamLive
         )
+    }
+
+    api.get("knowledge", "search") { req async throws -> KnowledgeSearchDTO in
+        let query = (req.query[String.self, at: "q"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (2...300).contains(query.count) else {
+            throw Abort(.badRequest, reason: "q must contain 2...300 characters")
+        }
+        let scopes = Set((req.query[String.self, at: "scopes"] ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty })
+        let hits = await req.application.botRuntime.knowledgeIndex.search(.init(
+            text: query,
+            requiredScopes: scopes,
+            callerScope: "public",
+            evidenceBudget: min(max(req.query[Int.self, at: "limit"] ?? 6, 1), 12),
+            sourceRevision: req.query[String.self, at: "revision"]
+        ))
+        return KnowledgeSearchDTO(hits: hits)
     }
 
     api.post("ingest") { req async throws -> IngestResponseDTO in

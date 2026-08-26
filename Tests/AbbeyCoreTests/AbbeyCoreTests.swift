@@ -213,8 +213,10 @@ struct AbbeyCoreTests {
     }
 
     @Test func commandRegistryNonEmpty() {
-        #expect(CommandRegistry.all.count == 17)
+        #expect(CommandRegistry.all.count == 19)
         #expect(CommandRegistry.all.contains(where: { $0.name == "voice" }))
+        #expect(CommandRegistry.all.contains(where: { $0.name == "knowledge" }))
+        #expect(CommandRegistry.all.contains(where: { $0.name == "quasar" }))
     }
 
     @Test func reputationMathBlendAndPenalty() {

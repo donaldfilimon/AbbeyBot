@@ -165,8 +165,8 @@ public struct VoiceGatewayV8Identify: Codable, Equatable, Sendable,
     /// Portable callers default to zero and therefore remain fail-closed.
     public let maxDAVEProtocolVersion: Int
     /// Whether this connection supports video (documented Identify field,
-    /// default false when omitted). Signaling advertisement only — no video
-    /// media path exists in this repository.
+    /// default false when omitted). Signaling advertisement only; the H.264
+    /// data plane remains separately gated by observed negotiation and consent.
     public let video: Bool?
     /// Proposed simulcast streams to send. The voice server assigns the real
     /// SSRCs in Ready. Omitted entirely when nil, preserving the historical
@@ -503,8 +503,8 @@ public enum VoiceGatewayV8Outbound: Encodable, Sendable, CustomStringConvertible
     case speaking(VoiceGatewayV8Speaking)
     case resume(VoiceGatewayV8Resume)
     /// Video state announcement. Sent by the native media plane's
-    /// announcement-before-send obligation ahead of outbound video packets;
-    /// no capture, encoder, or receive path exists behind it.
+    /// announcement-before-send obligation ahead of outbound video packets.
+    /// Capture, codec, receive, consent, and qualification remain separate.
     case video(VoiceGatewayV8Video)
     /// Desired remote media stream quality (signaling only).
     case mediaSinkWants(VoiceGatewayV8MediaSinkWants)

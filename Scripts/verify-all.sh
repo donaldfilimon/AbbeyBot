@@ -12,6 +12,7 @@ unset ABBEY_PACKAGE_ROLE || true
 unset ABBEY_NATIVE_MEDIA ABBEY_NATIVE_PREFIX ABBEY_NATIVE_CACHE || true
 bash Scripts/check-static-security.sh
 bash Scripts/check-package-graphs.sh
+bash Scripts/check-knowledge-snapshot.sh
 bash Scripts/run-web-smoke.sh
 bash Scripts/run-smoke.sh
 bash Scripts/run-server-smoke.sh

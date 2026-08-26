@@ -12,6 +12,7 @@ import FoundationNetworking
 /// shim, vLLM) as well as hosted OpenAI-compatible APIs.
 public struct RemoteOpenAICompatibleProvider: InferenceProvider {
     public let mode: InferenceMode = .remoteCompatible
+    public let capabilities: Set<InferenceCapability> = [.text, .structuredJSON, .boundedPlanning]
 
     private let endpointProvider: @Sendable () -> String
     private let session: URLSession

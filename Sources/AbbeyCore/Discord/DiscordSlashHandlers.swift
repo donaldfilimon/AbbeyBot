@@ -25,6 +25,38 @@ public struct DiscordCommandAuthorizationRequest: Sendable, Equatable {
     }
 }
 
+public enum DiscordQuasarAction: String, Sendable, Equatable {
+    case list, status, create, edit, archive, previewStart, previewStop
+}
+
+public struct DiscordQuasarRequest: Sendable, Equatable {
+    public var action: DiscordQuasarAction
+    public var siteID: String?
+    public var name: String?
+    public var prompt: String?
+    public var initiatorID: String
+    public var guildID: String
+    public var managerAuthorized: Bool
+
+    public init(
+        action: DiscordQuasarAction,
+        siteID: String? = nil,
+        name: String? = nil,
+        prompt: String? = nil,
+        initiatorID: String,
+        guildID: String,
+        managerAuthorized: Bool
+    ) {
+        self.action = action
+        self.siteID = siteID
+        self.name = name
+        self.prompt = prompt
+        self.initiatorID = initiatorID
+        self.guildID = guildID
+        self.managerAuthorized = managerAuthorized
+    }
+}
+
 /// Runtime command policy. Registration-time Discord permissions are only defense in
 /// depth; this policy remains authoritative after commands have already been registered.
 public struct DiscordCommandAccessPolicy: Sendable, Equatable {
@@ -78,6 +110,8 @@ public struct DiscordSlashHandlers: Sendable {
     public typealias EquityHandler = @Sendable (_ symbol: String) async -> String
     public typealias ModAdviceHandler = @Sendable (_ situation: String, _ userId: String, _ guildId: String, _ channelId: String) async -> String
     public typealias IndustryHandler = @Sendable () async -> String
+    public typealias KnowledgeHandler = @Sendable (_ query: String, _ userId: String, _ guildId: String) async -> String
+    public typealias QuasarHandler = @Sendable (_ request: DiscordQuasarRequest) async -> String
     public typealias AuditHandler = @Sendable (
         _ commandName: String,
         _ userId: String,
@@ -103,6 +137,8 @@ public struct DiscordSlashHandlers: Sendable {
     public var equity: EquityHandler
     public var modAdvice: ModAdviceHandler
     public var industry: IndustryHandler
+    public var knowledge: KnowledgeHandler
+    public var quasar: QuasarHandler
     public var audit: AuditHandler
 
     public init(
@@ -123,6 +159,8 @@ public struct DiscordSlashHandlers: Sendable {
         equity: @escaping EquityHandler,
         modAdvice: @escaping ModAdviceHandler,
         industry: @escaping IndustryHandler,
+        knowledge: @escaping KnowledgeHandler = { _, _, _ in DiscordCopy.engineUnavailable },
+        quasar: @escaping QuasarHandler = { _ in DiscordCopy.engineUnavailable },
         audit: @escaping AuditHandler = { _, _, _, _, _ in }
     ) {
         self.ask = ask
@@ -142,6 +180,8 @@ public struct DiscordSlashHandlers: Sendable {
         self.equity = equity
         self.modAdvice = modAdvice
         self.industry = industry
+        self.knowledge = knowledge
+        self.quasar = quasar
         self.audit = audit
     }
 }
@@ -187,6 +227,8 @@ public enum DiscordSlashLogic: Sendable {
         `/equity` — synthetic factor screen (not financial advice)
         `/mod` — moderation *advice* only (Abi; does not kick/ban)
         `/voice join|leave` — voice **presence** only (no audio)
+        `/knowledge` — search the signed ecosystem corpus with citations
+        `/quasar` — list/status or create a short-lived operator proposal
         `/ping` — latency check
         `/help` — this list
         """

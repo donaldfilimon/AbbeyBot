@@ -1,3 +1,5 @@
+import AbbeyCore
+import AbbeyQuasarKit
 import AbbeyServerKit
 import Fluent
 import Foundation
@@ -70,8 +72,39 @@ public func configure(_ app: Application) async throws {
     try FileManager.default.createDirectory(atPath: publicPath, withIntermediateDirectories: true)
     app.middleware.use(FileMiddleware(publicDirectory: publicPath))
 
-    _ = try await configureRuntime(app, defaultDatabaseURL: "postgres://abbey:abbey@localhost:5432/abbeybot")
+    let runtime = try await configureRuntime(app, defaultDatabaseURL: "postgres://abbey:abbey@localhost:5432/abbeybot")
+    let inferenceRouter = await runtime.inferenceRouter
+    let quasarService = await runtime.quasarService
+    let quasarProvider = QuasarServiceProvider(
+        service: quasarService,
+        planner: .abbey(router: inferenceRouter)
+    )
+    app.quasarServiceProvider = quasarProvider
     app.lifecycle.use(BotLifecycleHandler())
+    app.lifecycle.use(QuasarServiceLifecycleHandler(provider: quasarProvider))
 
     try routes(app)
+}
+
+/// Quasar's dedicated CLI mode: no Fluent driver, migrations, Discord/Twitch
+/// runtime, scheduler, Leaf bundle, or generic Abbey routes. It eagerly takes
+/// the single-writer Quasar lock so startup fails before the socket is exposed.
+public func configureQuasarOnly(
+    _ app: Application,
+    allowsTokenlessLoopback: Bool
+) async throws {
+    let config = AppConfig.shared
+    try config.validateForStartup(scope: .headless)
+    let router = InferenceRouter(
+        eventBus: EventBus(),
+        metrics: EngineMetrics(),
+        currentMode: { config.inferenceMode },
+        remoteEndpoint: { config.remoteEndpoint }
+    )
+    let planner = QuasarPlanner.abbey(router: router)
+    let service = try QuasarService(planner: planner)
+    let provider = QuasarServiceProvider(service: service, planner: planner)
+    app.quasarServiceProvider = provider
+    app.lifecycle.use(QuasarServiceLifecycleHandler(provider: provider))
+    quasarRoutes(app, allowsTokenlessLoopback: allowsTokenlessLoopback)
 }

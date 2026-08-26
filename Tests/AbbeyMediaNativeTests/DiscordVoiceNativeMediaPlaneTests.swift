@@ -515,7 +515,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         let receiver = try receiverTransport()
@@ -549,7 +549,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
             let opened = try await receiver.open(wirePacket)
             let header = try rtpCodec.decodeHeader(from: opened)
             #expect(header.ssrc == 0x2222_2222)
-            #expect(header.payloadType == DiscordVoiceRTPHeader.discordVideoVP8PayloadType)
+            #expect(header.payloadType == DiscordVoiceRTPHeader.discordVideoH264PayloadType)
             #expect(header.marker == true)
             #expect(header.sequence == 5_000 &+ UInt16(frameIndex))
             #expect(header.timestamp == 90_000 &+ UInt32(frameIndex) &* 3_000)
@@ -561,8 +561,11 @@ struct DiscordVoiceNativeMediaPlaneTests {
             #expect(await daveSession.protectCallCount == frameIndex + 2)
             #expect(await daveSession.lastProtectedSSRC == 0x2222_2222)
             #expect(await daveSession.lastProtectedMediaType == .video)
-            #expect(await daveSession.lastProtectedCodec == .vp8)
-            #expect(payload == Array(expected ?? Data()))
+            #expect(await daveSession.lastProtectedCodec == .h264)
+            let expectedUnits = try DiscordVoiceH264Packetizer.nalUnits(
+                in: Array(expected ?? Data())
+            )
+            #expect(payload == expectedUnits.first)
             // The wire payload is DAVE's output, never the raw encoded frame
             // a bypass would have sent instead.
             #expect(!(rawInput ?? Data()).isEmpty)
@@ -631,7 +634,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
             try await plane.installVideoSource(
                 allocation: makeVideoAllocation(),
                 activeRIDs: ["100"],
-                codec: .vp8
+                codec: .h264
             )
         }
         await #expect(throws: DiscordVoiceNativeMediaPlaneError.daveProtectionRequired) {
@@ -658,10 +661,17 @@ struct DiscordVoiceNativeMediaPlaneTests {
             try await plane.installVideoSource(
                 allocation: makeVideoAllocation(audioSSRC: 0x9999_9999),
                 activeRIDs: ["100"],
-                codec: .vp8
+                codec: .h264
             )
         }
         // Opus is not a video codec; H.265 has no modeled payload type.
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceInvalid) {
+            try await plane.installVideoSource(
+                allocation: makeVideoAllocation(),
+                activeRIDs: ["100"],
+                codec: .vp8
+            )
+        }
         await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoSourceInvalid) {
             try await plane.installVideoSource(
                 allocation: makeVideoAllocation(),
@@ -699,11 +709,22 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoFrameInvalid) {
             try await plane.sendVideoFrame(encodedFrame: Data())
+        }
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoFrameInvalid) {
+            try await plane.sendVideoFrame(encodedFrame: Data([0, 0, 0, 1, 0xe5, 1]))
+        }
+        var oversized = Data([0, 0, 0, 1, 0x65])
+        oversized.append(Data(
+            repeating: 1,
+            count: DiscordVoiceH264Packetizer.maximumAccessUnitBytes
+        ))
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoFrameInvalid) {
+            try await plane.sendVideoFrame(encodedFrame: oversized)
         }
         #expect(await log.sentPackets.isEmpty)
         #expect(await announcements.callCount == 0)
@@ -728,7 +749,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoAnnouncementSignalFailed) {
@@ -754,7 +775,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         await #expect(throws: DiscordVoiceNativeMediaPlaneError.videoAnnouncementSignalFailed) {
@@ -781,7 +802,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
         await daveSession.failNextProtect(with: TestDAVEProtectionFailure.injected)
 
@@ -809,7 +830,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         // Swap in the genuine pinned-libdave binding, never activated. Its
@@ -850,7 +871,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         let send = Task {
@@ -891,7 +912,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         let send = Task {
@@ -943,7 +964,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         let send = Task {
@@ -988,7 +1009,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
         try await plane.installVideoSource(
             allocation: makeVideoAllocation(videoSSRC: 0x5555_5555),
@@ -1289,7 +1310,7 @@ struct DiscordVoiceNativeMediaPlaneTests {
             ssrc: 0x7777_7777,
             sequence: 2,
             timestamp: 960,
-            payloadType: DiscordVoiceRTPHeader.discordVideoVP8PayloadType,
+            payloadType: DiscordVoiceRTPHeader.discordVideoH264PayloadType,
             opusPayload: try await fixedOpusPayload(seed: 9)
         )
 
@@ -1528,11 +1549,12 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: try makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
         // Comfortably past the 1200-byte sealed budget, so this must fragment.
-        let big = Data((0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) })
+        let big = Data([0, 0, 0, 1, 0x65]
+            + (0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) })
         try await plane.sendVideoFrame(encodedFrame: big)
 
         let packets = await log.sentPackets
@@ -1540,14 +1562,18 @@ struct DiscordVoiceNativeMediaPlaneTests {
 
         let receiver = try receiverTransport()
         var headers: [DiscordVoiceRTPHeader] = []
-        var reassembled: [UInt8] = []
+        var depacketizer = DiscordVoiceH264Depacketizer()
+        var reassembled: [UInt8]?
         let codec = try DiscordVoiceRTPCodec()
         for packet in packets {
             let opened = try await receiver.open(packet)
             let header = try codec.decodeHeader(from: opened)
             headers.append(header)
             let layout = try codec.plaintextLayout(in: opened)
-            reassembled += Array(opened[layout.payloadRange])
+            reassembled = try depacketizer.insert(.init(
+                header: header,
+                payload: Array(opened[layout.payloadRange])
+            )) ?? reassembled
             // Every fragment must still fit the path MTU once sealed — the
             // failure mode a naive fragmenter hides until it hits the wire.
             #expect(packet.count <= DiscordVoiceVideoPacketizer.defaultPathMTU)
@@ -1572,6 +1598,45 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await announcements.callCount == 1)
     }
 
+    @Test("overlapping video sends reserve disjoint RTP sequence runs after protected sizes are known")
+    func overlappingVideoSendsReserveDisjointRTPRuns() async throws {
+        let log = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let provider = ConcurrentSendPathGate(session: daveSession)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { await provider.provide() },
+            datagramTransport: log,
+            makeRTPClockSeed: { (5_000, 90_000) }
+        )
+        await plane.attachVideoAnnouncementSignal { _ in }
+        _ = try await plane.install(makeCapability(generation: 901, daveProtocolVersion: 1))
+        try await plane.installVideoSource(
+            allocation: try makeVideoAllocation(), activeRIDs: ["100"], codec: .h264
+        )
+
+        let first = Task {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 21))
+        }
+        let second = Task {
+            try await plane.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 22))
+        }
+        await provider.waitUntilSendRequests(2)
+        await provider.release()
+        try await first.value
+        try await second.value
+
+        let receiver = try receiverTransport()
+        let codec = try DiscordVoiceRTPCodec()
+        var headers: [DiscordVoiceRTPHeader] = []
+        for packet in await log.sentPackets {
+            headers.append(try codec.decodeHeader(from: await receiver.open(packet)))
+        }
+        #expect(headers.count == 2)
+        #expect(Set(headers.map(\.sequence)) == Set([5_000, 5_001]))
+        #expect(Set(headers.map(\.timestamp)) == Set([90_000, 93_000]))
+    }
+
     @Test("a video source installed mid-frame stops the remaining fragments")
     func videoSourceSwapMidFrameStopsRemainingFragments() async throws {
         let transport = SuspendableDatagramDouble()
@@ -1586,10 +1651,11 @@ struct DiscordVoiceNativeMediaPlaneTests {
         try await plane.installVideoSource(
             allocation: try makeVideoAllocation(),
             activeRIDs: ["100"],
-            codec: .vp8
+            codec: .h264
         )
 
-        let big = Data((0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 11 &+ 5) })
+        let big = Data([0, 0, 0, 1, 0x65]
+            + (0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 11 &+ 5) })
         let send = Task { try await plane.sendVideoFrame(encodedFrame: big) }
         // Park inside the first fragment's transport write, then swap sources.
         await transport.waitUntilSendStarted()
@@ -1609,8 +1675,117 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await transport.deliveredPackets.count < 4)
     }
 
+    @Test("H264 receive authenticates packets, depacketizes before DAVE unprotect, and returns one access unit")
+    func h264ReceiveUsesProtocolDefinedProtectionOrder() async throws {
+        let wire = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let sender = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: wire,
+            makeRTPClockSeed: { (65_534, 90_000) }
+        )
+        await sender.attachVideoAnnouncementSignal { _ in }
+        _ = try await sender.install(makeCapability(generation: 95, daveProtocolVersion: 1))
+        try await sender.installVideoSource(
+            allocation: try makeVideoAllocation(), activeRIDs: ["100"], codec: .h264
+        )
+        let expected = Data([0, 0, 0, 1, 0x65]
+            + (0..<4_000).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 7) })
+        try await sender.sendVideoFrame(encodedFrame: expected)
+
+        let receiver = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await receiver.install(makeCapability(generation: 96, daveProtocolVersion: 1))
+        let decoded = try await receiver.receiveH264AccessUnit(
+            packets: await wire.sentPackets,
+            senderID: 42
+        )
+        #expect(decoded == expected)
+        #expect(await daveSession.lastUnprotectedMediaType == .video)
+        #expect(await daveSession.lastUnprotectedSenderID == 42)
+        #expect(await receiver.receiveDiagnostics().acceptedVideoAccessUnits == 1)
+
+        var tampered = await wire.sentPackets
+        tampered[0][tampered[0].count - 5] ^= 1
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receiveTransportAuthenticationFailed) {
+            _ = try await receiver.receiveH264AccessUnit(packets: tampered, senderID: 42)
+        }
+    }
+
+    @Test("H264 receive rejects an access-unit packet list above the bounded fragment budget")
+    func h264ReceiveRejectsUnboundedPacketList() async throws {
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let receiver = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await receiver.install(makeCapability(generation: 97, daveProtocolVersion: 1))
+        let packets = Array(
+            repeating: [UInt8](),
+            count: DiscordVoiceVideoPacketizer.defaultMaximumFragmentsPerFrame + 1
+        )
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receivePacketMalformed) {
+            _ = try await receiver.receiveH264AccessUnit(packets: packets, senderID: 42)
+        }
+    }
+
+    @Test("H264 receive rejects a completed access unit followed by an unmarked trailing packet")
+    func h264ReceiveRejectsPacketsAfterTheAccessUnitMarker() async throws {
+        let wire = NativeMediaDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let sender = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: wire,
+            makeRTPClockSeed: { (700, 90_000) }
+        )
+        await sender.attachVideoAnnouncementSignal { _ in }
+        _ = try await sender.install(makeCapability(generation: 902, daveProtocolVersion: 1))
+        try await sender.installVideoSource(
+            allocation: try makeVideoAllocation(), activeRIDs: ["100"], codec: .h264
+        )
+        try await sender.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 31))
+        try await sender.sendVideoFrame(encodedFrame: fixedEncodedVideoFrame(seed: 32))
+
+        let opener = try receiverTransport()
+        let sealer = try senderTransport()
+        let codec = try DiscordVoiceRTPCodec()
+        var malformed: [[UInt8]] = []
+        for (index, packet) in (await wire.sentPackets).enumerated() {
+            let opened = try await opener.open(packet)
+            let original = try codec.decodeHeader(from: opened)
+            let layout = try codec.plaintextLayout(in: opened)
+            let header = try DiscordVoiceRTPHeader(
+                marker: index == 0,
+                payloadType: original.payloadType,
+                sequence: UInt16(800 + index),
+                timestamp: 120_000,
+                ssrc: original.ssrc
+            )
+            malformed.append(try await sealer.seal(
+                try codec.encode(header) + Array(opened[layout.payloadRange])
+            ))
+        }
+
+        let receiver = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: NativeMediaDatagramDouble()
+        )
+        _ = try await receiver.install(makeCapability(generation: 903, daveProtocolVersion: 1))
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.receivePacketMalformed) {
+            _ = try await receiver.receiveH264AccessUnit(packets: malformed, senderID: 42)
+        }
+        #expect(await daveSession.unprotectCallCount == 0)
+    }
+
     private func fixedEncodedVideoFrame(seed: Int) -> Data {
-        Data((0..<321).map { index in
+        Data([0, 0, 0, 1, 0x65] + (0..<320).map { index in
             UInt8(truncatingIfNeeded: (index &* 31) &+ (seed &* 97) &+ 5)
         })
     }
@@ -1729,7 +1904,23 @@ private actor NativeDAVEMediaSessionDouble: DiscordVoiceNativeDAVEMediaSession {
         if let forcedFailure {
             throw forcedFailure
         }
-        let transformed = Data(frame.map { $0 ^ 0xff })
+        let transformed: Data
+        if mediaType == .video, codec == .h264,
+           let units = try? DiscordVoiceH264Packetizer.nalUnits(in: Array(frame)) {
+            // Model libdave's H.264-aware transform: keep Annex-B framing and
+            // every NAL header parseable while changing the encoded body.
+            // This stays deterministic/non-identity without pretending the
+            // fixture can manufacture genuine MLS ciphertext.
+            var bytes = Data()
+            for unit in units {
+                bytes.append(contentsOf: [0, 0, 0, 1])
+                bytes.append(unit[0])
+                bytes.append(contentsOf: unit.dropFirst().map { $0 ^ 0xff })
+            }
+            transformed = bytes
+        } else {
+            transformed = Data(frame.map { $0 ^ 0xff })
+        }
         lastProtectedFrame = transformed
         return transformed
     }
@@ -1749,7 +1940,19 @@ private actor NativeDAVEMediaSessionDouble: DiscordVoiceNativeDAVEMediaSession {
         if let forcedUnprotectFailure {
             throw forcedUnprotectFailure
         }
-        let transformed = Data(frame.map { $0 ^ 0xff })
+        let transformed: Data
+        if mediaType == .video,
+           let units = try? DiscordVoiceH264Packetizer.nalUnits(in: Array(frame)) {
+            var bytes = Data()
+            for unit in units {
+                bytes.append(contentsOf: [0, 0, 0, 1])
+                bytes.append(unit[0])
+                bytes.append(contentsOf: unit.dropFirst().map { $0 ^ 0xff })
+            }
+            transformed = bytes
+        } else {
+            transformed = Data(frame.map { $0 ^ 0xff })
+        }
         lastUnprotectOutputFrame = transformed
         return transformed
     }
@@ -1975,6 +2178,48 @@ private actor SendPathGate {
     func release() {
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+/// Holds every send-time provider lookup until the requested number of
+/// overlapping sends has entered the media plane. The install-time lookup is
+/// returned immediately. This turns actor reentrancy at the RTP-clock boundary
+/// into a deterministic regression test instead of a scheduler-dependent one.
+private actor ConcurrentSendPathGate {
+    private let session: any DiscordVoiceNativeDAVEMediaSession
+    private var callCount = 0
+    private var sendRequestCount = 0
+    private var requestWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+
+    init(session: any DiscordVoiceNativeDAVEMediaSession) {
+        self.session = session
+    }
+
+    func provide() async -> (any DiscordVoiceNativeDAVEMediaSession)? {
+        callCount += 1
+        guard callCount > 1 else { return session }
+        sendRequestCount += 1
+        let ready = requestWaiters.filter { sendRequestCount >= $0.0 }
+        requestWaiters.removeAll { sendRequestCount >= $0.0 }
+        ready.forEach { $0.1.resume() }
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return session
+    }
+
+    func waitUntilSendRequests(_ count: Int) async {
+        guard sendRequestCount < count else { return }
+        await withCheckedContinuation { requestWaiters.append((count, $0)) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
     }
 }
 

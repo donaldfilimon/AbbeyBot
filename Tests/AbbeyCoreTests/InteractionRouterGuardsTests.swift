@@ -36,6 +36,29 @@ struct InteractionRouterGuardsTests {
         #expect(!InteractionRouter.shouldRespondEphemerally(for: "help"))
     }
 
+    @Test func auditSuccessRequiresAuthorizationAndBothDiscordResponses() {
+        #expect(InteractionRouter.auditSucceeded(
+            authorized: true,
+            initialResponseSucceeded: true,
+            finalResponseSucceeded: true
+        ))
+        #expect(!InteractionRouter.auditSucceeded(
+            authorized: false,
+            initialResponseSucceeded: true,
+            finalResponseSucceeded: true
+        ))
+        #expect(!InteractionRouter.auditSucceeded(
+            authorized: true,
+            initialResponseSucceeded: false,
+            finalResponseSucceeded: true
+        ))
+        #expect(!InteractionRouter.auditSucceeded(
+            authorized: true,
+            initialResponseSucceeded: true,
+            finalResponseSucceeded: false
+        ))
+    }
+
     @Test func commandAccessScopesMemoryAndGlobalMutations() {
         let policy = DiscordCommandAccessPolicy(operatorUserIds: ["owner"])
         #expect(policy.allows(.init(commandName: "facts", invokerUserId: "u1", targetUserId: "u1")))
@@ -99,11 +122,11 @@ struct DiscordSlashLogicTests {
         for expected in [
             "ask", "explain", "summarize", "rep", "facts", "remember", "forget",
             "context", "persona", "model", "status", "industry", "equity", "mod",
-            "ping", "help", "voice",
+            "ping", "help", "voice", "knowledge", "quasar",
         ] {
             #expect(names.contains(expected), "missing slash command \(expected)")
         }
-        for name in ["persona", "model", "voice"] {
+        for name in ["persona", "model", "voice", "quasar"] {
             let command = CommandRegistry.all.first { $0.name == name }
             #expect(command?.default_member_permissions?.contains(.administrator) == true)
             #expect(command?.dm_permission == false)

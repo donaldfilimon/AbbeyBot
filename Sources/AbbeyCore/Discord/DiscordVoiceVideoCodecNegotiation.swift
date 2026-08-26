@@ -25,11 +25,13 @@ import Foundation
 // field is decoded anywhere in this package. Adding one is a separate,
 // deliberate wire-shape decision that must be verified against Discord rather
 // than guessed at here. Until it exists, the only input `resolve` can be
-// given is `nil`, which fails closed. That is the intended state: no video
-// codec is negotiated, so no video may be sent.
+// given is `nil`, which fails closed. A metadata-only live canary records the
+// observed field/opcode before this boundary is promoted; no guessed mapping
+// is accepted.
 //
 // Boundary honesty: nothing in this file transmits, encodes, or decodes
-// media, and no video path in this repository works.
+// media. The native H.264 data plane exists separately and remains unusable
+// until this exact control-plane selection is observed and qualified live.
 
 /// Failures at the video codec negotiation boundary.
 public enum DiscordVoiceVideoNegotiationError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -117,7 +119,7 @@ public struct DiscordVoiceNegotiatedVideoCodec: Equatable, Sendable {
 
 /// The codecs this client offers, and the only supported route from a
 /// negotiated codec name to an RTP payload type. See the file header for why
-/// no wire payload in this repository currently supplies that name.
+/// no promoted wire payload in this repository currently supplies that name.
 public struct DiscordVoiceVideoCodecNegotiation: Equatable, Sendable {
     /// The codecs this client proposes, in Discord's documented dynamic
     /// payload-type assignment. These are an *offer*: being in this table does

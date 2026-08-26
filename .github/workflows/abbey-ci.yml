@@ -62,6 +62,11 @@ jobs:
           docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyCoreTests
 
+      - name: Test AbbeyQuasarKitTests
+        run: >
+          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          swift test --filter AbbeyQuasarKitTests
+
       - name: Test AbbeyCLITests
         run: >
           docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"

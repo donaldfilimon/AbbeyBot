@@ -9,6 +9,7 @@ import FoundationModels
 /// is missing, unavailable, or throws.
 public struct FoundationModelsProvider: InferenceProvider {
     public let mode: InferenceMode = .onDevice
+    public let capabilities: Set<InferenceCapability> = [.text, .structuredJSON, .boundedPlanning]
 
     public static var availabilitySummary: String {
         #if canImport(FoundationModels)

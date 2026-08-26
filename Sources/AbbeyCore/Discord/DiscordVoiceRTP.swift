@@ -103,9 +103,10 @@ public struct DiscordVoiceRTPHeader: Equatable, Sendable {
     /// codec negotiation per the community Voice Gateway reference
     /// (docs.discord.food, "voice-connections"). The client offers these in
     /// Select Protocol's codec list; they are the primary (non-RTX) payload
-    /// types. RTX payload types are deliberately not accepted — no RTX
-    /// retransmission path exists in this repository, so an RTX-marked packet
-    /// fails closed at the header validation boundary.
+    /// types. RTX payload types are deliberately not accepted by the primary
+    /// header parser: authenticated RFC 4588 packets first pass through the
+    /// bounded RTX restorer, which recovers the original sequence number and
+    /// primary payload before this validation boundary.
     ///
     /// These constants name what this client *would* send for a codec; they do
     /// not select one. Selecting a payload type goes through

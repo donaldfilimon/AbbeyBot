@@ -225,6 +225,21 @@ public actor DiscordBridge {
     /// not what is heard.
     public private(set) var voiceSelfMute = false
     public private(set) var voiceSelfDeaf = false
+    /// Ephemeral main-Gateway participant location facts. Raw user IDs never
+    /// leave this actor; callers receive only SHA-256 digests and a count.
+    private var voiceParticipantChannelByGuildUser: [String: String] = [:]
+    /// Guilds become complete only after GUILD_CREATE supplies the authoritative
+    /// initial voice-state set. If the bounded table overflows, completeness is
+    /// revoked until a fresh GUILD_CREATE/reconnect replaces the snapshot.
+    private var completeVoiceParticipantGuilds = Set<String>()
+    private var incompleteVoiceParticipantGuilds = Set<String>()
+    private static let maximumTrackedVoiceParticipants = 2_048
+    private struct ParticipantSubscription {
+        var guildID: String
+        var channelID: String
+        var continuation: AsyncStream<DiscordVoiceParticipantSnapshot>.Continuation
+    }
+    private var participantSubscriptions: [UUID: ParticipantSubscription] = [:]
 
     private var gateway: (any DiscordGatewayDriver)?
     private var voiceGatewayCredentials: VoiceGatewayHandshake.Credentials?
@@ -266,6 +281,44 @@ public actor DiscordBridge {
     /// True when a live BotGatewayManager is held (false under dry-run).
     public var hasGateway: Bool {
         gateway != nil
+    }
+
+    /// Re-fetches the guild and member immediately before a desktop-approved
+    /// Discord effect. Interaction permission fields are only a creation-time
+    /// fact; they must never be reused as current authorization evidence.
+    public func currentManagerAuthorization(guildID: String, userID: String) async -> Bool {
+        guard lifecycle.state == .connected,
+              !guildID.isEmpty,
+              guildID != "DM",
+              !userID.isEmpty,
+              let client = gateway?.client
+        else { return false }
+
+        do {
+            let guildSnowflake = GuildSnowflake(guildID)
+            let userSnowflake = UserSnowflake(userID)
+            async let guildResponse = client.getGuild(id: guildSnowflake)
+            async let memberResponse = client.getGuildMember(
+                guildId: guildSnowflake,
+                userId: userSnowflake
+            )
+            let guild = try await guildResponse.decode()
+            let member = try await memberResponse.decode()
+            if guild.owner_id == userSnowflake { return true }
+            let memberRoleIDs = Set(member.roles)
+            let effectiveRoles = guild.roles.filter {
+                $0.id == guild.id || memberRoleIDs.contains($0.id)
+            }
+            if effectiveRoles.contains(where: { $0.permissions.contains(.administrator) }) {
+                return true
+            }
+            return effectiveRoles.contains {
+                $0.permissions.contains(.manageGuild) || $0.permissions.contains(.moderateMembers)
+            }
+        } catch {
+            logger.warning("Discord permission revalidation failed closed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     public func connect(
@@ -537,6 +590,7 @@ extension DiscordBridge {
         gateway = nil
         untrackedVoiceLeaveOperation = nil
         botUserId = nil
+        clearEphemeralParticipants()
         voiceChannelId = nil
         voiceGuildId = nil
         voiceSelfMute = false
@@ -677,6 +731,7 @@ extension DiscordBridge {
         let gatewayToClose = gateway
         gateway = nil
         botUserId = nil
+        clearEphemeralParticipants()
         voiceChannelId = nil
         voiceGuildId = nil
         voiceSelfMute = false
@@ -729,6 +784,7 @@ extension DiscordBridge {
         let gatewayToClose = gateway
         gateway = nil
         botUserId = nil
+        clearEphemeralParticipants()
         voiceChannelId = nil
         voiceGuildId = nil
         voiceSelfMute = false
@@ -781,6 +837,7 @@ extension DiscordBridge {
     /// Receives the bot's main-Gateway voice-state dispatch. Public voice
     /// presence is updated only after Discord confirms the self state.
     public func handleVoiceStateUpdate(_ payload: VoiceState) {
+        updateEphemeralParticipantState(payload)
         guard payload.user_id.rawValue == botUserId else { return }
         let guildId = payload.guild_id.rawValue
         let outcome = voiceGatewayHandshake.receive(
@@ -854,6 +911,188 @@ extension DiscordBridge {
             selfMute: voiceSelfMute,
             selfDeaf: voiceSelfDeaf
         )
+    }
+
+    /// Content-free participant snapshot for the operator consent gate. The
+    /// bot itself is excluded; every human participant is represented only by
+    /// a stable digest for comparison across one process lifetime.
+    public func voiceParticipantSnapshot(
+        guildID: String,
+        channelID: String
+    ) -> DiscordVoiceParticipantSnapshot {
+        let guildPrefix = guildID + "\u{1f}"
+        let identities = voiceParticipantChannelByGuildUser.compactMap { key, value -> String? in
+            guard value == channelID, key.hasPrefix(guildPrefix) else { return nil }
+            let userID = String(key.dropFirst(guildPrefix.count))
+            return userID == botUserId ? nil : userID
+        }
+        let digests = Set(identities.map(LiveMediaQualificationCoordinator.participantDigest))
+        let isComplete = completeVoiceParticipantGuilds.contains(guildID)
+            && !incompleteVoiceParticipantGuilds.contains(guildID)
+        return DiscordVoiceParticipantSnapshot(
+            count: digests.count,
+            participantDigests: digests,
+            isComplete: isComplete
+        )
+    }
+
+    /// Content-free, buffering-newest participant changes for immediate
+    /// consent invalidation. Raw identities stay actor-local; cancellation
+    /// removes the continuation so a closed operator workspace cannot leak.
+    public func voiceParticipantSnapshots(
+        guildID: String,
+        channelID: String
+    ) -> AsyncStream<DiscordVoiceParticipantSnapshot> {
+        let id = UUID()
+        let pair = AsyncStream<DiscordVoiceParticipantSnapshot>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        participantSubscriptions[id] = ParticipantSubscription(
+            guildID: guildID,
+            channelID: channelID,
+            continuation: pair.continuation
+        )
+        pair.continuation.onTermination = { _ in
+            Task { await self.removeParticipantSubscription(id) }
+        }
+        pair.continuation.yield(voiceParticipantSnapshot(guildID: guildID, channelID: channelID))
+        return pair.stream
+    }
+
+    private func updateEphemeralParticipantState(_ payload: VoiceState) {
+        let guildID = payload.guild_id.rawValue
+        let userID = payload.user_id.rawValue
+        let key = guildID + "\u{1f}" + userID
+        let previousChannelID = voiceParticipantChannelByGuildUser[key]
+        if let channelID = payload.channel_id?.rawValue {
+            guard voiceParticipantChannelByGuildUser[key] != nil
+                    || voiceParticipantChannelByGuildUser.count
+                        < Self.maximumTrackedVoiceParticipants
+            else {
+                incompleteVoiceParticipantGuilds.insert(guildID)
+                publishParticipantSnapshotsForGuild(guildID)
+                return
+            }
+            voiceParticipantChannelByGuildUser[key] = channelID
+        } else {
+            voiceParticipantChannelByGuildUser.removeValue(forKey: key)
+        }
+        publishParticipantSnapshots(guildID: guildID, channelIDs: [previousChannelID, payload.channel_id?.rawValue])
+    }
+
+    /// Replaces one guild's incremental cache with the complete voice-state set
+    /// delivered in GUILD_CREATE. This is internal so lifecycle tests can prove
+    /// the completeness transition without constructing Discord's full guild DTO.
+    func installInitialVoiceStates(
+        guildID: String,
+        states: [(userID: String, channelID: String?)]
+    ) {
+        let prefix = guildID + "\u{1f}"
+        let oldChannels = voiceParticipantChannelByGuildUser.compactMap { key, channel in
+            key.hasPrefix(prefix) ? channel : nil
+        }
+        voiceParticipantChannelByGuildUser = voiceParticipantChannelByGuildUser.filter {
+            !$0.key.hasPrefix(prefix)
+        }
+        completeVoiceParticipantGuilds.remove(guildID)
+        incompleteVoiceParticipantGuilds.remove(guildID)
+
+        var affectedChannels = Set(oldChannels)
+        for state in states {
+            guard !state.userID.isEmpty else {
+                incompleteVoiceParticipantGuilds.insert(guildID)
+                continue
+            }
+            guard let channelID = state.channelID, !channelID.isEmpty else { continue }
+            affectedChannels.insert(channelID)
+            let key = prefix + state.userID
+            guard voiceParticipantChannelByGuildUser[key] != nil
+                    || voiceParticipantChannelByGuildUser.count
+                        < Self.maximumTrackedVoiceParticipants
+            else {
+                incompleteVoiceParticipantGuilds.insert(guildID)
+                continue
+            }
+            voiceParticipantChannelByGuildUser[key] = channelID
+        }
+        if !incompleteVoiceParticipantGuilds.contains(guildID) {
+            completeVoiceParticipantGuilds.insert(guildID)
+        }
+        publishParticipantSnapshots(
+            guildID: guildID,
+            channelIDs: affectedChannels.map(Optional.some)
+        )
+        publishParticipantSnapshotsForGuild(guildID)
+    }
+
+    func handleGuildCreate(
+        _ payload: Gateway.GuildCreate,
+        generation: DiscordGatewayLifecycle.Generation
+    ) {
+        guard lifecycle.isCurrent(generation) else { return }
+        installInitialVoiceStates(
+            guildID: payload.id.rawValue,
+            states: payload.voice_states.map {
+                (userID: $0.user_id.rawValue, channelID: $0.channel_id?.rawValue)
+            }
+        )
+    }
+
+    func handleGuildDelete(
+        _ payload: UnavailableGuild,
+        generation: DiscordGatewayLifecycle.Generation
+    ) {
+        guard lifecycle.isCurrent(generation) else { return }
+        let guildID = payload.id.rawValue
+        let prefix = guildID + "\u{1f}"
+        voiceParticipantChannelByGuildUser = voiceParticipantChannelByGuildUser.filter {
+            !$0.key.hasPrefix(prefix)
+        }
+        completeVoiceParticipantGuilds.remove(guildID)
+        incompleteVoiceParticipantGuilds.insert(guildID)
+        publishParticipantSnapshotsForGuild(guildID)
+    }
+
+    private func removeParticipantSubscription(_ id: UUID) {
+        participantSubscriptions.removeValue(forKey: id)
+    }
+
+    private func publishParticipantSnapshots(guildID: String, channelIDs: [String?]) {
+        let affected = Set(channelIDs.compactMap { $0 })
+        guard !affected.isEmpty else { return }
+        for subscription in participantSubscriptions.values
+        where subscription.guildID == guildID && affected.contains(subscription.channelID) {
+            subscription.continuation.yield(
+                voiceParticipantSnapshot(
+                    guildID: subscription.guildID,
+                    channelID: subscription.channelID
+                )
+            )
+        }
+    }
+
+    private func publishParticipantSnapshotsForGuild(_ guildID: String) {
+        for subscription in participantSubscriptions.values where subscription.guildID == guildID {
+            subscription.continuation.yield(
+                voiceParticipantSnapshot(
+                    guildID: subscription.guildID,
+                    channelID: subscription.channelID
+                )
+            )
+        }
+    }
+
+    private func clearEphemeralParticipants() {
+        voiceParticipantChannelByGuildUser.removeAll(keepingCapacity: false)
+        completeVoiceParticipantGuilds.removeAll(keepingCapacity: false)
+        incompleteVoiceParticipantGuilds.removeAll(keepingCapacity: false)
+        for subscription in participantSubscriptions.values {
+            subscription.continuation.yield(.init(
+                count: 0,
+                participantDigests: [],
+                isComplete: false
+            ))
+        }
     }
 
     /// Updates self-mute/self-deaf presence for the already-confirmed voice

@@ -2,6 +2,7 @@ public enum DiscordVoiceMediaContractError: Error, Equatable, Sendable {
     case invalidQueueCapacity(Int)
     case invalidCredentialTimeout
     case invalidAutoReconnectAttempts(Int)
+    case invalidConsentEpoch
 }
 
 public enum DiscordVoiceVideoSource: String, Equatable, Sendable {

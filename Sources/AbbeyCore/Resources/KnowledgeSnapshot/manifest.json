@@ -1,0 +1,299 @@
+{
+  "aggregateDigest" : "f23d2becc55f45ab3806352c5a6540bf8756500b80a4d6146a90bf53fa499ce3",
+  "entries" : [
+    {
+      "authority" : 0.9,
+      "bytes" : 18586,
+      "id" : "abbey-architecture",
+      "path" : "docs/architecture.md",
+      "provenance" : "measured",
+      "repository" : "abbey",
+      "revision" : "2bac6a46c8a3577f9cfaafd12f10cddfc40990cb",
+      "scopes" : [
+        "architecture",
+        "public"
+      ],
+      "sha256" : "742408aa5f0979fd6626f8c530677613078b9e31e1b38aa22e60f7254be5e7e0",
+      "snapshotPath" : "documents/abbey-architecture.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Abbey Architecture",
+      "trustClassification" : "authoritative"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 3102,
+      "id" : "abbey-contract-compatibility",
+      "path" : "Contracts/Abbey/corpus/compatibility.md",
+      "provenance" : "measured",
+      "repository" : "AbbeyBot",
+      "revision" : "32658cc46f30cf3f5a90a6cea9ec7c782c2e443b",
+      "scopes" : [
+        "authorization",
+        "consent",
+        "contracts",
+        "public"
+      ],
+      "sha256" : "356ef03001d7ab16858c5e47c26472acff6a0f5e237837a992f38356ca8adec0",
+      "snapshotPath" : "documents/abbey-contract-compatibility.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Abbey Contract Compatibility",
+      "trustClassification" : "compatibility"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 21115,
+      "id" : "abbey-contract-manifest",
+      "path" : "Contracts/Abbey/corpus/manifest.json",
+      "provenance" : "measured",
+      "repository" : "AbbeyBot",
+      "revision" : "32658cc46f30cf3f5a90a6cea9ec7c782c2e443b",
+      "scopes" : [
+        "authorization",
+        "consent",
+        "contracts",
+        "public"
+      ],
+      "sha256" : "36ac302ba35a6d9d216a0d87f75e37d09b02c40be351efbd309efbae24a6617d",
+      "snapshotPath" : "documents/abbey-contract-manifest.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Abbey Contract Artifact Manifest",
+      "trustClassification" : "authoritative"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 1827,
+      "id" : "abbey-contract-readme",
+      "path" : "Contracts/Abbey/corpus/README.md",
+      "provenance" : "measured",
+      "repository" : "AbbeyBot",
+      "revision" : "32658cc46f30cf3f5a90a6cea9ec7c782c2e443b",
+      "scopes" : [
+        "authorization",
+        "consent",
+        "contracts",
+        "public"
+      ],
+      "sha256" : "494656a3be29b8642798f93cc9e008a904fd995000101de9c8ed60b5c57b2af2",
+      "snapshotPath" : "documents/abbey-contract-readme.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Vendored Abbey Contract Corpus",
+      "trustClassification" : "authoritative"
+    },
+    {
+      "authority" : 0.95,
+      "bytes" : 40380,
+      "id" : "abbey-identity",
+      "path" : "docs/identity.md",
+      "provenance" : "measured",
+      "repository" : "abbey",
+      "revision" : "2bac6a46c8a3577f9cfaafd12f10cddfc40990cb",
+      "scopes" : [
+        "persona",
+        "public"
+      ],
+      "sha256" : "50bed703c5174acb9d193b70307dc438f3edec98086960699b71691d814dfefc",
+      "snapshotPath" : "documents/abbey-identity.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Abbey Identity",
+      "trustClassification" : "constitutional"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 42379,
+      "id" : "abi-constitution",
+      "path" : "docs/superpowers/specs/2026-08-22-abbey-system-constitution.md",
+      "provenance" : "measured",
+      "repository" : "abi",
+      "revision" : "2d6adf3213b2456f7decad5e07cb1fce46f34032",
+      "scopes" : [
+        "authorization",
+        "persona",
+        "public"
+      ],
+      "sha256" : "d03c4da058d90bbb4ae9d45950f282bc3a4e02ae18b18556d5731bc0db70e388",
+      "snapshotPath" : "documents/abi-constitution.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Abbey System Constitution",
+      "trustClassification" : "constitutional"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 12650,
+      "id" : "abi-identity",
+      "path" : "docs/spec/abbey-core-identity.mdx",
+      "provenance" : "measured",
+      "repository" : "abi",
+      "revision" : "2d6adf3213b2456f7decad5e07cb1fce46f34032",
+      "scopes" : [
+        "persona",
+        "public"
+      ],
+      "sha256" : "c513c10ded34bf669a487e7cf96c0c4fc88168ac23eaae1fe5da83a78bc71891",
+      "snapshotPath" : "documents/abi-identity.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Abbey Core Identity",
+      "trustClassification" : "constitutional"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 5435,
+      "id" : "abi-personas",
+      "path" : "docs/spec/multi-persona-technical.mdx",
+      "provenance" : "measured",
+      "repository" : "abi",
+      "revision" : "2d6adf3213b2456f7decad5e07cb1fce46f34032",
+      "scopes" : [
+        "persona",
+        "public"
+      ],
+      "sha256" : "fc6ff13e86c847c83ee4dba6eace1faee2fd2cc5d4e1378239a7626c9020de29",
+      "snapshotPath" : "documents/abi-personas.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Multi-Persona Technical Specification",
+      "trustClassification" : "authoritative"
+    },
+    {
+      "authority" : 0.95,
+      "bytes" : 14718,
+      "id" : "abi-wdbx-conformance",
+      "path" : "docs/superpowers/specs/2026-08-22-wdbx-conformance-gap-analysis.md",
+      "provenance" : "measured",
+      "repository" : "abi",
+      "revision" : "2d6adf3213b2456f7decad5e07cb1fce46f34032",
+      "scopes" : [
+        "knowledge",
+        "public",
+        "wdbx"
+      ],
+      "sha256" : "30ae4d45b8093031806839860eb254b9bd5d34f0d907cf39ce13ef65698e889c",
+      "snapshotPath" : "documents/abi-wdbx-conformance.md",
+      "supersedes" : [
+
+      ],
+      "title" : "WDBX Conformance Gap Analysis",
+      "trustClassification" : "authoritative"
+    },
+    {
+      "authority" : 0.95,
+      "bytes" : 23469,
+      "id" : "abi-wdbx-north-star",
+      "path" : "docs/spec/wdbx-north-star.mdx",
+      "provenance" : "target",
+      "repository" : "abi",
+      "revision" : "2d6adf3213b2456f7decad5e07cb1fce46f34032",
+      "scopes" : [
+        "knowledge",
+        "public",
+        "wdbx"
+      ],
+      "sha256" : "fc2f202de165c306fe0ca1543a62431abe9f4facece813cba11926db49a70502",
+      "snapshotPath" : "documents/abi-wdbx-north-star.md",
+      "supersedes" : [
+
+      ],
+      "title" : "WDBX North Star",
+      "trustClassification" : "explanatory"
+    },
+    {
+      "authority" : 0.9,
+      "bytes" : 405,
+      "id" : "mlai-contracts",
+      "path" : "packages/contracts/README.md",
+      "provenance" : "measured",
+      "repository" : "mlai",
+      "revision" : "f106cd26e784f067d90d2067f7b7776437ae398f",
+      "scopes" : [
+        "mlai",
+        "public",
+        "quasar"
+      ],
+      "sha256" : "e5daddb4b1af17cca63049763381b8e0c2e9786a16685ecc38d91458c899fc69",
+      "snapshotPath" : "documents/mlai-contracts.md",
+      "supersedes" : [
+
+      ],
+      "title" : "MLAI Shared Contracts",
+      "trustClassification" : "authoritative"
+    },
+    {
+      "authority" : 0.85,
+      "bytes" : 6484,
+      "id" : "quasar-design",
+      "path" : "apps/quasar/docs/superpowers/specs/2026-08-19-quasar-v1-design.md",
+      "provenance" : "target",
+      "repository" : "mlai",
+      "revision" : "f106cd26e784f067d90d2067f7b7776437ae398f",
+      "scopes" : [
+        "mlai",
+        "public",
+        "quasar"
+      ],
+      "sha256" : "516d0db6212c9260ec692a56880fb4ca1c8fe89c736d02bf48bec3760690898a",
+      "snapshotPath" : "documents/quasar-design.md",
+      "supersedes" : [
+
+      ],
+      "title" : "MLAI Quasar Design",
+      "trustClassification" : "explanatory"
+    },
+    {
+      "authority" : 0.95,
+      "bytes" : 8010,
+      "id" : "quasar-v1",
+      "path" : "apps/quasar/README.md",
+      "provenance" : "measured",
+      "repository" : "mlai",
+      "revision" : "f106cd26e784f067d90d2067f7b7776437ae398f",
+      "scopes" : [
+        "mlai",
+        "public",
+        "quasar"
+      ],
+      "sha256" : "806ee390ad373e2d659c4d394d0be367803ef4d7527f432e4c1ee5de9b50f96f",
+      "snapshotPath" : "documents/quasar-v1.md",
+      "supersedes" : [
+
+      ],
+      "title" : "MLAI Quasar v1",
+      "trustClassification" : "compatibility"
+    },
+    {
+      "authority" : 1,
+      "bytes" : 6348,
+      "id" : "wdbx-readme",
+      "path" : "README.md",
+      "provenance" : "measured",
+      "repository" : "wdbx",
+      "revision" : "ac5af0f216ce120c6b34ee1d198a156881590ea1",
+      "scopes" : [
+        "knowledge",
+        "public",
+        "wdbx"
+      ],
+      "sha256" : "01fb714b450b15d557d2125b6a2391827a46aa24c6bd22fcfcb0b018c616c81d",
+      "snapshotPath" : "documents/wdbx-readme.md",
+      "supersedes" : [
+
+      ],
+      "title" : "Canonical WDBX",
+      "trustClassification" : "authoritative"
+    }
+  ],
+  "formatVersion" : 3
+}

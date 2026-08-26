@@ -4,18 +4,25 @@ import SwiftUI
 
 struct DiscordView: View {
     @Environment(AbbeyEngine.self) private var engine
+    @Environment(\.scenePhase) private var scenePhase
     @Bindable private var config = AppConfig.shared
     @State private var isBusy = false
     @State private var statusMessage: String?
     @State private var voiceGuildId = ""
     @State private var voiceChannelId = ""
     @State private var pendingVoiceFlags: PendingVoiceFlags?
+    @State private var authorizingManagerUserID = ""
+    @State private var allParticipantsConsented = false
+    @State private var consentAudioReceive = false
+    @State private var consentCamera = false
+    @State private var consentGoLive = false
 
     var body: some View {
         Form {
             connectionSection
             slashCommandsSection
             voiceTransportSection
+            liveQualificationSection
             privacySection
             localCaptureSection
             deviceSection
@@ -48,7 +55,21 @@ struct DiscordView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 await engine.refreshDiscordStatus()
+                await engine.mediaSession.refreshQualification(
+                    guildID: voiceGuildId,
+                    channelID: voiceChannelId,
+                    managerUserID: authorizingManagerUserID,
+                    allCurrentParticipantsConsented: allParticipantsConsented
+                )
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            Task { await engine.mediaSession.closeQualification(.applicationBackgrounded) }
+        }
+        .onChange(of: allParticipantsConsented) { _, consented in
+            guard !consented, engine.mediaSession.qualification.epoch != nil else { return }
+            Task { await engine.mediaSession.closeQualification(.consentRevoked) }
         }
     }
 
@@ -125,8 +146,8 @@ struct DiscordView: View {
 
     @ViewBuilder
     private var voiceTransportSection: some View {
-        Section("Voice signaling and transport — no media") {
-            Text("This explicit probe requests Discord voice credentials, opens Voice Gateway v8, performs persistent UDP discovery, selects transport, and then auto-leaves because production DAVE media is unavailable.")
+        Section("Voice signaling and transport") {
+            Text("The ordinary probe validates Voice Gateway v8 and UDP while advertising DAVE version 0. A separate witnessed canary below is the only path that may advertise the audited DAVE version.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -154,7 +175,7 @@ struct DiscordView: View {
                         statusMessage = await engine.joinVoice(guildId: guild, channelId: voiceChannelId)
                     }
                 }
-                .help("Probe Discord signaling and UDP transport. No media is sent; AbbeyBot auto-leaves.")
+                .help("Probe Discord signaling and UDP transport with DAVE version 0. No media is sent.")
                 .disabled(
                     engine.discordState != .connected
                         || voiceChannelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -183,10 +204,10 @@ struct DiscordView: View {
 
             Divider()
 
-            Text("Gateway presence only — self-mute/self-deaf change what Discord and other members see, not what is heard. There is no Opus/UDP audio.")
+            Text("Gateway presence controls — self-mute/self-deaf change what Discord and other members see. They are separate from the qualified media consent and kill switches below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Probe transport above always ends by leaving (DAVE media is unavailable), so these stay disabled after it. They enable only while presence is held via Discord's `/voice join` slash command.")
+            Text("The ordinary probe always ends by leaving because it advertises DAVE 0. These controls enable only while presence is held via Discord's `/voice join` slash command.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             LabeledContent("Presence") { Text(engine.mediaSession.muteDeafenLabel) }
@@ -232,6 +253,105 @@ struct DiscordView: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    @ViewBuilder
+    private var liveQualificationSection: some View {
+        Section("Live DAVE and H.264 qualification") {
+            let state = engine.mediaSession.qualification
+            LabeledContent("Canary build flag") {
+                Text(state.canaryEnabled ? "enabled" : "disabled")
+                    .foregroundStyle(state.canaryEnabled ? Color.orange : Color.secondary)
+            }
+            LabeledContent("Consent epoch") {
+                Text(state.epoch == nil ? "closed" : "open")
+                    .foregroundStyle(state.epoch == nil ? Color.secondary : Color.green)
+            }
+            LabeledContent("Observed human participants") {
+                Text("\(engine.mediaSession.qualificationParticipantCount)")
+            }
+            LabeledContent("Current manager authorization") {
+                Text(engine.mediaSession.qualificationManagerAuthorized ? "verified" : "not verified")
+            }
+            if let reason = state.lastCloseReason {
+                LabeledContent("Last kill reason") { Text(reason.rawValue) }
+            }
+            if let epoch = state.epoch {
+                LabeledContent("Epoch receipt") {
+                    Text(String(epoch.hash.prefix(12)) + "…")
+                        .font(.caption.monospaced())
+                }
+                LabeledContent("DAVE / codec") {
+                    Text("v\(state.daveProtocolVersion ?? 0) · \(state.codec ?? "none")")
+                }
+            }
+
+            TextField("Authorizing Discord manager user ID", text: $authorizingManagerUserID)
+                .textFieldStyle(.roundedBorder)
+            Toggle("Every currently observed participant consented", isOn: $allParticipantsConsented)
+            Toggle("Consent: decrypt and play audio", isOn: $consentAudioReceive)
+            Toggle("Consent: camera send and receive", isOn: $consentCamera)
+            Toggle("Consent: Go Live screen send and receive", isOn: $consentGoLive)
+
+            Text("Camera and Go Live consent are separate. Any participant move, permission change, reconnect, revocation, interruption, app backgrounding, or emergency stop closes the epoch and stops every lane.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ControlGroup {
+                Button("Open epoch and join canary") {
+                    Task {
+                        await engine.mediaSession.openQualificationAndJoin(
+                            guildID: voiceGuildId,
+                            channelID: voiceChannelId,
+                            managerUserID: authorizingManagerUserID,
+                            allCurrentParticipantsConsented: allParticipantsConsented,
+                            capabilities: selectedQualificationCapabilities
+                        )
+                    }
+                }
+                .disabled(
+                    !state.canaryEnabled
+                        || engine.discordState != .connected
+                        || engine.mediaSession.isOperationInFlight
+                        || voiceGuildId.isEmpty
+                        || voiceChannelId.isEmpty
+                        || authorizingManagerUserID.isEmpty
+                        || !allParticipantsConsented
+                )
+
+                Button("Revoke consent", role: .destructive) {
+                    allParticipantsConsented = false
+                    Task { await engine.mediaSession.closeQualification(.consentRevoked) }
+                }
+                .disabled(state.epoch == nil)
+
+                Button("Emergency media stop", role: .destructive) {
+                    allParticipantsConsented = false
+                    Task { await engine.mediaSession.closeQualification(.emergencyStop) }
+                }
+            }
+
+            if engine.mediaSession.videoNegotiationObservations.isEmpty {
+                Text("No content-free video negotiation metadata observed yet. H.264 promotion remains blocked.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(Array(engine.mediaSession.videoNegotiationObservations.enumerated()), id: \.offset) { _, item in
+                    LabeledContent("Opcode \(item.opcode) · \(item.fieldPath)") {
+                        Text("\(item.codecLabel) PT \(item.payloadType) · DAVE \(item.daveProtocolVersion ?? 0)")
+                            .font(.caption.monospaced())
+                    }
+                }
+            }
+        }
+    }
+
+    private var selectedQualificationCapabilities: Set<LiveMediaCapability> {
+        var capabilities: Set<LiveMediaCapability> = [.audioSend]
+        if consentAudioReceive { capabilities.insert(.audioReceive) }
+        if consentCamera { capabilities.formUnion([.cameraSend, .cameraReceive]) }
+        if consentGoLive { capabilities.formUnion([.screenSend, .screenReceive]) }
+        return capabilities
     }
 
     /// Reads the controller's actual state rather than a local optimistic flag:
@@ -341,7 +461,7 @@ struct DiscordView: View {
             ProgressView(value: engine.mediaSession.runtime.outputLevel, total: 1)
                 .accessibilityLabel("Local playback level")
                 .accessibilityValue("\(Int(engine.mediaSession.runtime.outputLevel * 100)) percent")
-            Text("Meters remain at zero because capture/playback is not connected to Discord media.")
+            Text("Meters remain zero until a qualified lane installs its bounded level stream; zero never implies consent or transmission.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }

@@ -18,11 +18,16 @@ struct AbbeyServerAuthTests {
         token: String?,
         environment: Environment = .testing,
         dryRun: Bool = false,
+        quasarToken: String? = nil,
         eventSubSecret: String? = nil,
         allowUnsignedEventSubForTesting: Bool = false,
         allowUnsignedSocialForTesting: Bool = false,
         _ body: @Sendable (Application) async throws -> Void
     ) async throws {
+        let quasarHome = FileManager.default.temporaryDirectory.appendingPathComponent("abbey-server-test-quasar-\(UUID().uuidString)")
+        setenv("ABBEY_QUASAR_HOME", quasarHome.path, 1)
+        if let quasarToken { setenv("ABBEY_QUASAR_API_TOKEN", quasarToken, 1) }
+        else { unsetenv("ABBEY_QUASAR_API_TOKEN") }
         unsetenv("DISCORD_BOT_TOKEN")
         unsetenv("DISCORD_DEV_GUILD_ID")
         setenv("DATABASE_URL", "sqlite://memory", 1)
@@ -63,6 +68,9 @@ struct AbbeyServerAuthTests {
             unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
             unsetenv("ABBEY_DRY_RUN")
             unsetenv("DATABASE_URL")
+            unsetenv("ABBEY_QUASAR_HOME")
+            unsetenv("ABBEY_QUASAR_API_TOKEN")
+            try? FileManager.default.removeItem(at: quasarHome)
         } catch {
             try? await app.asyncShutdown()
             unsetenv("ABBEY_API_TOKEN")
@@ -71,6 +79,9 @@ struct AbbeyServerAuthTests {
             unsetenv("ABBEY_ALLOW_UNSIGNED_SOCIAL_WEBHOOKS_FOR_TESTING")
             unsetenv("ABBEY_DRY_RUN")
             unsetenv("DATABASE_URL")
+            unsetenv("ABBEY_QUASAR_HOME")
+            unsetenv("ABBEY_QUASAR_API_TOKEN")
+            try? FileManager.default.removeItem(at: quasarHome)
             throw error
         }
     }
@@ -99,6 +110,163 @@ struct AbbeyServerAuthTests {
                 #expect(res.status == .unauthorized)
             }
         }
+    }
+
+    @Test func signedKnowledgeSearchRequiresOperatorAuthAndReturnsCitations() async throws {
+        try await withApp(token: "knowledge-token") { app in
+            try await app.testing().test(.GET, "/api/knowledge/search?q=authorization") { response in
+                #expect(response.status == .unauthorized)
+            }
+            try await app.testing().test(
+                .GET,
+                "/api/knowledge/search?q=authorization&limit=2",
+                headers: bearerHeaders("knowledge-token")
+            ) { response in
+                #expect(response.status == .ok)
+                let body = String(buffer: response.body)
+                #expect(body.contains("sourceRevision"))
+                #expect(body.contains("contentDigest"))
+                #expect(!body.contains("private prompt"))
+            }
+        }
+    }
+
+    @Test func quasarAPIRequiresDedicatedTokenAndRejectsUnallowlistedOrigins() async throws {
+        try await withApp(token: "operator-token", quasarToken: "quasar-owner-token") { app in
+            try await app.testing().test(.GET, "/api/sites") { response in
+                #expect(response.status == .unauthorized)
+            }
+            var allowed = bearerHeaders("quasar-owner-token")
+            allowed.replaceOrAdd(name: .origin, value: "http://localhost:4710")
+            try await app.testing().test(.GET, "/api/sites", headers: allowed) { response in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: .accessControlAllowOrigin) == "http://localhost:4710")
+            }
+            var forbidden = bearerHeaders("quasar-owner-token")
+            forbidden.replaceOrAdd(name: .origin, value: "https://attacker.example")
+            try await app.testing().test(.GET, "/api/sites", headers: forbidden) { response in
+                #expect(response.status == .forbidden)
+                #expect(response.headers.first(name: .accessControlAllowOrigin) == nil)
+            }
+
+            var preflight = HTTPHeaders()
+            preflight.replaceOrAdd(name: .origin, value: "http://localhost:4710")
+            preflight.replaceOrAdd(name: .accessControlRequestMethod, value: "POST")
+            preflight.replaceOrAdd(name: .accessControlRequestHeaders, value: "authorization, content-type")
+            try await app.testing().test(.OPTIONS, "/api/sites/create", headers: preflight) { response in
+                #expect(response.status == .noContent)
+                #expect(response.headers.first(name: .accessControlAllowOrigin) == "http://localhost:4710")
+                #expect(response.headers.first(name: .accessControlAllowHeaders)?.contains("Authorization") == true)
+            }
+        }
+    }
+
+    @Test func fullServerQuasarRequiresDedicatedTokenEvenFromLoopback() async throws {
+        try await withApp(token: "operator-token", quasarToken: nil) { app in
+            // Exercise a real TCP request. The in-memory tester has no remote
+            // address, so it cannot reproduce the reverse-proxy boundary where
+            // a full server sees a loopback peer even though that peer may be
+            // forwarding requests from elsewhere.
+            try await app.testing(method: .running(hostname: "127.0.0.1", port: 0))
+                .test(.GET, "/api/sites") { response in
+                    #expect(response.status == .serviceUnavailable)
+                }
+        }
+    }
+
+    @Test func quasarServePolicyNormalizesEveryVaporAddressAlias() throws {
+        let loopback = try QuasarServePolicy.prepare(
+            arguments: ["--hostname=localhost", "-p4701", "--log", "debug"],
+            environment: [:]
+        )
+        #expect(loopback.hostname == "localhost")
+        #expect(loopback.port == 4_701)
+        #expect(loopback.allowsTokenlessLoopback)
+        #expect(loopback.vaporArguments == [
+            "--log", "debug", "--hostname", "localhost", "--port", "4701",
+        ])
+
+        for arguments in [
+            ["--hostname=0.0.0.0"],
+            ["-H0.0.0.0"],
+            ["--bind", "0.0.0.0:4700"],
+            ["-b[::]:4700"],
+        ] {
+            #expect(throws: QuasarServePolicyError.nonLoopbackPolicyIncomplete) {
+                _ = try QuasarServePolicy.prepare(arguments: arguments, environment: [:])
+            }
+        }
+        #expect(throws: QuasarServePolicyError.unixSocketUnsupported) {
+            _ = try QuasarServePolicy.prepare(
+                arguments: ["--unix-socket=/tmp/quasar.sock"],
+                environment: [:]
+            )
+        }
+        #expect(throws: QuasarServePolicyError.missingOptionValue("--hostname")) {
+            _ = try QuasarServePolicy.prepare(
+                arguments: ["--hostname", "--port", "4700"],
+                environment: [:]
+            )
+        }
+        #expect(throws: QuasarServePolicyError.invalidHostname("--port")) {
+            _ = try QuasarServePolicy.prepare(
+                arguments: ["--hostname=--port"],
+                environment: [:]
+            )
+        }
+
+        let remote = try QuasarServePolicy.prepare(
+            arguments: ["--bind=0.0.0.0:4800"],
+            environment: [
+                "ABBEY_QUASAR_ALLOW_NON_LOOPBACK": "1",
+                "ABBEY_QUASAR_API_TOKEN": "owner-token",
+                "ABBEY_QUASAR_ALLOWED_ORIGINS": "https://console.example",
+            ]
+        )
+        #expect(remote.hostname == "0.0.0.0")
+        #expect(remote.port == 4_800)
+        #expect(!remote.allowsTokenlessLoopback)
+        #expect(remote.allowedOrigins == ["https://console.example"])
+        #expect(!QuasarServePolicy.isValidExactHTTPSOrigin("https://user@example.com"))
+        #expect(!QuasarServePolicy.isValidExactHTTPSOrigin("https://example.com/path"))
+        #expect(!QuasarServePolicy.isValidExactHTTPSOrigin("https://*.example.com"))
+        #expect(!QuasarServePolicy.isValidExactHTTPSOrigin("http://example.com"))
+    }
+
+    @Test func quasarOnlyConfigurationMountsNoBotDatabaseOrGenericRoutes() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "abbey-quasar-only-\(UUID().uuidString)"
+        )
+        setenv("ABBEY_QUASAR_HOME", home.path, 1)
+        setenv("ABBEY_QUASAR_API_TOKEN", "quasar-only-token", 1)
+        unsetenv("ABBEY_QUASAR_ALLOWED_ORIGINS")
+        let app = try await Application.make(.testing)
+        do {
+            try await configureQuasarOnly(app, allowsTokenlessLoopback: true)
+            #expect(app.routes.all.contains { $0.description == "GET /api/sites" })
+            #expect(!app.routes.all.contains { $0.description == "GET /health" })
+            #expect(!app.routes.all.contains { $0.description == "GET /api/status" })
+            try await app.testing().test(
+                .GET,
+                "/api/sites",
+                headers: bearerHeaders("quasar-only-token")
+            ) { response in
+                #expect(response.status == .ok)
+            }
+            try await app.testing().test(.GET, "/health") { response in
+                #expect(response.status == .notFound)
+            }
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            unsetenv("ABBEY_QUASAR_HOME")
+            unsetenv("ABBEY_QUASAR_API_TOKEN")
+            try? FileManager.default.removeItem(at: home)
+            throw error
+        }
+        unsetenv("ABBEY_QUASAR_HOME")
+        unsetenv("ABBEY_QUASAR_API_TOKEN")
+        try? FileManager.default.removeItem(at: home)
     }
 
     @Test func getStateUserSucceedsWithCorrectBearerToken() async throws {

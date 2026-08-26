@@ -1,15 +1,31 @@
 import Foundation
 import Vapor
 
+public enum AbbeyServerMode: Sendable {
+    case full
+    case quasarOnly(allowsTokenlessLoopback: Bool)
+}
+
 /// HTTP + Discord server entry (invoked as `swift run -- serve`).
 public enum AbbeyServerMain {
-    public static func main(arguments: [String] = CommandLine.arguments) async {
+    public static func main(
+        arguments: [String] = CommandLine.arguments,
+        mode: AbbeyServerMode = .full
+    ) async {
         do {
             var env = try Environment.detect(arguments: arguments)
             try LoggingSystem.bootstrap(from: &env)
             let app = try await Application.make(env)
             do {
-                try await configure(app)
+                switch mode {
+                case .full:
+                    try await configure(app)
+                case .quasarOnly(let allowsTokenlessLoopback):
+                    try await configureQuasarOnly(
+                        app,
+                        allowsTokenlessLoopback: allowsTokenlessLoopback
+                    )
+                }
                 try await app.execute()
                 try await app.asyncShutdown()
             } catch {

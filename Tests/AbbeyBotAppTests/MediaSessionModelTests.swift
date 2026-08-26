@@ -364,6 +364,141 @@ private actor FakeVoicePresencePort: VoicePresencePort {
     }
 }
 
+private actor FakeVoiceQualificationPort: VoiceQualificationPort {
+    private var participants: DiscordVoiceParticipantSnapshot
+    private var authorized: Bool
+    private var continuations: [UUID: AsyncStream<DiscordVoiceParticipantSnapshot>.Continuation] = [:]
+
+    init(rawParticipantIDs: [String], authorized: Bool = true) {
+        participants = .init(
+            count: rawParticipantIDs.count,
+            participantDigests: Set(
+                rawParticipantIDs.map(LiveMediaQualificationCoordinator.participantDigest)
+            )
+        )
+        self.authorized = authorized
+    }
+
+    func participantSnapshot(guildID: String, channelID: String) async
+        -> DiscordVoiceParticipantSnapshot
+    {
+        participants
+    }
+
+    func managerAuthorized(guildID: String, userID: String) async -> Bool { authorized }
+
+    func participantSnapshots(guildID: String, channelID: String) async
+        -> AsyncStream<DiscordVoiceParticipantSnapshot>
+    {
+        let id = UUID()
+        let pair = AsyncStream<DiscordVoiceParticipantSnapshot>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        continuations[id] = pair.continuation
+        pair.continuation.onTermination = { _ in
+            Task { await self.removeContinuation(id) }
+        }
+        pair.continuation.yield(participants)
+        return pair.stream
+    }
+
+    func setParticipants(_ rawParticipantIDs: [String]) {
+        participants = .init(
+            count: rawParticipantIDs.count,
+            participantDigests: Set(
+                rawParticipantIDs.map(LiveMediaQualificationCoordinator.participantDigest)
+            )
+        )
+        for continuation in continuations.values { continuation.yield(participants) }
+    }
+
+    func setAuthorized(_ value: Bool) { authorized = value }
+
+    private func removeContinuation(_ id: UUID) { continuations[id] = nil }
+}
+
+private actor SuspendedVoiceQualificationPort: VoiceQualificationPort {
+    private var requested = false
+    private var continuation: CheckedContinuation<DiscordVoiceParticipantSnapshot, Never>?
+
+    func participantSnapshot(guildID: String, channelID: String) async
+        -> DiscordVoiceParticipantSnapshot
+    {
+        requested = true
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func managerAuthorized(guildID: String, userID: String) async -> Bool { true }
+
+    func waitUntilRequested() async {
+        while !requested { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume(returning: .init(
+            count: 1,
+            participantDigests: [
+                LiveMediaQualificationCoordinator.participantDigest("participant")
+            ],
+            isComplete: true
+        ))
+        continuation = nil
+    }
+}
+
+private struct QualifiedMediaSessionBridge: DiscordVoiceGatewayPairBridge {
+    func requestGatewayState(guildID: String, channelID: String) async throws {}
+    func awaitGatewayPair() async throws -> DiscordVoiceGatewayPair {
+        .init(
+            endpoint: "localhost", token: "redacted-test-token", sessionID: "session",
+            serverID: "guild", channelID: "channel", userID: "bot"
+        )
+    }
+    func leaveVoice(guildID: String) async {}
+}
+
+private actor QualifiedMediaSessionGateway: DiscordVoiceGatewaySessionClient {
+    func connect(using pair: DiscordVoiceGatewayPair) async throws -> DiscordVoiceGatewayTransportReady {
+        .init(
+            address: "127.0.0.1", port: 9, ssrc: 1,
+            encryptionModes: [DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue]
+        )
+    }
+    func selectTransport(_ endpoint: DiscordVoiceDiscoveredEndpoint) async throws {}
+    func negotiateDAVEAndMedia() async throws -> DiscordVoiceMediaCapabilities {
+        .init(dave: true, aead: true, opus: true)
+    }
+    func disconnect() async {}
+}
+
+private actor QualifiedMediaSessionUDP: DiscordVoiceUDPDiscoverySession {
+    func discoverEndpoint(
+        for ready: DiscordVoiceGatewayTransportReady
+    ) async throws -> DiscordVoiceDiscoveredEndpoint {
+        .init(address: "127.0.0.1", port: 9)
+    }
+    func disconnect() async {}
+}
+
+private struct QualifiedMediaSessionFactory: DiscordVoiceSessionFactory {
+    var mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability { .locallyComposed }
+    func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient {
+        QualifiedMediaSessionGateway()
+    }
+    func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession {
+        QualifiedMediaSessionUDP()
+    }
+    func makeSessionComponents(
+        qualificationLease: DiscordVoiceQualificationLease?
+    ) -> DiscordVoiceSessionComponents {
+        .init(
+            gateway: QualifiedMediaSessionGateway(),
+            udp: QualifiedMediaSessionUDP(),
+            mediaAdapterAvailability: qualificationLease == nil ? .locallyComposed : .fullyWired
+        )
+    }
+}
+
 @Suite("Media Session Model")
 @MainActor
 struct MediaSessionModelTests {
@@ -373,6 +508,113 @@ struct MediaSessionModelTests {
             factory: MediaSessionTestFactory(),
             configuration: DiscordVoiceControllerConfiguration()
         )
+    }
+
+    private func makeQualifiedController() throws -> DiscordVoiceController {
+        try DiscordVoiceController(
+            bridge: QualifiedMediaSessionBridge(),
+            factory: QualifiedMediaSessionFactory(),
+            configuration: DiscordVoiceControllerConfiguration(requiresConsentEpoch: true)
+        )
+    }
+
+    @Test("Qualification uses live manager and participant facts and kills the epoch on either change")
+    func qualificationRevalidatesEveryAuthorityFact() async throws {
+        let port = FakeVoiceQualificationPort(rawParticipantIDs: ["one", "two"])
+        let platform = FakeMediaSessionPlatform()
+        let model = MediaSessionModel(
+            controller: try makeQualifiedController(),
+            platform: platform,
+            qualificationPort: port,
+            qualificationEnvironment: ["ABBEY_MEDIA_QUALIFICATION_CANARY": "1"]
+        )
+
+        await model.openQualificationAndJoin(
+            guildID: "guild",
+            channelID: "channel",
+            managerUserID: "manager",
+            allCurrentParticipantsConsented: true,
+            capabilities: [.audioSend, .audioReceive]
+        )
+        #expect(model.qualification.epoch != nil)
+        #expect(model.qualificationParticipantCount == 2)
+        #expect(model.qualificationManagerAuthorized)
+
+        await port.setParticipants(["one"])
+        for _ in 0..<100 where model.qualification.epoch != nil { await Task.yield() }
+        #expect(model.qualification.epoch == nil)
+        #expect(model.qualification.lastCloseReason == .participantChanged)
+        #expect(await platform.callSnapshot().stopCalls >= 1)
+
+        await port.setParticipants(["one", "two"])
+        await model.openQualificationAndJoin(
+            guildID: "guild",
+            channelID: "channel",
+            managerUserID: "manager",
+            allCurrentParticipantsConsented: true,
+            capabilities: [.audioSend]
+        )
+        #expect(model.qualification.epoch != nil)
+        await port.setAuthorized(false)
+        await model.refreshQualification(
+            guildID: "guild",
+            channelID: "channel",
+            managerUserID: "manager",
+            allCurrentParticipantsConsented: true
+        )
+        #expect(model.qualification.epoch == nil)
+        #expect(model.qualification.lastCloseReason == .managerAuthorizationChanged)
+        #expect(!model.qualificationManagerAuthorized)
+        await model.shutdown()
+    }
+
+    @Test("Qualification is impossible without the explicit process canary flag")
+    func qualificationDefaultsOff() async throws {
+        let model = MediaSessionModel(
+            controller: try makeQualifiedController(),
+            platform: FakeMediaSessionPlatform(),
+            qualificationPort: FakeVoiceQualificationPort(rawParticipantIDs: ["one"]),
+            qualificationEnvironment: [:]
+        )
+        await model.openQualificationAndJoin(
+            guildID: "guild",
+            channelID: "channel",
+            managerUserID: "manager",
+            allCurrentParticipantsConsented: true,
+            capabilities: [.audioSend]
+        )
+        #expect(model.qualification.epoch == nil)
+        #expect(model.operatorError?.contains("Canary mode is disabled") == true)
+        await model.shutdown()
+    }
+
+    @Test("Emergency stop supersedes a suspended qualification preflight")
+    func qualificationOpenCannotResumeAfterEmergencyStop() async throws {
+        let port = SuspendedVoiceQualificationPort()
+        let model = MediaSessionModel(
+            controller: try makeQualifiedController(),
+            platform: FakeMediaSessionPlatform(),
+            qualificationPort: port,
+            qualificationEnvironment: ["ABBEY_MEDIA_QUALIFICATION_CANARY": "1"]
+        )
+        let opening = Task { @MainActor in
+            await model.openQualificationAndJoin(
+                guildID: "guild",
+                channelID: "channel",
+                managerUserID: "manager",
+                allCurrentParticipantsConsented: true,
+                capabilities: [.audioSend]
+            )
+        }
+        await port.waitUntilRequested()
+        await model.closeQualification(.emergencyStop)
+        await port.release()
+        await opening.value
+
+        #expect(model.qualification.epoch == nil)
+        #expect(model.qualification.lastCloseReason == .emergencyStop)
+        #expect(model.snapshot.phase == .idle)
+        await model.shutdown()
     }
 
     @Test("Receive is off on construction and a refused enable reports rather than sticking")

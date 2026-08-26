@@ -10,6 +10,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case interactions = "Interactions"
     case personas = "Personas"
     case equity = "Equity Research"
+    case knowledge = "Knowledge"
+    case quasar = "Quasar"
 
     var id: String { rawValue }
 
@@ -23,6 +25,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .interactions: return "bolt.horizontal"
         case .personas: return "sparkles"
         case .equity: return "chart.line.uptrend.xyaxis"
+        case .knowledge: return "books.vertical"
+        case .quasar: return "wand.and.stars"
         }
     }
 }
@@ -57,6 +61,10 @@ struct ContentView: View {
                 PersonaSwitcherView()
             case .equity:
                 EquityResearchView()
+            case .knowledge:
+                KnowledgeWorkspaceView()
+            case .quasar:
+                QuasarWorkspaceView()
             }
         }
         .toolbar {

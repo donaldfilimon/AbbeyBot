@@ -95,6 +95,7 @@ run_gate build              -- build --product AbbeyBot                 || true
 if [[ $FAILED -ne 0 ]]; then echo "SERVER_SNAPSHOT_FAIL: build failed"; exit 1; fi
 
 run_gate test-core          -- test --filter AbbeyCoreTests             || true
+run_gate test-quasar        -- test --filter AbbeyQuasarKitTests        || true
 run_gate test-cli           -- test --filter AbbeyCLITests              || true
 run_gate test-serverkit DATABASE_URL=sqlite://memory \
                             -- test --filter AbbeyServerKitTests        || true

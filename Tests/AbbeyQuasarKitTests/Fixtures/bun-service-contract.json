@@ -1,0 +1,29 @@
+{
+  "site": {
+    "id": "fixture-site-id",
+    "name": "Fixture Site",
+    "slug": "fixture-site",
+    "createdAt": "2026-08-19T12:00:00Z",
+    "status": "generating",
+    "previewPort": null,
+    "promptHistory": [
+      { "prompt": "Build the fixture", "at": "2026-08-19T12:00:00Z" }
+    ],
+    "lastError": null
+  },
+  "eventPage": {
+    "events": [
+      { "type": "tool", "name": "list_files" },
+      { "type": "tool", "name": "read_file", "path": "app/page.tsx" },
+      { "type": "text", "text": "Prepared fixture update" },
+      { "type": "done" }
+    ],
+    "next": 4
+  },
+  "preview": {
+    "state": "running",
+    "port": 4710,
+    "url": "http://127.0.0.1:4710/",
+    "logTail": []
+  }
+}

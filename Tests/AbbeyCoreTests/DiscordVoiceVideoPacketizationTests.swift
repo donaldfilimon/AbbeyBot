@@ -265,6 +265,13 @@ struct DiscordVoiceVideoPacketizationTests {
                 timestamp: 0
             )
         }
+
+        #expect(throws: DiscordVoiceVideoPacketizationError.frameTooLarge(
+            fragments: 1 + (Int.max - 1) / budget,
+            maximumFragments: 3
+        )) {
+            _ = try packetizer.fragmentCount(forFrameByteCount: Int.max)
+        }
     }
 
     // MARK: - Clock integration

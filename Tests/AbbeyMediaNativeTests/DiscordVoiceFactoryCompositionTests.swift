@@ -73,4 +73,37 @@ struct DiscordVoiceFactoryCompositionTests {
             ) == 0
         )
     }
+
+    @Test("only an exact content-free qualification lease promotes one component bundle")
+    func leasePromotesOnlyTheConstructedCanarySession() async throws {
+        let factory = DiscordVoiceNativeControlSessionFactory(
+            captureSource: StubCaptureSource(),
+            playbackSink: StubPlaybackSink()
+        )
+        let coordinator = LiveMediaQualificationCoordinator(environment: [
+            "ABBEY_MEDIA_QUALIFICATION_CANARY": "1"
+        ])
+        _ = try await coordinator.open(
+            guildID: "g",
+            guildAuthorizationClass: "owner",
+            participantDigests: [LiveMediaQualificationCoordinator.participantDigest("one")],
+            participantSetComplete: true,
+            allCurrentParticipantsConsented: true,
+            managerAuthorized: true,
+            capabilities: [.audioSend, .audioReceive],
+            daveProtocolVersion: 1,
+            codec: "H264"
+        )
+        let lease = try await coordinator.qualificationLease()
+        #expect(factory.makeSessionComponents().mediaAdapterAvailability == .locallyComposed)
+        #expect(lease.admit(guildID: "g"))
+        #expect(
+            factory.makeSessionComponents(qualificationLease: lease).mediaAdapterAvailability
+                == .fullyWired
+        )
+        #expect(
+            factory.makeSessionComponents(qualificationLease: lease).mediaAdapterAvailability
+                == .locallyComposed
+        )
+    }
 }

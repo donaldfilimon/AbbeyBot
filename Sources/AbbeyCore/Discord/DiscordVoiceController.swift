@@ -176,17 +176,23 @@ public struct DiscordVoiceSessionComponents: Sendable {
     /// plane and datagram transport as `gateway`. `nil` means this session
     /// receives nothing, which is what every portable factory does today.
     public let receiveLoop: (any DiscordVoiceReceiveLoopControlling)?
+    /// Claim level for this exact session construction. A qualification-gated
+    /// factory may be locally composed in general yet fully wired only for one
+    /// content-free canary lease.
+    public let mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability?
 
     public init(
         gateway: any DiscordVoiceGatewaySessionClient,
         udp: any DiscordVoiceUDPDiscoverySession,
         captureLoop: (any DiscordVoiceCaptureLoopControlling)? = nil,
-        receiveLoop: (any DiscordVoiceReceiveLoopControlling)? = nil
+        receiveLoop: (any DiscordVoiceReceiveLoopControlling)? = nil,
+        mediaAdapterAvailability: DiscordVoiceMediaAdapterAvailability? = nil
     ) {
         self.gateway = gateway
         self.udp = udp
         self.captureLoop = captureLoop
         self.receiveLoop = receiveLoop
+        self.mediaAdapterAvailability = mediaAdapterAvailability
     }
 }
 
@@ -195,14 +201,24 @@ public protocol DiscordVoiceSessionFactory: Sendable {
     func makeGatewayClient() -> any DiscordVoiceGatewaySessionClient
     func makeUDPDiscoverySession() -> any DiscordVoiceUDPDiscoverySession
     func makeSessionComponents() -> DiscordVoiceSessionComponents
+    func makeSessionComponents(
+        qualificationLease: DiscordVoiceQualificationLease?
+    ) -> DiscordVoiceSessionComponents
 }
 
 public extension DiscordVoiceSessionFactory {
     func makeSessionComponents() -> DiscordVoiceSessionComponents {
         DiscordVoiceSessionComponents(
             gateway: makeGatewayClient(),
-            udp: makeUDPDiscoverySession()
+            udp: makeUDPDiscoverySession(),
+            mediaAdapterAvailability: mediaAdapterAvailability
         )
+    }
+
+    func makeSessionComponents(
+        qualificationLease: DiscordVoiceQualificationLease?
+    ) -> DiscordVoiceSessionComponents {
+        makeSessionComponents()
     }
 }
 
@@ -276,13 +292,17 @@ public struct DiscordVoiceControllerConfiguration: Equatable, Sendable {
     /// unexpected session terminations; zero disables the fallback so every
     /// unexpected termination fails closed immediately.
     public let maximumAutoReconnectAttempts: Int
+    /// Production media is admitted only while an explicit consent epoch is
+    /// installed. Tests and portable fixtures may leave this false.
+    public let requiresConsentEpoch: Bool
 
     public init(
         credentialTimeout: Duration = .seconds(10),
         snapshotBufferLimit: Int = 32,
         audioQueueCapacity: Int = 64,
         videoQueueCapacity: Int = 4,
-        maximumAutoReconnectAttempts: Int = 2
+        maximumAutoReconnectAttempts: Int = 2,
+        requiresConsentEpoch: Bool = false
     ) throws {
         guard credentialTimeout > .zero else {
             throw DiscordVoiceMediaContractError.invalidCredentialTimeout
@@ -293,6 +313,7 @@ public struct DiscordVoiceControllerConfiguration: Equatable, Sendable {
             )
         }
         self.maximumAutoReconnectAttempts = maximumAutoReconnectAttempts
+        self.requiresConsentEpoch = requiresConsentEpoch
         guard snapshotBufferLimit > 0 else {
             throw DiscordVoiceMediaContractError.invalidQueueCapacity(snapshotBufferLimit)
         }
@@ -425,6 +446,10 @@ public actor DiscordVoiceController {
     private var microphoneEnabled = false
     private var cameraEnabled = false
     private var screenShareEnabled = false
+    private var consentEpochHash: String?
+    private var qualificationLease: DiscordVoiceQualificationLease?
+    private var qualificationCapabilities = Set<LiveMediaCapability>()
+    private var sessionMediaAvailability: DiscordVoiceMediaAdapterAvailability
     private var audioQueue: DiscordVoiceBoundedQueue<DiscordVoiceOwnedAudioFrame>
     private var videoQueue: DiscordVoiceBoundedQueue<DiscordVoiceOwnedVideoFrame>
 
@@ -443,6 +468,7 @@ public actor DiscordVoiceController {
         self.factory = factory
         self.configuration = configuration
         self.sleeper = sleeper
+        self.sessionMediaAvailability = factory.mediaAdapterAvailability
         self.audioQueue = try DiscordVoiceBoundedQueue(capacity: configuration.audioQueueCapacity)
         self.videoQueue = try DiscordVoiceBoundedQueue(capacity: configuration.videoQueueCapacity)
     }
@@ -468,12 +494,33 @@ public actor DiscordVoiceController {
 
     @discardableResult
     public func join(guildID: String, channelID: String) async -> DiscordVoiceControllerSnapshot {
+        await join(guildID: guildID, channelID: channelID, qualificationLease: nil)
+    }
+
+    /// Canary-only join. The lease is content-free and is accepted only for
+    /// the exact guild digest approved by the qualification coordinator. It is
+    /// consumed by this connection construction and is never inherited by a
+    /// reconnect or replacement.
+    @discardableResult
+    public func join(
+        guildID: String,
+        channelID: String,
+        qualificationLease lease: DiscordVoiceQualificationLease?
+    ) async -> DiscordVoiceControllerSnapshot {
         // Register teardown before beginning the replacement. A stopNow task or
         // another replacement may already own older resources, and every such
         // task must finish before a new main-Gateway request is allowed.
         let prior = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
         enqueueTeardown(prior)
+        if let lease {
+            guard lease.admit(guildID: guildID) else {
+                return await fail(.mediaUnavailable, ifCurrent: generation)
+            }
+            qualificationLease = lease
+            consentEpochHash = lease.consentEpochHash
+            qualificationCapabilities = lease.capabilities
+        }
         // A fresh operator-initiated join refills the full-reconnect budget;
         // reconnect() deliberately does not.
         autoReconnectAttempts = 0
@@ -503,6 +550,7 @@ public actor DiscordVoiceController {
     /// asynchronous teardown begins. Late callbacks therefore cannot resurrect
     /// state or enqueue media after this method returns.
     public func stopNow() {
+        consentEpochHash = nil
         let teardown = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
         enqueueTeardown(teardown)
@@ -510,6 +558,7 @@ public actor DiscordVoiceController {
 
     @discardableResult
     public func leave() async -> DiscordVoiceControllerSnapshot {
+        consentEpochHash = nil
         let teardown = invalidateAndDetach(clearTarget: true)
         transition(to: .idle)
         enqueueTeardown(teardown)
@@ -562,6 +611,11 @@ public actor DiscordVoiceController {
     /// than leaving the session in a state that looks like it is listening.
     @discardableResult
     public func setReceiveEnabled(_ enabled: Bool) async -> DiscordVoiceControllerSnapshot {
+        if enabled, !permitsQualifiedCapability(.audioReceive) {
+            failure = .receiveUnavailable
+            publish()
+            return makeSnapshot()
+        }
         // Same reconcile loop as the microphone, for the same reason: both
         // start/stop steps suspend, so a request arriving during one must be
         // recorded rather than dropped. Turning receive OFF is a privacy
@@ -624,6 +678,11 @@ public actor DiscordVoiceController {
 
     @discardableResult
     public func setMicrophoneEnabled(_ enabled: Bool) async -> DiscordVoiceControllerSnapshot {
+        if enabled, !permitsQualifiedCapability(.audioSend) {
+            failure = .captureUnavailable
+            publish()
+            return makeSnapshot()
+        }
         guard !microphoneTransitionInFlight else {
             // Record rather than drop: the in-flight transition reconciles
             // this before it returns.
@@ -740,14 +799,14 @@ public actor DiscordVoiceController {
 
     @discardableResult
     public func setCameraEnabled(_ enabled: Bool) -> DiscordVoiceControllerSnapshot {
-        cameraEnabled = enabled && acceptsFrames
+        cameraEnabled = enabled && acceptsFrames && permitsQualifiedCapability(.cameraSend)
         publish()
         return makeSnapshot()
     }
 
     @discardableResult
     public func setScreenShareEnabled(_ enabled: Bool) -> DiscordVoiceControllerSnapshot {
-        screenShareEnabled = enabled && acceptsFrames
+        screenShareEnabled = enabled && acceptsFrames && permitsQualifiedCapability(.screenSend)
         publish()
         return makeSnapshot()
     }
@@ -758,6 +817,47 @@ public actor DiscordVoiceController {
         phase = speaking && microphoneEnabled ? .readySpeaking : .readyMuted
         publish()
         return makeSnapshot()
+    }
+
+    /// Opens the runtime gate after the separate qualification coordinator has
+    /// established unanimous consent for the exact current participant set.
+    func installConsentEpoch(
+        hash: String,
+        capabilities: Set<LiveMediaCapability> = Set(LiveMediaCapability.allCases)
+    ) throws -> DiscordVoiceControllerSnapshot {
+        guard hash.count == 64,
+              hash.allSatisfy({ $0.isHexDigit && !$0.isUppercase })
+        else {
+            throw DiscordVoiceMediaContractError.invalidConsentEpoch
+        }
+        guard !capabilities.isEmpty else {
+            throw DiscordVoiceMediaContractError.invalidConsentEpoch
+        }
+        consentEpochHash = hash
+        qualificationCapabilities = capabilities
+        failure = nil
+        publish()
+        return makeSnapshot()
+    }
+
+    /// Immediate privacy stop for participant, manager, connection, consent,
+    /// interruption, background, or operator kill events.
+    public func closeConsentEpoch() async -> DiscordVoiceControllerSnapshot {
+        consentEpochHash = nil
+        qualificationCapabilities.removeAll(keepingCapacity: false)
+        cameraEnabled = false
+        screenShareEnabled = false
+        audioQueue.removeAll()
+        videoQueue.removeAll()
+        _ = await setMicrophoneEnabled(false)
+        _ = await setReceiveEnabled(false)
+        publish()
+        return makeSnapshot()
+    }
+
+    private func permitsQualifiedCapability(_ capability: LiveMediaCapability) -> Bool {
+        !configuration.requiresConsentEpoch
+            || (consentEpochHash != nil && qualificationCapabilities.contains(capability))
     }
 
     public func admit(_ frame: DiscordVoiceOwnedMediaFrame) -> DiscordVoiceFrameAdmission {
@@ -822,7 +922,9 @@ public actor DiscordVoiceController {
         case .cancelled: return makeSnapshot()
         }
 
-        let components = factory.makeSessionComponents()
+        let components = factory.makeSessionComponents(qualificationLease: qualificationLease)
+        sessionMediaAvailability = components.mediaAdapterAvailability
+            ?? factory.mediaAdapterAvailability
         let gateway = components.gateway
         let udp = components.udp
         gatewayClient = gateway
@@ -860,7 +962,7 @@ public actor DiscordVoiceController {
         // Always complete the secure Gateway-to-media-plane bootstrap first,
         // then apply the product claim gate. This lets an unavailable factory
         // prove Phase 4 without presenting audio as shipped before Phase 5.
-        guard factory.mediaAdapterAvailability.permitsLocalMedia,
+        guard sessionMediaAvailability.permitsLocalMedia,
               capabilities.isProductionReady
         else {
             return await fail(.mediaUnavailable, ifCurrent: localGeneration)
@@ -1163,6 +1265,15 @@ public actor DiscordVoiceController {
         // visible rather than load-bearing.
         sessionMonitorTask?.cancel()
         sessionMonitorTask = nil
+        // A consent epoch is bound to exactly one Voice Gateway/UDP
+        // connection. Joining or reconnecting replaces that connection, so
+        // retaining the old epoch would let a newly negotiated session inherit
+        // consent that was never granted to it. The operator must open and
+        // install a fresh epoch after every replacement.
+        consentEpochHash = nil
+        qualificationLease = nil
+        qualificationCapabilities.removeAll(keepingCapacity: false)
+        sessionMediaAvailability = factory.mediaAdapterAvailability
         generation &+= 1
         acceptsFrames = false
         microphoneEnabled = false
@@ -1285,8 +1396,8 @@ public actor DiscordVoiceController {
             droppedAudioFrames: audioQueue.droppedCount,
             droppedVideoFrames: videoQueue.droppedCount,
             failure: failure,
-            mediaAdapterAvailable: factory.mediaAdapterAvailability == .fullyWired,
-            localMediaAvailable: factory.mediaAdapterAvailability.permitsLocalMedia
+            mediaAdapterAvailable: sessionMediaAvailability == .fullyWired,
+            localMediaAvailable: sessionMediaAvailability.permitsLocalMedia
         )
     }
 

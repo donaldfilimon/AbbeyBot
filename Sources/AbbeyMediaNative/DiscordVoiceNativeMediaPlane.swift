@@ -187,6 +187,9 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     public struct ReceiveDiagnostics: Equatable, Sendable, CustomStringConvertible {
         /// Packets that produced decoded PCM.
         public let accepted: UInt64
+        /// Complete H.264 access units that passed transport authentication,
+        /// RFC 6184 reassembly, and DAVE unprotection.
+        public let acceptedVideoAccessUnits: UInt64
         /// Loss-concealment frames synthesized by `concealAudioLoss(ssrc:)`.
         public let concealed: UInt64
         /// Refused because no generation was installed, or the installed
@@ -214,7 +217,8 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
 
         public var description: String {
             "DiscordVoiceNativeMediaPlane.ReceiveDiagnostics("
-                + "accepted: \(accepted), concealed: \(concealed), "
+                + "accepted: \(accepted), acceptedVideoAccessUnits: \(acceptedVideoAccessUnits), "
+                + "concealed: \(concealed), "
                 + "droppedNotInstalled: \(droppedNotInstalled), "
                 + "droppedTransportAuthentication: \(droppedTransportAuthentication), "
                 + "droppedDAVE: \(droppedDAVE), "
@@ -229,6 +233,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
 
     private struct ReceiveCounters: Sendable {
         var accepted: UInt64 = 0
+        var acceptedVideoAccessUnits: UInt64 = 0
         var concealed: UInt64 = 0
         var droppedNotInstalled: UInt64 = 0
         var droppedTransportAuthentication: UInt64 = 0
@@ -342,12 +347,10 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     private var videoRevision: UInt64 = 0
     private var videoAnnouncementSignal: (@Sendable (VoiceGatewayV8Video) async throws -> Void)?
 
-    /// MTU-aware fragmenter for outbound video. Stateless and shared across
-    /// sends; all per-frame state lives in the clock it is handed. Built
-    /// lazily because the initializer validates its bounds and can throw,
-    /// which a stored-property initializer cannot propagate.
-    private func makeVideoPacketizer() throws -> DiscordVoiceVideoPacketizer {
-        try DiscordVoiceVideoPacketizer()
+    /// RFC 6184 packetizer for the only qualified initial video codec. It is
+    /// built lazily because its MTU bounds are validated and can throw.
+    private func makeH264Packetizer() throws -> DiscordVoiceH264Packetizer {
+        try DiscordVoiceH264Packetizer()
     }
 
     /// One Opus decoder per authenticated remote SSRC.
@@ -776,6 +779,115 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         )
     }
 
+    /// Receives one already jitter-ordered H.264 access unit. The security and
+    /// codec order is the exact inverse of send: authenticate every RTPSIZE
+    /// packet, validate/reassemble RFC 6184, then DAVE-unprotect the complete
+    /// codec frame before it can reach VideoToolbox. Loss/reorder/RTX policy is
+    /// intentionally supplied by the bounded AbbeyCore primitives above this
+    /// method; a gap or mixed source/timestamp fails the whole access unit.
+    public func receiveH264AccessUnit(
+        packets: [[UInt8]],
+        senderID: UInt64
+    ) async throws -> Data {
+        guard let installed = runtime else {
+            receiveCounters.droppedNotInstalled &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.mediaNotInstalled
+        }
+        guard installed.daveReady else {
+            receiveCounters.droppedNotInstalled &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.daveProtectionRequired
+        }
+        guard !packets.isEmpty else {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        }
+        guard packets.count <= DiscordVoiceVideoPacketizer.defaultMaximumFragmentsPerFrame else {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        }
+        let receiveRevision = revision
+        let rtpCodec: DiscordVoiceRTPCodec
+        do { rtpCodec = try DiscordVoiceRTPCodec() }
+        catch {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        }
+        var depacketizer = DiscordVoiceH264Depacketizer()
+        var protectedAccessUnit: [UInt8]?
+        var sourceSSRC: UInt32?
+        var timestamp: UInt32?
+
+        for (packetIndex, packet) in packets.enumerated() {
+            let plaintext: [UInt8]
+            do { plaintext = try await installed.transportEncryption.open(packet) }
+            catch is DiscordVoiceRTPError {
+                receiveCounters.droppedMalformed &+= 1
+                throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+            } catch {
+                receiveCounters.droppedTransportAuthentication &+= 1
+                throw DiscordVoiceNativeMediaPlaneError.receiveTransportAuthenticationFailed
+            }
+            try requireCurrentReceive(receiveRevision)
+            do {
+                let header = try rtpCodec.decodeHeader(from: plaintext)
+                let layout = try rtpCodec.plaintextLayout(in: plaintext)
+                guard header.payloadType == DiscordVoiceRTPHeader.discordVideoH264PayloadType else {
+                    throw DiscordVoiceNativeMediaPlaneError.receiveMediaTypeUnsupported
+                }
+                // This API accepts exactly one access unit. Its authenticated
+                // marker must therefore appear exactly once, on the final
+                // supplied packet; mixed sources/timestamps are malformed too.
+                // Without this gate, a completed unit followed by an unmarked
+                // partial unit was silently ignored and the first unit reached
+                // DAVE despite the malformed packet list.
+                guard sourceSSRC == nil || sourceSSRC == header.ssrc,
+                      timestamp == nil || timestamp == header.timestamp,
+                      header.marker == (packetIndex == packets.count - 1)
+                else { throw DiscordVoiceH264RTPError.incompleteFragment }
+                sourceSSRC = header.ssrc
+                timestamp = header.timestamp
+                let fragment = DiscordVoiceVideoRTPFragment(
+                    header: header,
+                    payload: Array(plaintext[layout.payloadRange])
+                )
+                if let completed = try depacketizer.insert(fragment) {
+                    guard protectedAccessUnit == nil else {
+                        throw DiscordVoiceH264RTPError.incompleteFragment
+                    }
+                    protectedAccessUnit = completed
+                }
+            } catch DiscordVoiceNativeMediaPlaneError.receiveMediaTypeUnsupported {
+                receiveCounters.droppedMediaTypeUnsupported &+= 1
+                throw DiscordVoiceNativeMediaPlaneError.receiveMediaTypeUnsupported
+            } catch {
+                receiveCounters.droppedMalformed &+= 1
+                throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+            }
+        }
+        guard let protectedAccessUnit else {
+            receiveCounters.droppedMalformed &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receivePacketMalformed
+        }
+        guard let daveSession = await daveSessionProvider() else {
+            receiveCounters.droppedDAVE &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.daveSessionUnavailable
+        }
+        try requireCurrentReceive(receiveRevision)
+        let decoded: Data
+        do {
+            decoded = try await daveSession.unprotect(
+                Data(protectedAccessUnit), mediaType: .video, senderID: senderID
+            )
+            _ = try DiscordVoiceH264Packetizer.nalUnits(in: Array(decoded))
+        } catch {
+            receiveCounters.droppedDAVE &+= 1
+            throw DiscordVoiceNativeMediaPlaneError.receiveDAVEUnprotectFailed
+        }
+        try requireCurrentReceive(receiveRevision)
+        receiveCounters.acceptedVideoAccessUnits &+= 1
+        return decoded
+    }
+
     /// Synthesizes one 20 ms concealment frame for a source whose packet was
     /// lost, using that source's own Opus decoder state
     /// (`Opus20msCodec.decodePacketLoss()`).
@@ -832,6 +944,7 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     public func receiveDiagnostics() -> ReceiveDiagnostics {
         ReceiveDiagnostics(
             accepted: receiveCounters.accepted,
+            acceptedVideoAccessUnits: receiveCounters.acceptedVideoAccessUnits,
             concealed: receiveCounters.concealed,
             droppedNotInstalled: receiveCounters.droppedNotInstalled,
             droppedTransportAuthentication: receiveCounters.droppedTransportAuthentication,
@@ -986,6 +1099,11 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         guard allocation.audioSSRC == installed.ssrc else {
             throw DiscordVoiceNativeMediaPlaneError.videoSourceInvalid
         }
+        guard codec == .h264 else {
+            // The initial canary advertises H.264 only. Never map or guess a
+            // codec that has not passed the exact live control-plane probe.
+            throw DiscordVoiceNativeMediaPlaneError.videoSourceInvalid
+        }
         let payloadType = try Self.rtpPayloadType(for: codec)
         let announcement = try allocation.announcement(activeRIDs: activeRIDs)
         // Every rejection above happens before the generation moves, so a
@@ -1009,13 +1127,13 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
 
     /// Applies DAVE video-frame protection to one already-encoded video frame
     /// (a complete access unit), builds and RTPSIZE-protects the video RTP
-    /// packet, then sends it through the retained UDP socket. This composes
+    /// packets, then sends them through the retained UDP socket. This composes
     /// the same Phase 5 boundary as `sendAudioFrame` for `.video` media: the
     /// installed `NativeDAVESession.protect` with the video frame type and
     /// negotiated codec label, the 90 kHz `DiscordVoiceVideoRTPClock`, the
-    /// negotiated video RTP payload type with the marker bit set on the frame
-    /// boundary (this slice sends one whole frame per packet; MTU
-    /// packetization is a later boundary), the shared
+    /// negotiated H.264 RTP payload type through RFC 6184 single-NAL/FU-A
+    /// packetization with the marker bit set only at the access-unit boundary,
+    /// the shared
     /// `DiscordVoiceTransportEncryption` AEAD counter, and the retained
     /// datagram transport. Both the generation revision and the video-source
     /// generation are re-checked after every suspension, so neither a
@@ -1031,9 +1149,10 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     /// is no tolerated absent-callback path), DAVE protection fails, or the
     /// installation or the installed video source is superseded mid-send.
     ///
-    /// Boundary honesty: callers must supply frames already encoded by a
-    /// negotiated codec. No capture pipeline, encoder, or codec negotiation
-    /// completion ships behind this call.
+    /// Boundary honesty: callers must supply Annex-B H.264 access units already
+    /// encoded by the platform codec. Camera/screen capture and VideoToolbox
+    /// are separate platform boundaries; promotion still requires the observed
+    /// Discord control-plane mapping and a witnessed live qualification.
     public func sendVideoFrame(encodedFrame: Data) async throws {
         guard let installed = runtime else {
             throw DiscordVoiceNativeMediaPlaneError.mediaNotInstalled
@@ -1041,10 +1160,13 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         guard installed.daveReady else {
             throw DiscordVoiceNativeMediaPlaneError.daveProtectionRequired
         }
-        guard let videoSource, var reservedClock = videoClock else {
+        guard let videoSource, videoClock != nil else {
             throw DiscordVoiceNativeMediaPlaneError.videoSourceNotInstalled
         }
-        guard !encodedFrame.isEmpty else {
+        guard !encodedFrame.isEmpty,
+              encodedFrame.count <= DiscordVoiceH264Packetizer.maximumAccessUnitBytes,
+              (try? DiscordVoiceH264Packetizer.nalUnits(in: Array(encodedFrame))) != nil
+        else {
             throw DiscordVoiceNativeMediaPlaneError.videoFrameInvalid
         }
         let sendRevision = revision
@@ -1058,13 +1180,12 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
         // tick before the first `await`. A video frame's fragment count is a
         // function of the DAVE-PROTECTED size, which is not known until
         // `protect` returns, so the sequence run cannot be reserved up front.
-        // The guarantee that actually matters is preserved: the reservation
-        // below (`nextFrame(fragmentCount:)`) is a synchronous, actor-isolated
-        // step, so two overlapping sends still receive disjoint sequence runs
-        // and can never emit the same sequence number. What is given up is
-        // that run ORDER may not match frame order if a caller drives
-        // overlapping sends — production drives one frame at a time, as the
-        // audio path already assumes.
+        // The clock itself must also be read only at that later reservation
+        // point: copying it here would let two actor-reentrant sends carry the
+        // same pre-protection clock through their awaits and emit duplicate RTP
+        // sequence numbers. What is given up is that run ORDER may not match
+        // frame order if a caller drives overlapping sends — production drives
+        // one frame at a time, as the audio path already assumes.
         // Bind the stored callback to this source's announcement so the shared
         // gate can treat audio and video uniformly. Written as an explicit
         // if-let: the equivalent `Optional.map` with a nested @Sendable async
@@ -1108,18 +1229,23 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             )
         }
 
-        // Fragment to the path MTU. Previously this emitted ONE packet per
-        // frame with `marker: true` unconditionally, which is wire-incorrect
-        // for any frame above MTU — and real encoded video frames routinely
-        // are. The packetizer assigns one shared timestamp, contiguous
-        // sequence numbers, and the marker bit on the FINAL fragment only, and
-        // sizes each fragment so it still fits after `seal` adds the AEAD tag
-        // and counter.
+        // This read/update is one synchronous actor-isolated transaction after
+        // the protected size is known. Every overlapping send therefore sees
+        // the clock advanced by the prior reservation, even though both may
+        // have entered this method before either DAVE call completed.
+        guard var reservedClock = videoClock else {
+            throw DiscordVoiceNativeMediaPlaneError.sendInterrupted
+        }
+
+        // RFC 6184 packetization runs after DAVE's codec-aware frame transform
+        // and before transport AEAD. Single NAL units remain whole; oversized
+        // units use FU-A, with one timestamp and the marker only on the final
+        // packet of the access unit.
         //
         // Reserving through the clock overload keeps the run atomic: a frame
         // rejected for being empty or oversized consumes no sequence numbers.
-        let fragments = try makeVideoPacketizer().packetize(
-            frame: Array(protectedFrame),
+        let fragments = try makeH264Packetizer().packetize(
+            annexB: Array(protectedFrame),
             payloadType: videoSource.payloadType,
             ssrc: videoSource.ssrc,
             clock: &reservedClock

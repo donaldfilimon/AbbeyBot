@@ -23,7 +23,8 @@ var packageTargets: [Target] = [
         ],
         path: "Sources/AbbeyCore",
         resources: [
-            .copy("../../Contracts/Abbey")
+            .copy("../../Contracts/Abbey"),
+            .copy("Resources/KnowledgeSnapshot")
         ],
         swiftSettings: [
             .swiftLanguageMode(.v6)
@@ -33,6 +34,7 @@ var packageTargets: [Target] = [
         name: "AbbeyServerKit",
         dependencies: [
             "AbbeyCore",
+            "AbbeyQuasarKit",
             .product(name: "Vapor", package: "vapor"),
             .product(name: "Fluent", package: "fluent"),
             .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
@@ -46,9 +48,25 @@ var packageTargets: [Target] = [
         ]
     ),
     .target(
+        name: "AbbeyQuasarKit",
+        dependencies: [
+            "AbbeyCore",
+            .product(name: "Crypto", package: "swift-crypto")
+        ],
+        path: "Sources/AbbeyQuasarKit",
+        resources: [
+            .copy("Resources/next-site"),
+            .copy("Resources/next-site.manifest.json")
+        ],
+        swiftSettings: [
+            .swiftLanguageMode(.v6)
+        ]
+    ),
+    .target(
         name: "AbbeyServer",
         dependencies: [
             "AbbeyCore",
+            "AbbeyQuasarKit",
             "AbbeyServerKit",
             .product(name: "Vapor", package: "vapor"),
             .product(name: "Fluent", package: "fluent"),
@@ -102,6 +120,15 @@ var packageTargets: [Target] = [
         ]
     ),
     .testTarget(
+        name: "AbbeyQuasarKitTests",
+        dependencies: ["AbbeyQuasarKit", "AbbeyCore"],
+        path: "Tests/AbbeyQuasarKitTests",
+        resources: [.copy("Fixtures")],
+        swiftSettings: [
+            .swiftLanguageMode(.v6)
+        ]
+    ),
+    .testTarget(
         name: "AbbeyServerKitTests",
         dependencies: [
             "AbbeyServerKit",
@@ -127,6 +154,7 @@ var packageTargets: [Target] = [
 
 var entryDependencies: [Target.Dependency] = [
     "AbbeyCore",
+    "AbbeyQuasarKit",
     "AbbeyServer",
     "AbbeyCLI"
 ]
@@ -173,7 +201,7 @@ if nativeMediaEnabled {
 }
 
 if !serverOnlyPackage {
-    var desktopAppDependencies: [Target.Dependency] = ["AbbeyCore", "AbbeyMediaMacOS"]
+    var desktopAppDependencies: [Target.Dependency] = ["AbbeyCore", "AbbeyQuasarKit", "AbbeyMediaMacOS"]
     if nativeMediaEnabled {
         desktopAppDependencies.append("AbbeyMediaNative")
     }
@@ -190,6 +218,7 @@ if !serverOnlyPackage {
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
+                .linkedFramework("VideoToolbox"),
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("AppKit")
             ]
@@ -249,6 +278,7 @@ packageTargets.append(
 
 var packageProducts: [Product] = [
     .library(name: "AbbeyCore", targets: ["AbbeyCore"]),
+    .library(name: "AbbeyQuasarKit", targets: ["AbbeyQuasarKit"]),
     .library(name: "AbbeyServerKit", targets: ["AbbeyServerKit"]),
     // Sole executable product -> bare `swift run` works (defaults to desktop on macOS).
     // Roles: `swift run` | `swift run AbbeyBot serve ...` | `swift run AbbeyBot cli`

@@ -58,6 +58,7 @@ import sys
 root = pathlib.Path(sys.argv[1])
 native_names = {"CLibDave", "COpus", "CSodium", "AbbeyMediaNative", "AbbeyMediaNativeTests"}
 desktop_only_names = {"AbbeyBotApp", "AbbeyBotAppTests", "AbbeyMediaMacOS", "AbbeyMediaMacOSTests"}
+shared_quasar_names = {"AbbeyQuasarKit", "AbbeyQuasarKitTests"}
 
 def names(path):
     package = json.loads(path.read_text())
@@ -84,6 +85,11 @@ for filename in ("server-default.json", "server-native.json"):
     leaked = names(root / filename) & desktop_only_names
     if leaked:
         raise SystemExit(f"{filename} unexpectedly contains desktop-only entries: {sorted(leaked)}")
+
+for filename in ("desktop-default.json", "desktop-native.json", "server-default.json", "server-native.json"):
+    missing = shared_quasar_names - names(root / filename)
+    if missing:
+        raise SystemExit(f"{filename} is missing shared Quasar entries: {sorted(missing)}")
 PY
 
 echo "PACKAGE_GRAPHS_GREEN"
