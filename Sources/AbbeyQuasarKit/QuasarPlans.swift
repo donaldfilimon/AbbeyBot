@@ -343,9 +343,6 @@ public actor QuasarMutationExecutor {
         guard planDigest.count == 64, planDigest.allSatisfy({ $0.isHexDigit }) else {
             throw QuasarError.invalidInput("plan digest must be 64 hexadecimal characters")
         }
-        let snapshot = rollbackRoot
-            .appendingPathComponent(siteID, isDirectory: true)
-            .appendingPathComponent(planDigest, isDirectory: true)
         let rollbackGuard = try QuasarPathGuard(root: rollbackRoot)
         let manifestURL = try rollbackGuard.resolve(
             "\(siteID)/\(planDigest)/receipt.json",
@@ -421,6 +418,12 @@ public actor QuasarMutationExecutor {
                 restoredData = data
             } else {
                 guard entry.byteCount == 0, entry.sha256 == nil else {
+                    throw QuasarError.processFailed("rollback snapshot metadata is inconsistent")
+                }
+                let unexpectedBackup = try rollbackGuard.resolve(
+                    "\(siteID)/\(planDigest)/files/\(entry.path)"
+                )
+                guard !FileManager.default.fileExists(atPath: unexpectedBackup.path) else {
                     throw QuasarError.processFailed("rollback snapshot metadata is inconsistent")
                 }
                 restoredData = nil
