@@ -15,6 +15,7 @@ Always `unset TOOLCHAINS` first — desktop needs Xcode's toolchain, not a swift
 ```bash
 bash Scripts/verify-all.sh         # full gate — run before calling anything done
 bash Scripts/check-static-security.sh # tracked-secret/conflict-marker/diff hygiene
+bash Scripts/check-knowledge-snapshot.sh # signed bundled knowledge bytes + manifest
 bash Scripts/run-web-smoke.sh      # dashboard lint + tests + production build
 bash Scripts/run-smoke.sh          # desktop build/test/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + Postgres (compose) or sqlite fallback + GET /health
@@ -84,3 +85,16 @@ evidence. The disabled desktop job still requires a suitable macOS 27 runner.
 - Twitch: IRC PRIVMSG→ingest and persona reply (with cooldown) are shipped; IRC and EventSub chat share `BotRuntime.handleTwitchChat`. EventSub: `POST /api/twitch/eventsub` verifies HMAC-SHA256 + 10-min replay window when `TWITCH_EVENTSUB_SECRET` is set; duplicates by `Twitch-Eventsub-Message-Id` are acked without reprocessing (`TwitchEventSubReplayGuard`, backed by a Fluent `twitch_eventsub_deliveries` table — survives restarts, not in-process memory); `channel.chat.message` notifications ingest + persona-reply; `stream.online`/`stream.offline` update `twitchStreamLive` (on `/api/status`) + event bus + interaction log; follow/subscribe/cheer log interactions and soft-ingest social context (`BotRuntime.handleTwitchChannelSocial`); auto-subscribe on boot ships env-gated for all six notification types (`ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` + full `TWITCH_*` contract, `TwitchEventSubAutoSubscriber`, off by default, unverified live). **Not shipped:** PubSub (won't ship — Twitch deprecated it), live-verified Helix handshake (needs a real public HTTPS callback this environment doesn't have).
 - No CRDT merge (won't ship) — desktop and CLI pull with persisted per-entity compound cursors, LWW by `updatedAt`/`generatedAt`, and all-six-entity tombstones; 500-row pages drain via the server-issued timestamp + stable-ID boundary. CLI push remains messages + memory facts only. `/sync` stays a read-only status report. Codegen sandbox is a won't-ship (static `CodeProposalValidator` only).
 - Discord Voice **audio** and **video/Go Live** are **in progress, not shipped** — voice presence (`/voice join|leave`) is the only verified runtime claim. A voice stack is landing in `Sources/AbbeyCore/Discord/` (Voice Gateway v8 client/state machine, UDP discovery) per `docs/discord-voice-architecture.md`, but don't claim audio or video until the live-call evidence in `tasks/goals.md` exists; that file plus `tasks/todo.md` are the completion ledger.
+
+<!-- machine-git-policy -->
+## Git workflow (machine policy, 2026-08-27)
+
+This repo keeps its documented review-branch flow: changes route through
+`codex/*`/`cursor/*` branches into `main`; never push directly to `main`.
+That flow is the exception this machine's policy allows. Everything else
+still applies: a review branch and any worktree for it must be merged into
+`main` in this canonical checkout, the worktree removed, and the branch
+deleted once merged, before the task is called done. Do not create extra
+branches or worktrees beyond that flow. Full policy: `~/.claude/CLAUDE.md`
+(*Git discipline*).
+<!-- /machine-git-policy -->

@@ -9,6 +9,7 @@ Unified Abbey bot at `~/dev/active/AbbeyBot` — **two products** in one package
 | Desktop | `AbbeyBot` (`AbbeyBotApp`) | SwiftData | SwiftUI |
 | Server | `AbbeyServer` | Fluent + Postgres (SQLite smoke fallback) | Leaf status + `/api/*` + `/dashboard` SPA |
 | CLI | `abbey` (`AbbeyCLI` via `swift run AbbeyBot cli`) | SQLite (local, `~/.abbey/`) | Terminal REPL |
+| Quasar | `AbbeyQuasarKit` | bounded local registry + recoverable archives | desktop workspace + guarded server/Discord surfaces |
 
 Shared: `AbbeyCore` (personas, inference, DiscordBM bridge, DQN) and `AbbeyServerKit` (Fluent-backed engine used by `AbbeyServer` + `abbey`). One executable product `AbbeyBot` (`AbbeyEntry`). Swift 6.4 language mode; desktop requires Xcode toolchain (`xcrun --toolchain default` — swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros).
 
@@ -22,6 +23,7 @@ bash Scripts/swift-run.sh help
 # /usr/bin/xcrun --toolchain default swift run --build-path "${TMPDIR}/AbbeyBot.build" AbbeyBot help
 
 bash Scripts/check-static-security.sh # diff/conflict/secret hygiene
+bash Scripts/check-knowledge-snapshot.sh # signed bundled knowledge bytes + manifest
 bash Scripts/run-web-smoke.sh      # SPA lint/test/build + packed-resource assertion
 bash Scripts/run-smoke.sh          # all five Swift test bundles + desktop build/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
@@ -286,3 +288,16 @@ CRDT (won't ship) — desktop ships **push + pull** with persisted per-entity co
 - Dashboard SPA build output packs into `Sources/AbbeyServer/Resources/Public/` (gitignored unless intentionally shipping built assets).
 - Prefer repo launch wrappers (`Scripts/run.sh`, `run-server.sh`, `run-abbey.sh`, `swift-run.sh`) over hand-pasted multiline `xcrun`/`swift run` — terminal pastes often include editor line numbers or bare `--port` flags that fail.
 - Process env overrides UserDefaults for `AppConfig` knobs (`ABBEY_INFERENCE_MODE`, etc.); smoke scripts pin `ABBEY_INFERENCE_MODE=deterministicFloor` and isolate `HOME` so host GUI settings cannot block headless boots.
+
+<!-- machine-git-policy -->
+## Git workflow (machine policy, 2026-08-27)
+
+This repo keeps its documented review-branch flow: changes route through
+`codex/*`/`cursor/*` branches into `main`; never push directly to `main`.
+That flow is the exception this machine's policy allows. Everything else
+still applies: a review branch and any worktree for it must be merged into
+`main` in this canonical checkout, the worktree removed, and the branch
+deleted once merged, before the task is called done. Do not create extra
+branches or worktrees beyond that flow. Full policy: `~/.claude/CLAUDE.md`
+(*Git discipline*).
+<!-- /machine-git-policy -->
