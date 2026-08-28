@@ -180,7 +180,15 @@ struct KnowledgeAndStructuredInferenceTests {
     }
 
     @Test func structuredTimeoutDoesNotWaitForAProviderThatIgnoresCancellation() async {
-        let provider = CancellationIgnoringStructuredProvider(delaySeconds: 0.2)
+        // The provider ignores cancellation, so the only thing worth asserting is
+        // that the router gave up on it rather than awaiting it. Keep the provider
+        // delay far above the assertion bound: a shared CI runner can stall a task
+        // for well over 100 ms without the router having waited on anything, which
+        // is what made the old 0.2 s / 100 ms pairing flaky on Linux.
+        let providerDelay = Duration.seconds(2)
+        let provider = CancellationIgnoringStructuredProvider(
+            delaySeconds: Double(providerDelay.components.seconds)
+        )
         let router = InferenceRouter(
             eventBus: EventBus(), metrics: EngineMetrics(), currentMode: { .remoteCompatible },
             remoteEndpoint: { "" }, providerOverrides: [.remoteCompatible: provider]
@@ -195,7 +203,9 @@ struct KnowledgeAndStructuredInferenceTests {
                 maximumRetries: 0
             ))
         }
-        #expect(started.duration(to: clock.now) < .milliseconds(100))
+        let elapsed = started.duration(to: clock.now)
+        #expect(elapsed < .milliseconds(750))
+        #expect(elapsed < providerDelay)
     }
 
     @Test func driftReportsAddedRemovedChangedClassificationAndRevisionOnly() throws {
