@@ -109,6 +109,36 @@ struct QuasarApprovalWorkflowTests {
         #expect(try await service.site(id: site.id).previewPort == nil)
     }
 
+    @Test func previewStopEscalatesWhenGracefulSignalsAreIgnored() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let readyMarker = base.appendingPathComponent("ready")
+        let preview = QuasarPreviewManager(
+            readinessAttempts: 100,
+            pollInterval: .milliseconds(10),
+            command: .init(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: { _ in
+                    [
+                        "-c",
+                        "trap '' TERM INT; : > \"$1\"; exec /usr/bin/env sleep 30",
+                        "quasar-preview",
+                        readyMarker.path,
+                    ]
+                }
+            ),
+            readinessProbe: { _ in
+                FileManager.default.fileExists(atPath: readyMarker.path)
+            }
+        )
+
+        #expect(await preview.start(siteID: "forced-stop", siteRoot: base, port: 4_710).state == .running)
+        #expect(await preview.stop(siteID: "forced-stop"))
+        #expect(await preview.status(siteID: "forced-stop").state == .stopped)
+        await preview.stopAll()
+    }
+
     @Test func generatedMutationDoesNotWriteBeforeExactDigestApproval() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
