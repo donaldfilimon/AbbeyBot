@@ -2,6 +2,13 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 public struct QuasarPreviewCommand: Sendable {
     public var executableURL: URL
@@ -161,11 +168,28 @@ public actor QuasarPreviewManager {
     public func stopAll() async { for id in entries.keys { _ = await stop(siteID: id) } }
 
     private func terminate(_ process: Process) async -> Bool {
-        guard process.isRunning else { return true }
+        guard !Self.hasExited(process) else { return true }
         process.terminate()
         if await waitForExit(process) { return true }
         process.interrupt()
+        if await waitForExit(process) { return true }
+        Self.killOwnedProcess(process)
         return await waitForExit(process)
+    }
+
+    private nonisolated static func killOwnedProcess(_ process: Process) {
+        // TERM and INT can be inherited as ignored dispositions. Escalate only
+        // the exact child PID this manager launched, then retain the same
+        // bounded exit proof before allowing archive or replacement work.
+        #if canImport(Darwin)
+        _ = Darwin.kill(process.processIdentifier, SIGKILL)
+        #elseif canImport(Glibc)
+        _ = Glibc.kill(process.processIdentifier, SIGKILL)
+        #elseif canImport(Musl)
+        _ = Musl.kill(process.processIdentifier, SIGKILL)
+        #else
+        process.terminate()
+        #endif
     }
 
     private func waitForExit(_ process: Process) async -> Bool {
