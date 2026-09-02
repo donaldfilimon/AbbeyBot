@@ -10,7 +10,9 @@
 
 **Spec:** `AGENTS.md` (Quasar lifecycle, verification, and PR workflow), plus the accepted 2026-09-02 portfolio execution contract.
 
-**Integration status:** PR #72 already merged the original regression at merge commit `49aeba7`, and its remote topic branch was deleted. This production correction therefore requires a new corrective PR from the reused `codex/quasar-force-stop-regression` branch name; no corrective PR number exists yet.
+**Integration status:** PR #72 already merged the original regression at merge commit `49aeba7`, and its remote topic branch was deleted. Corrective PR #73 is open from the reused `codex/quasar-force-stop-regression` branch. The final review-fix commit remains local until the controller pushes it; PR #73 must be revalidated at that resulting head before merge.
+
+**Final review-fix status:** The follow-up preserves an explicit `active` / `exitProven` / `ownershipLost` capability state across actor reentrancy, makes the supervisor exit at the cooperative TERM/INT stage without weakening descendant escalation, and brackets every Linux procfs snapshot with two kernel group probes. Mutable probe transitions, real TERM-only versus TERM/INT/KILL signal sequences, and ownership-loss replacement refusal are covered by focused regressions.
 
 ## Global Constraints
 
@@ -147,6 +149,6 @@ git commit -m "fix(quasar): terminate owned preview process groups"
 
 Independently review `49aeba7..HEAD`. Required questions are whether any negative signal can reach AbbeyBot or an unrelated group, whether ownership is validated before publication, whether every cleanup/replacement path uses group proof, whether a descendant can survive a zombie or reaped leader, and whether the regression truly contains two processes.
 
-PR #72 already merged at `49aeba7` with the original regression and its remote topic branch was deleted. Resolve all Critical and Important findings, rerun affected gates, then push the reused `codex/quasar-force-stop-regression` branch normally and open a new corrective PR; do not invent its number before GitHub assigns one. Require every hosted check on the corrective PR's final head, merge it normally, wait for the post-merge `main` workflow, fast-forward the canonical `main`, and delete only the reused corrective branch locally and remotely.
+PR #72 already merged at `49aeba7` with the original regression and its remote topic branch was deleted. Corrective PR #73 is now open from the reused `codex/quasar-force-stop-regression` branch. Resolve all Critical and Important findings, push the final review-fix commit normally, and require every hosted check on PR #73's resulting head. Merge it normally, wait for the post-merge `main` workflow, fast-forward the canonical `main`, and delete only the reused corrective branch locally and remotely.
 
 After a separately verified branch-ref archive and fresh ancestry checks, delete the three stale remote `cursor/*` branches named in the portfolio plan. Finish with clean local and remote `main`, one worktree, and no unique topic work.

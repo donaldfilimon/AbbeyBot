@@ -121,26 +121,35 @@ struct QuasarProcessGroupSystem: Sendable {
         }
     ) -> QuasarProcessGroupLiveness {
         guard groupID > 1 else { return .unverifiable }
+        let before = groupProbe(groupID)
         let snapshot = linuxProcfsSnapshot(groupID: groupID, procRoot: procRoot)
-        switch groupProbe(groupID) {
-        case .absent:
-            // The kernel's atomic negative-PGID probe is authoritative. A
-            // procfs enumeration can be stale in either direction and must
-            // never weaken ESRCH into a false failure or strengthen a visible
-            // group into a false absence proof.
+        let after = groupProbe(groupID)
+        guard before == after else {
+            // The group appeared, disappeared, or became unverifiable while
+            // procfs was enumerated. No classification from that interval can
+            // safely be attached to the retained numeric PGID.
+            return .unverifiable
+        }
+        switch (before, after) {
+        case (.absent, .absent):
+            // Two atomic ESRCH results bracketing the snapshot are the stable
+            // absence contract. Stale procfs entries cannot weaken that proof.
             return .absent
-        case .delivered:
+        case (.delivered, .delivered):
             guard snapshot.complete else { return .unverifiable }
             switch snapshot.liveness {
             case .live, .zombieOnly: return snapshot.liveness
             case .absent:
-                // A member may have forked or changed state while procfs was
-                // enumerated. The atomic probe still proves the group exists.
-                return .live
+                // The kernel saw the group on both sides, but procfs exposed
+                // no member. Treat incomplete visibility or membership churn
+                // as unverifiable rather than inventing a stable live member.
+                return .unverifiable
             case .unverifiable:
                 return .unverifiable
             }
-        case .failed:
+        case (.failed, .failed):
+            return .unverifiable
+        default:
             return .unverifiable
         }
     }
@@ -208,24 +217,62 @@ public actor QuasarPreviewManager {
         }
     }
     private final class OwnedProcessGroup: @unchecked Sendable {
+        private enum State: Sendable {
+            case active
+            case exitProven
+            case ownershipLost
+        }
+
         let leaderPID: Int32
         let groupID: Int32
         private let lock = NSLock()
-        private var signallable = true
+        private var state = State.active
 
         init(leaderPID: Int32, groupID: Int32) {
             self.leaderPID = leaderPID
             self.groupID = groupID
         }
 
-        var isSignallable: Bool {
+        var isActive: Bool {
             lock.lock(); defer { lock.unlock() }
-            return signallable
+            return state == .active
         }
 
-        func retire() {
+        var terminalResult: Bool? {
             lock.lock(); defer { lock.unlock() }
-            signallable = false
+            switch state {
+            case .active: return nil
+            case .exitProven: return true
+            case .ownershipLost: return false
+            }
+        }
+
+        @discardableResult
+        func markExitProven() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            switch state {
+            case .active:
+                state = .exitProven
+                return true
+            case .exitProven:
+                return true
+            case .ownershipLost:
+                return false
+            }
+        }
+
+        @discardableResult
+        func markOwnershipLost() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            switch state {
+            case .active:
+                state = .ownershipLost
+                return false
+            case .exitProven:
+                return true
+            case .ownershipLost:
+                return false
+            }
         }
     }
 
@@ -300,7 +347,17 @@ public actor QuasarPreviewManager {
     }
 
     private nonisolated static let supervisorScript = """
-        trap ':' TERM INT
+        abbey_quasar_signal_requested=
+        abbey_quasar_child_exited=0
+        abbey_quasar_child_status=0
+        abbey_quasar_handle_signal() {
+          abbey_quasar_signal_requested="$1"
+          if [ "$abbey_quasar_child_exited" -eq 1 ]; then
+            exit "$abbey_quasar_child_status"
+          fi
+        }
+        trap 'abbey_quasar_handle_signal TERM' TERM
+        trap 'abbey_quasar_handle_signal INT' INT
         if ! IFS= read -r abbey_quasar_gate; then
           exit 0
         fi
@@ -309,7 +366,11 @@ public actor QuasarPreviewManager {
         fi
         "$@" </dev/null 2>&1
         abbey_quasar_child_status=$?
+        abbey_quasar_child_exited=1
         printf '%s\\n' "$ABBEY_QUASAR_CHILD_EXIT_MARKER" >&2
+        if [ -n "$abbey_quasar_signal_requested" ]; then
+          exit "$abbey_quasar_child_status"
+        fi
         while IFS= read -r abbey_quasar_hold; do :; done
         exit "$abbey_quasar_child_status"
         """
@@ -368,11 +429,12 @@ public actor QuasarPreviewManager {
         if supervisorExited, !entry.terminationInProgress, let group = entry.processGroup {
             let exitProven = processGroups.liveness(group.groupID).satisfiesExitProof
             // Once the supervisor anchor is gone, a later numeric PGID match
-            // cannot be proven to be ours. Retire the capability whether the
-            // final absence probe succeeded or ownership was lost.
-            group.retire()
-            entry.processGroup = nil
+            // cannot be proven to be ours. Preserve whether the terminal state
+            // came from atomic absence proof or from ownership loss.
             entry.groupExitProven = exitProven
+                ? group.markExitProven()
+                : group.markOwnershipLost()
+            entry.processGroup = nil
             Self.closeTerminalResources(&entry)
         }
         if
@@ -514,9 +576,8 @@ public actor QuasarPreviewManager {
                 entry.groupExitProven = true
                 Self.closeTerminalResources(&entry)
             } else if !process.isRunning {
-                processGroup.retire()
+                entry.groupExitProven = processGroup.markOwnershipLost()
                 entry.processGroup = nil
-                entry.groupExitProven = false
                 Self.closeTerminalResources(&entry)
             }
             entry.status = status
@@ -551,9 +612,8 @@ public actor QuasarPreviewManager {
             current.status = .init(state: .stopped, logTail: tail)
         } else {
             if !entry.process.isRunning {
-                processGroup.retire()
+                current.groupExitProven = processGroup.markOwnershipLost()
                 current.processGroup = nil
-                current.groupExitProven = false
                 Self.closeTerminalResources(&current)
             }
             tail.append("Preview process did not stop after termination requests.")
@@ -602,67 +662,81 @@ public actor QuasarPreviewManager {
         // group cleanup. A direct command can exit before an ignoring
         // descendant; closing the gate here would retire the only identity
         // anchor while that descendant can still write.
-        guard group.isSignallable else { return true }
-        if proveExitAndRetire(group) {
-            launchGate.close()
-            return true
-        }
-        guard process.isRunning else {
-            group.retire()
-            return false
+        if let terminalResult = probeExitAndRetire(group) {
+            if terminalResult { launchGate.close() }
+            return terminalResult
         }
         for signal in [SIGTERM, SIGINT, SIGKILL] {
+            if let terminalResult = group.terminalResult {
+                if terminalResult { launchGate.close() }
+                return terminalResult
+            }
             guard isStillSafeToSignal(group, process: process) else {
-                if !process.isRunning { group.retire() }
-                return false
+                let terminalResult = group.terminalResult ?? false
+                if terminalResult { launchGate.close() }
+                return terminalResult
             }
             switch processGroups.signalGroup(group.groupID, signal) {
             case .absent:
                 // ESRCH from a negative-PGID signal is an atomic kernel proof
                 // that the group has no remaining member on Darwin or Linux.
-                group.retire()
-                launchGate.close()
-                return true
+                let terminalResult = group.markExitProven()
+                if terminalResult { launchGate.close() }
+                return terminalResult
             case .delivered:
-                if await waitForGroupExit(group) {
-                    launchGate.close()
-                    return true
+                if let terminalResult = await waitForGroupExit(group) {
+                    if terminalResult { launchGate.close() }
+                    return terminalResult
                 }
             case .failed:
-                return false
+                return group.terminalResult ?? false
             }
         }
-        let stopped = proveExitAndRetire(group)
-        if stopped { launchGate.close() }
-        return stopped
+        let terminalResult = probeExitAndRetire(group) ?? false
+        if terminalResult { launchGate.close() }
+        return terminalResult
     }
 
     private func isStillSafeToSignal(_ group: OwnedProcessGroup, process: Process) -> Bool {
         guard
-            group.isSignallable,
-            process.isRunning,
+            group.isActive,
             group.leaderPID > 1,
             group.groupID > 1,
             group.groupID == group.leaderPID,
             let currentGroupID = processGroups.currentProcessGroupID(),
             group.groupID != currentGroupID
         else { return false }
-        return true
+        if process.isRunning { return true }
+
+        // A cooperative command can take the supervisor down at the current
+        // signal stage while an ignoring descendant still retains the owned
+        // PGID. A stable live/zombie group remains anchored by that member and
+        // can receive the next bounded cleanup signal. If the post-anchor
+        // identity is not provable, retire it as ownership-lost immediately.
+        switch processGroups.liveness(group.groupID) {
+        case .live, .zombieOnly:
+            return true
+        case .absent:
+            _ = group.markExitProven()
+            return false
+        case .unverifiable:
+            _ = group.markOwnershipLost()
+            return false
+        }
     }
 
-    private func waitForGroupExit(_ group: OwnedProcessGroup) async -> Bool {
+    private func waitForGroupExit(_ group: OwnedProcessGroup) async -> Bool? {
         for _ in 0..<40 {
-            if proveExitAndRetire(group) { return true }
+            if let terminalResult = probeExitAndRetire(group) { return terminalResult }
             try? await Task.sleep(for: .milliseconds(25))
         }
-        return proveExitAndRetire(group)
+        return probeExitAndRetire(group)
     }
 
-    private func proveExitAndRetire(_ group: OwnedProcessGroup) -> Bool {
-        guard group.isSignallable else { return true }
-        guard processGroups.liveness(group.groupID).satisfiesExitProof else { return false }
-        group.retire()
-        return true
+    private func probeExitAndRetire(_ group: OwnedProcessGroup) -> Bool? {
+        if let terminalResult = group.terminalResult { return terminalResult }
+        guard processGroups.liveness(group.groupID).satisfiesExitProof else { return nil }
+        return group.markExitProven()
     }
 
     private func terminateUnvalidatedProcess(_ process: Process) async -> Bool {
