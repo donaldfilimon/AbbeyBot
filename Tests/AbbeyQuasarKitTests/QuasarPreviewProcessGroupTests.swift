@@ -224,6 +224,48 @@ struct QuasarPreviewProcessGroupTests {
         processID = nil
     }
 
+    @Test func ordinaryCommandRetainsValidatedSupervisorThroughGracefulSignals() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let probes = AnchoredSupervisorSignalProbe()
+        defer { terminateExactProcessIDs(probes.supervisorProcessIDs) }
+        let preview = QuasarPreviewManager(
+            readinessAttempts: 100,
+            pollInterval: .milliseconds(10),
+            command: .init(
+                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: { _ in ["sleep", "30"] }
+            ),
+            readinessProbe: { _ in
+                try? await Task.sleep(for: .milliseconds(50))
+                return true
+            },
+            processGroups: probes.processGroups
+        )
+
+        #expect(await preview.start(siteID: "ordinary-anchor", siteRoot: base, port: 4_723).state == .running)
+        let supervisorProcessID = try #require(probes.supervisorProcessIDs.first)
+        #expect(supervisorProcessID == probes.validatedGroupID)
+        #expect(exactProcessExists(supervisorProcessID))
+        #expect(processGroupID(of: supervisorProcessID) == supervisorProcessID)
+
+        #expect(await preview.stop(siteID: "ordinary-anchor"))
+        let observations = probes.observations
+        #expect(observations.map(\.signal) == [SIGTERM, SIGINT])
+        #expect(
+            observations.allSatisfy {
+                $0.supervisorProcessID == supervisorProcessID
+                    && $0.supervisorExists
+                    && $0.currentGroupID == supervisorProcessID
+            },
+            "the validated supervisor must remain the same private-group leader after TERM and INT"
+        )
+        #expect(probes.signals == [SIGTERM, SIGINT, SIGKILL])
+        #expect(await waitForExactProcessExit(supervisorProcessID))
+        #expect(await preview.status(siteID: "ordinary-anchor").state == .stopped)
+    }
+
     @Test func terminalGroupProofPreventsNumericReuseSignals() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -709,6 +751,85 @@ private final class LiveProcessGroupSignalRecorder: @unchecked Sendable {
     func snapshot() -> [Int32] {
         lock.lock(); defer { lock.unlock() }
         return signals
+    }
+}
+
+private final class AnchoredSupervisorSignalProbe: @unchecked Sendable {
+    struct Observation: Sendable {
+        let signal: Int32
+        let supervisorProcessID: Int32
+        let supervisorExists: Bool
+        let currentGroupID: Int32
+    }
+
+    private let lock = NSLock()
+    private var recordedSupervisorProcessIDs: [Int32] = []
+    private var recordedGroupID: Int32?
+    private var recordedSignals: [Int32] = []
+    private var recordedObservations: [Observation] = []
+
+    var processGroups: QuasarProcessGroupSystem {
+        let live = QuasarProcessGroupSystem.live
+        return .init(
+            processGroupID: { [self] processID in
+                let groupID = live.processGroupID(processID)
+                lock.lock()
+                if !recordedSupervisorProcessIDs.contains(processID) {
+                    recordedSupervisorProcessIDs.append(processID)
+                }
+                if recordedGroupID == nil { recordedGroupID = groupID }
+                lock.unlock()
+                return groupID
+            },
+            currentProcessGroupID: live.currentProcessGroupID,
+            signalGroup: { [self] groupID, signal in
+                lock.lock()
+                recordedSignals.append(signal)
+                let supervisorProcessID = recordedSupervisorProcessIDs.first
+                lock.unlock()
+                if let previousSignal = previousSignal(for: signal), let supervisorProcessID {
+                    let observation = Observation(
+                        signal: previousSignal,
+                        supervisorProcessID: supervisorProcessID,
+                        supervisorExists: exactProcessExists(supervisorProcessID),
+                        currentGroupID: processGroupID(of: supervisorProcessID)
+                    )
+                    lock.lock()
+                    recordedObservations.append(observation)
+                    lock.unlock()
+                }
+                return live.signalGroup(groupID, signal)
+            },
+            liveness: live.liveness
+        )
+    }
+
+    var supervisorProcessIDs: [Int32] {
+        lock.lock(); defer { lock.unlock() }
+        return recordedSupervisorProcessIDs
+    }
+
+    var validatedGroupID: Int32? {
+        lock.lock(); defer { lock.unlock() }
+        return recordedGroupID
+    }
+
+    var signals: [Int32] {
+        lock.lock(); defer { lock.unlock() }
+        return recordedSignals
+    }
+
+    var observations: [Observation] {
+        lock.lock(); defer { lock.unlock() }
+        return recordedObservations
+    }
+
+    private func previousSignal(for signal: Int32) -> Int32? {
+        switch signal {
+        case SIGINT: return SIGTERM
+        case SIGKILL: return SIGINT
+        default: return nil
+        }
     }
 }
 
