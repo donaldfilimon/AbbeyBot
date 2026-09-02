@@ -28,6 +28,116 @@ public struct QuasarPreviewCommand: Sendable {
     )
 }
 
+enum QuasarProcessGroupLiveness: Sendable, Equatable {
+    case absent
+    case zombieOnly
+    case live
+    case unverifiable
+
+    var satisfiesExitProof: Bool {
+        #if os(Linux)
+        self == .absent || self == .zombieOnly
+        #else
+        self == .absent
+        #endif
+    }
+}
+
+enum QuasarGroupSignalResult: Sendable, Equatable {
+    case delivered
+    case absent
+    case failed
+}
+
+struct QuasarProcessGroupSystem: Sendable {
+    var processGroupID: @Sendable (Int32) -> Int32?
+    var currentProcessGroupID: @Sendable () -> Int32?
+    var signalGroup: @Sendable (_ groupID: Int32, _ signal: Int32) -> QuasarGroupSignalResult
+    var liveness: @Sendable (_ groupID: Int32) -> QuasarProcessGroupLiveness
+
+    static let live = Self(
+        processGroupID: { processID in
+            let groupID: Int32
+            #if canImport(Darwin)
+            groupID = Darwin.getpgid(processID)
+            #elseif canImport(Glibc)
+            groupID = Glibc.getpgid(processID)
+            #elseif canImport(Musl)
+            groupID = Musl.getpgid(processID)
+            #else
+            return nil
+            #endif
+            return groupID > 0 ? groupID : nil
+        },
+        currentProcessGroupID: {
+            #if canImport(Darwin)
+            return Darwin.getpgrp()
+            #elseif canImport(Glibc)
+            return Glibc.getpgrp()
+            #elseif canImport(Musl)
+            return Musl.getpgrp()
+            #else
+            return nil
+            #endif
+        },
+        signalGroup: { groupID, signal in
+            guard groupID > 1 else { return .failed }
+            let result: Int32
+            #if canImport(Darwin)
+            result = Darwin.kill(-groupID, signal)
+            #elseif canImport(Glibc)
+            result = Glibc.kill(-groupID, signal)
+            #elseif canImport(Musl)
+            result = Musl.kill(-groupID, signal)
+            #else
+            return .failed
+            #endif
+            if result == 0 { return .delivered }
+            return errno == ESRCH ? .absent : .failed
+        },
+        liveness: { groupID in
+            guard groupID > 1 else { return .unverifiable }
+            #if os(Linux)
+            return Self.linuxLiveness(groupID: groupID, procRoot: URL(fileURLWithPath: "/proc"))
+            #elseif canImport(Darwin)
+            if Darwin.kill(-groupID, 0) == 0 { return .live }
+            return errno == ESRCH ? .absent : .unverifiable
+            #else
+            return .unverifiable
+            #endif
+        }
+    )
+
+    static func linuxLiveness(groupID: Int32, procRoot: URL) -> QuasarProcessGroupLiveness {
+        guard groupID > 1 else { return .unverifiable }
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: procRoot.path) else {
+            return .unverifiable
+        }
+        var foundZombie = false
+        for entry in entries where !entry.isEmpty && entry.allSatisfy(\.isNumber) {
+            guard let processID = Int32(entry), processID > 0 else { return .unverifiable }
+            let statURL = procRoot.appendingPathComponent(entry).appendingPathComponent("stat")
+            guard let stat = try? String(contentsOf: statURL, encoding: .utf8) else {
+                if !fileManager.fileExists(atPath: statURL.path) { continue }
+                return .unverifiable
+            }
+            guard let commandEnd = stat.lastIndex(of: ")") else { return .unverifiable }
+            let fields = stat[stat.index(after: commandEnd)...].split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 3, fields[0].count == 1, let memberGroupID = Int32(fields[2]) else {
+                return .unverifiable
+            }
+            guard memberGroupID == groupID else { continue }
+            if fields[0] == "Z" || fields[0] == "X" {
+                foundZombie = true
+            } else {
+                return .live
+            }
+        }
+        return foundZombie ? .zombieOnly : .absent
+    }
+}
+
 public actor QuasarPreviewManager {
     private final class LogBuffer: @unchecked Sendable {
         private let lock = NSLock()
@@ -43,9 +153,14 @@ public actor QuasarPreviewManager {
             return QuasarPreviewManager.lines(buffered)
         }
     }
+    private struct OwnedProcessGroup: Sendable {
+        let leaderPID: Int32
+        let groupID: Int32
+    }
     private struct Entry {
         var generationID: UUID
         var process: Process
+        var processGroup: OwnedProcessGroup
         var pipe: Pipe
         var logs: LogBuffer
         var status: PreviewStatus
@@ -55,6 +170,7 @@ public actor QuasarPreviewManager {
     private let pollInterval: Duration
     private let command: QuasarPreviewCommand
     private let readinessProbe: @Sendable (URL) async -> Bool
+    private let processGroups: QuasarProcessGroupSystem
 
     public init(
         readinessAttempts: Int = 30,
@@ -65,6 +181,27 @@ public actor QuasarPreviewManager {
         self.readinessAttempts = min(max(readinessAttempts, 1), 120)
         self.pollInterval = pollInterval
         self.command = command
+        self.processGroups = .live
+        self.readinessProbe = readinessProbe ?? { url in
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 2
+            guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        }
+    }
+
+    init(
+        readinessAttempts: Int = 30,
+        pollInterval: Duration = .milliseconds(500),
+        command: QuasarPreviewCommand = .bunNext,
+        readinessProbe: (@Sendable (URL) async -> Bool)? = nil,
+        processGroups: QuasarProcessGroupSystem
+    ) {
+        self.readinessAttempts = min(max(readinessAttempts, 1), 120)
+        self.pollInterval = pollInterval
+        self.command = command
+        self.processGroups = processGroups
         self.readinessProbe = readinessProbe ?? { url in
             var request = URLRequest(url: url)
             request.httpMethod = "HEAD"
@@ -108,10 +245,19 @@ public actor QuasarPreviewManager {
             let status = PreviewStatus(state: .crashed, port: port, logTail: [Self.redact(error.localizedDescription)])
             return status
         }
+        guard let processGroup = validatedProcessGroup(for: process) else {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            let stopped = await terminateUnvalidatedProcess(process)
+            var tail = logs.lines()
+            tail.append("Preview process did not start in a private owned process group.")
+            if !stopped { tail.append("Preview process did not stop after failed group validation.") }
+            return .init(state: .crashed, port: port, logTail: tail)
+        }
         let generationID = UUID()
         entries[siteID] = Entry(
             generationID: generationID,
             process: process,
+            processGroup: processGroup,
             pipe: pipe,
             logs: logs,
             status: .init(state: .starting, port: port)
@@ -119,14 +265,14 @@ public actor QuasarPreviewManager {
         let url = URL(string: "http://127.0.0.1:\(port)/")!
         for _ in 0..<readinessAttempts {
             guard entries[siteID]?.generationID == generationID else {
-                _ = await terminate(process)
+                _ = await terminate(processGroup, process: process)
                 return .init(state: .stopped, logTail: logs.lines())
             }
             if !process.isRunning { break }
             if await readinessProbe(url) {
                 let status = PreviewStatus(state: .running, port: port, url: url.absoluteString, logTail: logs.lines())
                 guard entries[siteID]?.generationID == generationID else {
-                    _ = await terminate(process)
+                    _ = await terminate(processGroup, process: process)
                     return .init(state: .stopped, logTail: logs.lines())
                 }
                 entries[siteID]?.status = status
@@ -134,7 +280,7 @@ public actor QuasarPreviewManager {
             }
             try? await Task.sleep(for: pollInterval)
         }
-        let stopped = await terminate(process)
+        let stopped = await terminate(processGroup, process: process)
         pipe.fileHandleForReading.readabilityHandler = nil
         var tail = logs.lines()
         if !stopped { tail.append("Preview process did not stop after termination requests.") }
@@ -148,7 +294,7 @@ public actor QuasarPreviewManager {
     @discardableResult
     public func stop(siteID: String) async -> Bool {
         guard let entry = entries[siteID] else { return true }
-        let stopped = await terminate(entry.process)
+        let stopped = await terminate(entry.processGroup, process: entry.process)
         entry.pipe.fileHandleForReading.readabilityHandler = nil
         guard entries[siteID]?.generationID == entry.generationID else { return stopped }
         var tail = entry.logs.lines()
@@ -167,37 +313,93 @@ public actor QuasarPreviewManager {
 
     public func stopAll() async { for id in entries.keys { _ = await stop(siteID: id) } }
 
-    private func terminate(_ process: Process) async -> Bool {
+    private func validatedProcessGroup(for process: Process) -> OwnedProcessGroup? {
+        let leaderPID = process.processIdentifier
+        guard leaderPID > 1, process.isRunning else { return nil }
+        guard
+            let groupID = processGroups.processGroupID(leaderPID),
+            let currentGroupID = processGroups.currentProcessGroupID(),
+            // The launched leader may exit while the platform identity probes
+            // run. Never retain a group identity after that validation race.
+            process.isRunning,
+            groupID > 1,
+            groupID == leaderPID,
+            groupID != currentGroupID
+        else { return nil }
+        return OwnedProcessGroup(leaderPID: leaderPID, groupID: groupID)
+    }
+
+    private func terminate(_ group: OwnedProcessGroup, process: Process) async -> Bool {
+        if processGroups.liveness(group.groupID).satisfiesExitProof { return true }
+        for signal in [SIGTERM, SIGINT, SIGKILL] {
+            guard isStillSafeToSignal(group) else { return false }
+            switch processGroups.signalGroup(group.groupID, signal) {
+            case .absent:
+                #if os(Linux)
+                // Linux group-signalling ESRCH does not replace the required
+                // procfs proof. If procfs is unavailable or malformed, stop,
+                // replacement, and archive remain fail-closed.
+                return processGroups.liveness(group.groupID).satisfiesExitProof
+                #else
+                // On Darwin ESRCH from the negative-PGID probe is the required
+                // group-level absence proof.
+                return true
+                #endif
+            case .delivered:
+                if await waitForGroupExit(group) { return true }
+            case .failed:
+                return false
+            }
+        }
+        return processGroups.liveness(group.groupID).satisfiesExitProof
+    }
+
+    private func isStillSafeToSignal(_ group: OwnedProcessGroup) -> Bool {
+        guard
+            group.leaderPID > 1,
+            group.groupID > 1,
+            group.groupID == group.leaderPID,
+            let currentGroupID = processGroups.currentProcessGroupID(),
+            group.groupID != currentGroupID
+        else { return false }
+        return true
+    }
+
+    private func waitForGroupExit(_ group: OwnedProcessGroup) async -> Bool {
+        for _ in 0..<40 {
+            if processGroups.liveness(group.groupID).satisfiesExitProof { return true }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return processGroups.liveness(group.groupID).satisfiesExitProof
+    }
+
+    private func terminateUnvalidatedProcess(_ process: Process) async -> Bool {
         guard !Self.hasExited(process) else { return true }
         process.terminate()
-        if await waitForExit(process) { return true }
+        if await waitForExactExit(process) { return true }
         process.interrupt()
-        if await waitForExit(process) { return true }
-        Self.killOwnedProcess(process)
-        return await waitForExit(process)
+        if await waitForExactExit(process) { return true }
+        Self.killExactProcess(process.processIdentifier)
+        return await waitForExactExit(process)
     }
 
-    private nonisolated static func killOwnedProcess(_ process: Process) {
-        // TERM and INT can be inherited as ignored dispositions. Escalate only
-        // the exact child PID this manager launched, then retain the same
-        // bounded exit proof before allowing archive or replacement work.
-        #if canImport(Darwin)
-        _ = Darwin.kill(process.processIdentifier, SIGKILL)
-        #elseif canImport(Glibc)
-        _ = Glibc.kill(process.processIdentifier, SIGKILL)
-        #elseif canImport(Musl)
-        _ = Musl.kill(process.processIdentifier, SIGKILL)
-        #else
-        process.terminate()
-        #endif
-    }
-
-    private func waitForExit(_ process: Process) async -> Bool {
+    private func waitForExactExit(_ process: Process) async -> Bool {
         for _ in 0..<40 {
             guard !Self.hasExited(process) else { return true }
             try? await Task.sleep(for: .milliseconds(25))
         }
         return Self.hasExited(process)
+    }
+
+    private nonisolated static func killExactProcess(_ processID: Int32) {
+        guard processID > 1 else { return }
+        #if canImport(Darwin)
+        _ = Darwin.kill(processID, SIGKILL)
+        #elseif canImport(Glibc)
+        _ = Glibc.kill(processID, SIGKILL)
+        #elseif canImport(Musl)
+        _ = Musl.kill(processID, SIGKILL)
+        #endif
     }
 
     private nonisolated static func hasExited(_ process: Process) -> Bool {
