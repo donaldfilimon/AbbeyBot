@@ -4,13 +4,15 @@
 
 **Goal:** Make Quasar preview stop, replacement, and archive success prove that every process in the preview's privately owned process group has stopped, including signal-ignoring descendants.
 
-**Architecture:** Validate Foundation `Process` launches as a private process group immediately after `run()`, retain that identity with the preview generation, and signal only that validated group through TERM, INT, and KILL. Darwin proves group absence through process-group probes; Linux scans procfs so a live descendant cannot be hidden by a reaped or zombie leader.
+**Architecture:** Validate Foundation `Process` launches a manager-owned supervisor as a private process-group leader immediately after `run()`, retain that live supervisor as the ownership anchor, and release the actual preview argv only after validation. Immediately before TERM, INT, and KILL, require the active capability, stored invariants, live supervisor, current supervisor PGID, and separation from AbbeyBot's own group. The supervisor remains anchored through TERM/INT and is retired by the final group KILL; shutdown succeeds only after observation-only stable group-absence proof.
 
 **Tech Stack:** Swift 6.4 language mode, Foundation `Process`, Darwin/Glibc/Musl process APIs, Swift Testing, Xcode 27 default toolchain, Swift static Linux SDK, GitHub Actions.
 
 **Spec:** `AGENTS.md` (Quasar lifecycle, verification, and PR workflow), plus the accepted 2026-09-02 portfolio execution contract.
 
-**Integration status:** PR #72 already merged the original regression at merge commit `49aeba7`, and its remote topic branch was deleted. This production correction therefore requires a new corrective PR from the reused `codex/quasar-force-stop-regression` branch name; no corrective PR number exists yet.
+**Integration status:** PR #72 already merged the original regression at merge commit `49aeba7`, and its remote topic branch was deleted. Corrective PR #73 is open from the reused `codex/quasar-force-stop-regression` branch. The anchor-through-KILL follow-up remains local until the controller pushes it; PR #73 must be revalidated at that resulting head before merge.
+
+**Final review-fix status:** The follow-up preserves an explicit `active` / `exitProven` / `ownershipLost` capability state across actor reentrancy, brackets every Linux procfs snapshot with two kernel group probes, and keeps the supervisor alive through all negative-PGID signal stages. A cooperative child proves it handles TERM, while the manager still sends TERM/INT/KILL to retire the anchor and any unknown descendants. Supervisor loss or PGID mismatch retires ownership fail-closed and can never authorize a later signal from numeric group liveness.
 
 ## Global Constraints
 
@@ -31,6 +33,7 @@
 **Files:**
 
 - Modify: `Tests/AbbeyQuasarKitTests/QuasarApprovalWorkflowTests.swift`
+- Add: `Tests/AbbeyQuasarKitTests/QuasarPreviewProcessGroupTests.swift`
 - Modify: `Sources/AbbeyQuasarKit/QuasarPreviewManager.swift`
 - Modify: `Sources/AbbeyQuasarKit/QuasarRegistry.swift`
 - Modify: `docs/superpowers/plans/2026-09-02-quasar-owned-process-group.md` only to check completed steps after code and review are finished
@@ -74,17 +77,17 @@ If validation fails or races with early exit, clear the pipe handler, terminate 
 
 Replace `killOwnedProcess(_:)` and leader-only exit waiting with one owned-group termination path:
 
-1. If the group is already safely absent, succeed.
-2. Send TERM to `-groupID`; wait using the existing bounded polling cadence.
-3. If still live, send INT; wait again.
-4. If still live, send KILL; wait again.
-5. Return true only when the group is safely absent. Linux procfs may classify zombie-only state for diagnostics, but the final negative-PGID existence probe must return `ESRCH` before shutdown succeeds.
+1. Require the active capability, stored leader/group invariants, a running supervisor, and `getpgid(supervisorPID) == groupID`; then send TERM to `-groupID`.
+2. Keep the supervisor anchored while the direct child handles TERM; do not infer group absence from numeric liveness while the anchor remains.
+3. Revalidate the same live anchor immediately before sending INT.
+4. Revalidate it again immediately before sending the final KILL, which atomically targets the anchored group.
+5. After KILL, perform observation-only stable absence polling and never send another signal. Return true only for proven absence; live, zombie-only, malformed, or unverifiable state becomes fail-closed ownership loss at the bound.
 
-Before every signal, recheck the stored numeric invariants and reject AbbeyBot's own group. `ESRCH` means already absent; `EPERM` and all other failures remain fail-closed. Never substitute process-name matching, `pkill`, shell process discovery, or a global registry.
+Before every signal, recheck the explicit active state, stored numeric invariants, tracked supervisor `Process.isRunning`, current supervisor PGID, and rejection of AbbeyBot's own group. `ESRCH` means already absent; `EPERM` and all other failures remain fail-closed. Loss of the supervisor may use liveness only to distinguish proven absence from ownership loss, never to authorize another negative-PGID signal. Never substitute process-name matching, `pkill`, shell process discovery, or a global registry.
 
 On Darwin, use the validated PGID and group existence probing; success requires `ESRCH` within the bound. On Linux, enumerate numeric `/proc` entries, parse `/proc/<pid>/stat` after the final `)` to obtain state and process-group ID, and classify any matching non-`Z`/non-`X` member as live. A procfs snapshot that appears absent or zombie-only must still be followed by an atomic negative-PGID existence probe; only `ESRCH` is exit proof. If that kernel probe reports a live group, missing or malformed procfs is unverifiable and must fail closed; kernel-reported `ESRCH` remains authoritative even when procfs is unavailable.
 
-Launch the preview command behind a manager-owned supervisor gate. Validate that supervisor's private PGID before releasing the real command, keep the supervisor alive as the group identity anchor throughout TERM/INT/KILL cleanup, and retire the stored signaling capability immediately after atomic group-absence proof. This prevents both pre-validation writes and later numeric-PGID reuse from being signaled as if it were the retired generation.
+Launch the preview command behind a manager-owned supervisor gate. Validate that supervisor's private PGID before releasing the real command, keep the supervisor alive as the group identity anchor throughout TERM/INT/KILL cleanup even after the child exits, and retire the stored signaling capability immediately after atomic group-absence proof. This prevents both pre-validation writes and later numeric-PGID reuse from being signaled as if it were the retired generation.
 
 Use the same `OwnedProcessGroup` in replacement races and generation-mismatch cleanup. An older generation may stop only its own stored group and may not overwrite a newer entry's status.
 
@@ -101,6 +104,8 @@ Add table-shaped or narrowly separated tests for:
 - Linux procfs missing or malformed through a dependency-injected liveness reader rather than mutating the host `/proc` filesystem.
 
 Each test must assert externally visible stop/start status or process liveness. Do not add source-text assertions or tests that only exercise a mock.
+
+The process-group lifecycle cases and their dedicated helpers now live in `QuasarPreviewProcessGroupTests.swift`; the approval workflow suite retains only approval/service lifecycle behavior. The focused supervisor-loss regression kills the tracked supervisor after TERM, reports the numeric PGID as stably live/reused, and proves no later INT/KILL is sent and replacement remains refused.
 
 - [x] **Step 6: Run focused GREEN verification**
 
@@ -143,10 +148,20 @@ git add Sources/AbbeyQuasarKit/QuasarPreviewManager.swift \
 git commit -m "fix(quasar): terminate owned preview process groups"
 ```
 
+#### Final anchor-through-KILL review wave
+
+- The focused RED against unchanged `f8268cd` exited `1`: after the injected supervisor disappearance, the implementation sent `[SIGTERM, SIGINT, SIGKILL]` even though only TERM was permitted once the numeric PGID became unanchored.
+- The final supervisor ignores TERM/INT for its own lifetime, retains the launch-gate anchor after direct-child completion, and is retired by the anchored group KILL. Every signal revalidates active state, leader/group invariants, AbbeyBot group separation, `Process.isRunning`, and `getpgid(supervisorPID)`.
+- Post-KILL work is observation-only. Supervisor loss plus live, zombie-only, or unverifiable numeric group state becomes permanent `ownershipLost`; only proven absence becomes `exitProven`.
+- Process-group lifecycle tests and their dedicated helpers were moved from the approval suite into `QuasarPreviewProcessGroupTests.swift`. The approval file is 308 lines and retains only its six approval/service tests.
+- Focused process-group GREEN: 12 tests in 1 suite, exit `0`. Focused approval GREEN: 6 tests in 1 suite, exit `0`. The cooperative/ignore/leader-exit group ran 10 consecutive times with 3 tests per run and every exit `0`. Full `AbbeyQuasarKitTests`: 34 tests in 5 suites, exit `0`.
+- Static security and diff check exited `0`. Server snapshot had one unrelated Core heartbeat timeout on its first pass, then reran fully green (Core 449/39, Quasar 34/5, CLI 30/3, ServerKit 117/12, server 32/1). Exact full Musl `AbbeyBot` product build exited `0`. `verify-all` exited `0` through builds, all tests, signed app/launch, server smoke, and CLI smoke.
+- The scoped follow-up commit stages only `QuasarPreviewManager.swift`, both Quasar test files, and this plan, with subject `fix(quasar): keep group ownership anchored`. No push or PR mutation is part of this worker task.
+
 - [ ] **Step 9: Independent review, PR integration, and branch closeout**
 
 Independently review `49aeba7..HEAD`. Required questions are whether any negative signal can reach AbbeyBot or an unrelated group, whether ownership is validated before publication, whether every cleanup/replacement path uses group proof, whether a descendant can survive a zombie or reaped leader, and whether the regression truly contains two processes.
 
-PR #72 already merged at `49aeba7` with the original regression and its remote topic branch was deleted. Resolve all Critical and Important findings, rerun affected gates, then push the reused `codex/quasar-force-stop-regression` branch normally and open a new corrective PR; do not invent its number before GitHub assigns one. Require every hosted check on the corrective PR's final head, merge it normally, wait for the post-merge `main` workflow, fast-forward the canonical `main`, and delete only the reused corrective branch locally and remotely.
+PR #72 already merged at `49aeba7` with the original regression and its remote topic branch was deleted. Corrective PR #73 is now open from the reused `codex/quasar-force-stop-regression` branch. Resolve all Critical and Important findings, push the final review-fix commit normally, and require every hosted check on PR #73's resulting head. Merge it normally, wait for the post-merge `main` workflow, fast-forward the canonical `main`, and delete only the reused corrective branch locally and remotely.
 
 After a separately verified branch-ref archive and fresh ancestry checks, delete the three stale remote `cursor/*` branches named in the portfolio plan. Finish with clean local and remote `main`, one worktree, and no unique topic work.
