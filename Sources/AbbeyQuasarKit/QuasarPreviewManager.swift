@@ -184,6 +184,9 @@ public actor QuasarPreviewManager {
         // can remain a zombie beyond this manager's bounded grace period. A
         // zombie cannot execute or write into a site, so it satisfies the
         // archive safety contract even while Foundation catches up.
+        guard FileManager.default.fileExists(atPath: "/proc/self/stat") else {
+            return false
+        }
         let statPath = "/proc/\(process.processIdentifier)/stat"
         guard let stat = try? String(contentsOfFile: statPath, encoding: .utf8) else {
             return !FileManager.default.fileExists(atPath: statPath)
