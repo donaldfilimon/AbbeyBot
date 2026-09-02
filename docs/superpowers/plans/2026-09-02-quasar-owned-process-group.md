@@ -43,7 +43,7 @@
 - Produce internally: each `Entry` retains one `OwnedProcessGroup` with its existing `generationID`.
 - Produce internally: a validation helper returns an owned group only when the launched leader is the group leader and the group is not AbbeyBot's group.
 - Produce internally: group signaling distinguishes already-absent, delivered, and failed outcomes without treating permission or malformed-state failures as success.
-- Produce internally: group liveness distinguishes absent, zombie-only/non-writing, live, and unverifiable states; only absent or Linux zombie-only satisfies the archive safety contract.
+- Produce internally: group liveness distinguishes absent, zombie-only/non-writing, live, and unverifiable states; only kernel-probed group absence satisfies the archive safety contract.
 
 - [x] **Step 1: Strengthen the regression so leader-only SIGKILL is observably wrong**
 
@@ -78,11 +78,13 @@ Replace `killOwnedProcess(_:)` and leader-only exit waiting with one owned-group
 2. Send TERM to `-groupID`; wait using the existing bounded polling cadence.
 3. If still live, send INT; wait again.
 4. If still live, send KILL; wait again.
-5. Return true only when the group is safely absent, or on Linux when every remaining member is a zombie/non-writing process.
+5. Return true only when the group is safely absent. Linux procfs may classify zombie-only state for diagnostics, but the final negative-PGID existence probe must return `ESRCH` before shutdown succeeds.
 
 Before every signal, recheck the stored numeric invariants and reject AbbeyBot's own group. `ESRCH` means already absent; `EPERM` and all other failures remain fail-closed. Never substitute process-name matching, `pkill`, shell process discovery, or a global registry.
 
-On Darwin, use the validated PGID and group existence probing; success requires `ESRCH` within the bound. On Linux, require readable procfs, enumerate numeric `/proc` entries, parse `/proc/<pid>/stat` after the final `)` to obtain state and process-group ID, and classify any matching non-`Z`/non-`X` member as live. Missing or malformed procfs is unverifiable and must fail closed.
+On Darwin, use the validated PGID and group existence probing; success requires `ESRCH` within the bound. On Linux, enumerate numeric `/proc` entries, parse `/proc/<pid>/stat` after the final `)` to obtain state and process-group ID, and classify any matching non-`Z`/non-`X` member as live. A procfs snapshot that appears absent or zombie-only must still be followed by an atomic negative-PGID existence probe; only `ESRCH` is exit proof. If that kernel probe reports a live group, missing or malformed procfs is unverifiable and must fail closed; kernel-reported `ESRCH` remains authoritative even when procfs is unavailable.
+
+Launch the preview command behind a manager-owned supervisor gate. Validate that supervisor's private PGID before releasing the real command, keep the supervisor alive as the group identity anchor throughout TERM/INT/KILL cleanup, and retire the stored signaling capability immediately after atomic group-absence proof. This prevents both pre-validation writes and later numeric-PGID reuse from being signaled as if it were the retired generation.
 
 Use the same `OwnedProcessGroup` in replacement races and generation-mismatch cleanup. An older generation may stop only its own stored group and may not overwrite a newer entry's status.
 

@@ -123,8 +123,13 @@ struct QuasarApprovalWorkflowTests {
         let processMarker = base.appendingPathComponent("processes")
         let activity = base.appendingPathComponent("activity")
         var recordedProcessIDs: [Int32] = []
+        var supervisorProcessID: Int32?
         defer {
-            terminateExactProcessIDs(recordedProcessIDs + (readRecordedProcessIDs(at: processMarker) ?? []))
+            terminateExactProcessIDs(
+                recordedProcessIDs
+                    + (readRecordedProcessIDs(at: processMarker) ?? [])
+                    + [supervisorProcessID].compactMap { $0 }
+            )
         }
         let preview = QuasarPreviewManager(
             readinessAttempts: 100,
@@ -163,11 +168,16 @@ struct QuasarApprovalWorkflowTests {
         let leaderPID = recordedProcessIDs[0]
         let descendantPID = recordedProcessIDs[1]
         #expect(leaderPID != descendantPID)
-        #expect(processGroupID(of: leaderPID) == leaderPID)
-        #expect(processGroupID(of: descendantPID) == leaderPID)
+        let ownedGroupID = processGroupID(of: leaderPID)
+        supervisorProcessID = ownedGroupID
+        #expect(ownedGroupID > 1)
+        #expect(ownedGroupID != currentProcessGroupID())
+        #expect(processGroupID(of: ownedGroupID) == ownedGroupID)
+        #expect(processGroupID(of: descendantPID) == ownedGroupID)
 
         #expect(await preview.stop(siteID: "forced-stop"))
         #if canImport(Darwin)
+        let supervisorWasAbsentWhenStopReturned = !exactProcessExists(ownedGroupID)
         let leaderWasAbsentWhenStopReturned = !exactProcessExists(leaderPID)
         let descendantWasAbsentWhenStopReturned = !exactProcessExists(descendantPID)
         #endif
@@ -177,17 +187,20 @@ struct QuasarApprovalWorkflowTests {
         try await Task.sleep(for: .milliseconds(250))
         let activityAfterObservation = try Data(contentsOf: activity)
 
-        terminateExactProcessIDs(recordedProcessIDs)
+        terminateExactProcessIDs(recordedProcessIDs + [ownedGroupID])
+        let supervisorCleanupSucceeded = await waitForExactProcessExit(ownedGroupID)
         let leaderCleanupSucceeded = await waitForExactProcessExit(leaderPID)
         let descendantCleanupSucceeded = await waitForExactProcessExit(descendantPID)
-        let cleanupSucceeded = leaderCleanupSucceeded && descendantCleanupSucceeded
-        #expect(cleanupSucceeded, "exact-PID test cleanup did not reap both recorded processes")
+        let cleanupSucceeded = supervisorCleanupSucceeded && leaderCleanupSucceeded && descendantCleanupSucceeded
+        #expect(cleanupSucceeded, "exact-PID test cleanup did not reap the supervisor and both command processes")
         recordedProcessIDs.removeAll()
+        supervisorProcessID = nil
         try? FileManager.default.removeItem(at: processMarker)
 
         #expect(leaderExited, "preview leader \(leaderPID) survived stop")
         #expect(descendantExited, "preview descendant \(descendantPID) survived stop")
         #if canImport(Darwin)
+        #expect(supervisorWasAbsentWhenStopReturned, "preview supervisor still existed when stop returned")
         #expect(leaderWasAbsentWhenStopReturned, "preview leader still existed when stop returned")
         #expect(descendantWasAbsentWhenStopReturned, "preview descendant still existed when stop returned")
         #endif
@@ -238,11 +251,60 @@ struct QuasarApprovalWorkflowTests {
         processID = nil
     }
 
+    @Test func terminalGroupProofPreventsNumericReuseSignals() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let processMarker = base.appendingPathComponent("process")
+        let probes = ProcessGroupProbeRecorder()
+        var processID: Int32?
+        defer { if let processID { terminateExactProcessIDs([processID]) } }
+        let processGroups = QuasarProcessGroupSystem(
+            processGroupID: { $0 },
+            currentProcessGroupID: { currentProcessGroupID() },
+            signalGroup: { _, _ in probes.recordSignal() },
+            liveness: { _ in probes.nextLiveness() }
+        )
+        let preview = QuasarPreviewManager(
+            readinessAttempts: 100,
+            pollInterval: .milliseconds(1),
+            command: .init(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: { _ in
+                    ["-c", "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 30", "quasar-preview", processMarker.path]
+                }
+            ),
+            readinessProbe: { _ in readRecordedProcessID(at: processMarker) != nil },
+            processGroups: processGroups
+        )
+
+        #expect(await preview.start(siteID: "retired-group", siteRoot: base, port: 4_718).state == .running)
+        guard let recordedProcessID = await waitForRecordedProcessID(at: processMarker) else {
+            throw QuasarError.processFailed("retired-group preview did not record its process ID")
+        }
+        processID = recordedProcessID
+        #expect(await preview.stop(siteID: "retired-group"))
+        #expect(probes.snapshot() == .init(liveness: 1, signals: 0))
+
+        #expect(await preview.stop(siteID: "retired-group"))
+        #expect(
+            probes.snapshot() == .init(liveness: 1, signals: 0),
+            "a terminal generation probed or signalled its recycled numeric PGID"
+        )
+
+        if let processID {
+            terminateExactProcessIDs([processID])
+            #expect(await waitForExactProcessExit(processID))
+        }
+        processID = nil
+    }
+
     @Test func failedStartupKillsDescendantAfterLeaderExits() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: base) }
         let processMarker = base.appendingPathComponent("processes")
+        let activity = base.appendingPathComponent("activity")
         var recordedProcessIDs: [Int32] = []
         defer {
             terminateExactProcessIDs(recordedProcessIDs + (readRecordedProcessIDs(at: processMarker) ?? []))
@@ -255,9 +317,10 @@ struct QuasarApprovalWorkflowTests {
                 arguments: { _ in
                     [
                         "-c",
-                        "(trap '' TERM INT; while :; do sleep 0.05; done) & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; sleep 0.2; exit 0",
+                        "(trap '' TERM INT; while :; do printf 'descendant\\n' >> \"$2\"; sleep 0.02; done) & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; sleep 0.2; exit 0",
                         "quasar-preview",
                         processMarker.path,
+                        activity.path,
                     ]
                 }
             ),
@@ -269,8 +332,19 @@ struct QuasarApprovalWorkflowTests {
         recordedProcessIDs = try #require(await waitForRecordedProcessIDs(at: processMarker))
         let leaderExited = await waitForExactProcessExit(recordedProcessIDs[0])
         let descendantExited = await waitForExactProcessExit(recordedProcessIDs[1])
+        let activityAtReturn = try Data(contentsOf: activity)
+        try await Task.sleep(for: .milliseconds(250))
+        let activityAfterObservation = try Data(contentsOf: activity)
         #expect(leaderExited)
+        #expect(
+            activityAfterObservation == activityAtReturn,
+            "descendant activity continued after startup-failure cleanup returned"
+        )
+        #if os(Linux)
         #expect(descendantExited, "descendant survived startup-failure group cleanup")
+        #else
+        _ = descendantExited // A Darwin zombie is inert even before its new parent reaps it.
+        #endif
         recordedProcessIDs.removeAll()
     }
 
@@ -307,6 +381,10 @@ struct QuasarApprovalWorkflowTests {
             let status = await preview.start(siteID: name, siteRoot: base, port: 4_713)
             #expect(status.state == .crashed)
             #expect(status.logTail.contains { $0.contains("private owned process group") })
+            #expect(
+                !FileManager.default.fileExists(atPath: processMarker.path),
+                "invalid ownership validation launched the actual preview command"
+            )
             if let processID = await waitForRecordedProcessID(at: processMarker) {
                 #expect(await waitForExactProcessExit(processID), "invalid-group leader survived fail-closed cleanup")
                 terminateExactProcessIDs([processID])
@@ -314,14 +392,19 @@ struct QuasarApprovalWorkflowTests {
         }
     }
 
-    @Test func previewStartupRejectsLeaderThatExitsDuringOwnershipValidation() async throws {
+    @Test func delayedInvalidOwnershipValidationDoesNotLaunchPreviewCommand() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: base) }
+        let processMarker = base.appendingPathComponent("processes")
+        var recordedProcessIDs: [Int32] = []
+        defer {
+            terminateExactProcessIDs(recordedProcessIDs + (readRecordedProcessIDs(at: processMarker) ?? []))
+        }
         let processGroups = QuasarProcessGroupSystem(
-            processGroupID: { processID in
+            processGroupID: { _ in
                 Thread.sleep(forTimeInterval: 0.1)
-                return processID
+                return nil
             },
             currentProcessGroupID: { currentProcessGroupID() },
             signalGroup: { _, _ in .failed },
@@ -332,7 +415,14 @@ struct QuasarApprovalWorkflowTests {
             pollInterval: .milliseconds(1),
             command: .init(
                 executableURL: URL(fileURLWithPath: "/bin/sh"),
-                arguments: { _ in ["-c", "exit 0", "quasar-preview"] }
+                arguments: { _ in
+                    [
+                        "-c",
+                        "trap '' TERM INT; (trap '' TERM INT; while :; do sleep 0.05; done) & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; while :; do sleep 0.05; done",
+                        "quasar-preview",
+                        processMarker.path,
+                    ]
+                }
             ),
             readinessProbe: { _ in true },
             processGroups: processGroups
@@ -341,23 +431,100 @@ struct QuasarApprovalWorkflowTests {
         let status = await preview.start(siteID: "early-exit", siteRoot: base, port: 4_717)
         #expect(status.state == .crashed)
         #expect(status.logTail.contains { $0.contains("private owned process group") })
+        recordedProcessIDs = readRecordedProcessIDs(at: processMarker) ?? []
+        #expect(
+            recordedProcessIDs.isEmpty,
+            "delayed invalid validation launched the actual preview command or its descendant"
+        )
     }
 
-    @Test func linuxProcfsGroupLivenessFailsClosedForMissingAndMalformedState() throws {
+    @Test func linuxGroupLivenessRequiresKernelAbsenceOrUsableProcfs() throws {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        #expect(QuasarProcessGroupSystem.linuxLiveness(groupID: 4_242, procRoot: missing) == .unverifiable)
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: missing,
+                groupProbe: { _ in .absent }
+            ) == .absent,
+            "kernel ESRCH is authoritative even when procfs is unavailable"
+        )
+
+        let empty = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: empty) }
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: empty,
+                groupProbe: { _ in .failed }
+            ) == .unverifiable,
+            "an empty procfs snapshot cannot prove kernel group absence"
+        )
+        try FileManager.default.createDirectory(
+            at: empty.appendingPathComponent("123"),
+            withIntermediateDirectories: true
+        )
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: empty,
+                groupProbe: { _ in .delivered }
+            ) == .unverifiable,
+            "a listed PID whose stat disappeared must fail closed"
+        )
 
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
         let stat = base.appendingPathComponent("123/stat")
         try FileManager.default.createDirectory(at: stat.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("malformed".utf8).write(to: stat, options: .atomic)
-        #expect(QuasarProcessGroupSystem.linuxLiveness(groupID: 4_242, procRoot: base) == .unverifiable)
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: base,
+                groupProbe: { _ in .absent }
+            ) == .absent,
+            "kernel ESRCH is authoritative even when procfs is malformed"
+        )
 
         try Data("123 (worker name) Z 1 4242 0 0".utf8).write(to: stat, options: .atomic)
-        #expect(QuasarProcessGroupSystem.linuxLiveness(groupID: 4_242, procRoot: base) == .zombieOnly)
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: base,
+                groupProbe: { _ in .delivered }
+            ) == .zombieOnly
+        )
         try Data("123 (worker name) S 1 4242 0 0".utf8).write(to: stat, options: .atomic)
-        #expect(QuasarProcessGroupSystem.linuxLiveness(groupID: 4_242, procRoot: base) == .live)
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: base,
+                groupProbe: { _ in .delivered }
+            ) == .live
+        )
+    }
+
+    @Test func linuxProcfsSnapshotCannotProveAbsenceWhileKernelStillSeesTheGroup() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: base,
+                groupProbe: { _ in .delivered }
+            ) == .live,
+            "a procfs miss cannot override the kernel's live-group result"
+        )
+        #expect(
+            QuasarProcessGroupSystem.linuxLiveness(
+                groupID: 4_242,
+                procRoot: base,
+                groupProbe: { _ in .absent }
+            ) == .absent
+        )
     }
 
     @Test func replacementRefusesWhenPriorGroupExitCannotBeProven() async throws {
@@ -605,6 +772,34 @@ struct QuasarApprovalWorkflowTests {
 private actor PlanCounter {
     private var value = 0
     func next() -> Int { value += 1; return value }
+}
+
+private final class ProcessGroupProbeRecorder: @unchecked Sendable {
+    struct Snapshot: Equatable {
+        var liveness: Int
+        var signals: Int
+    }
+
+    private let lock = NSLock()
+    private var livenessCalls = 0
+    private var signalCalls = 0
+
+    func nextLiveness() -> QuasarProcessGroupLiveness {
+        lock.lock(); defer { lock.unlock() }
+        livenessCalls += 1
+        return livenessCalls == 1 ? .absent : .live
+    }
+
+    func recordSignal() -> QuasarGroupSignalResult {
+        lock.lock(); defer { lock.unlock() }
+        signalCalls += 1
+        return .absent
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return .init(liveness: livenessCalls, signals: signalCalls)
+    }
 }
 
 private actor FirstReadGate {
