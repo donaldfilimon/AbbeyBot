@@ -170,10 +170,31 @@ public actor QuasarPreviewManager {
 
     private func waitForExit(_ process: Process) async -> Bool {
         for _ in 0..<40 {
-            guard process.isRunning else { return true }
+            guard !Self.hasExited(process) else { return true }
             try? await Task.sleep(for: .milliseconds(25))
         }
-        return !process.isRunning
+        return Self.hasExited(process)
+    }
+
+    private nonisolated static func hasExited(_ process: Process) -> Bool {
+        guard process.isRunning else { return true }
+        #if os(Linux)
+        // swift-corelibs-foundation flips `isRunning` only after its manager
+        // thread reaps the child. Under load, a child that has already exited
+        // can remain a zombie beyond this manager's bounded grace period. A
+        // zombie cannot execute or write into a site, so it satisfies the
+        // archive safety contract even while Foundation catches up.
+        let statPath = "/proc/\(process.processIdentifier)/stat"
+        guard let stat = try? String(contentsOfFile: statPath, encoding: .utf8) else {
+            return !FileManager.default.fileExists(atPath: statPath)
+        }
+        guard let commandEnd = stat.lastIndex(of: ")") else { return false }
+        let remainder = stat[stat.index(after: commandEnd)...]
+        guard let state = remainder.first(where: { !$0.isWhitespace }) else { return false }
+        return state == "Z" || state == "X"
+        #else
+        return false
+        #endif
     }
 
     nonisolated static func lines(_ value: String) -> [String] {
