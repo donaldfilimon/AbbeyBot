@@ -34,15 +34,63 @@ private struct CancellationIgnoringStructuredProvider: InferenceProvider {
     let mode = InferenceMode.remoteCompatible
     let capabilities: Set<InferenceCapability> = [.text, .structuredJSON, .boundedPlanning]
     let identity = "test-cancellation-ignoring-provider"
-    let delaySeconds: Double
+    let probe: ControlledStructuredProviderProbe
 
     func generate(_ request: InferenceRequest) async throws -> InferenceResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().asyncAfter(deadline: .now() + delaySeconds) {
-                continuation.resume()
+        await probe.enterProviderAndWaitForRelease()
+        return .init(text: #"{"paths":[]}"#, mode: mode)
+    }
+}
+
+private enum StructuredTimeoutOutcome: Equatable, Sendable {
+    case succeeded
+    case timeBudgetExceeded
+    case failed(String)
+}
+
+private struct ControlledStructuredProviderSnapshot: Sendable {
+    let providerStarted: Bool
+    let providerCompleted: Bool
+    let routerOutcome: StructuredTimeoutOutcome?
+}
+
+private actor ControlledStructuredProviderProbe {
+    private var providerStarted = false
+    private var providerReleased = false
+    private var providerCompleted = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var routerOutcome: StructuredTimeoutOutcome?
+
+    func enterProviderAndWaitForRelease() async {
+        providerStarted = true
+        if !providerReleased {
+            await withCheckedContinuation { continuation in
+                releaseWaiters.append(continuation)
             }
         }
-        return .init(text: #"{"paths":[]}"#, mode: mode)
+        providerCompleted = true
+    }
+
+    func releaseProvider() {
+        guard !providerReleased else { return }
+        providerReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func recordRouterOutcome(_ outcome: StructuredTimeoutOutcome) {
+        routerOutcome = outcome
+    }
+
+    func snapshot() -> ControlledStructuredProviderSnapshot {
+        ControlledStructuredProviderSnapshot(
+            providerStarted: providerStarted,
+            providerCompleted: providerCompleted,
+            routerOutcome: routerOutcome
+        )
     }
 }
 
@@ -180,32 +228,76 @@ struct KnowledgeAndStructuredInferenceTests {
     }
 
     @Test func structuredTimeoutDoesNotWaitForAProviderThatIgnoresCancellation() async {
-        // The provider ignores cancellation, so the only thing worth asserting is
-        // that the router gave up on it rather than awaiting it. Keep the provider
-        // delay far above the assertion bound: a shared CI runner can stall a task
-        // for well over 100 ms without the router having waited on anything, which
-        // is what made the old 0.2 s / 100 ms pairing flaky on Linux.
-        let providerDelay = Duration.seconds(2)
-        let provider = CancellationIgnoringStructuredProvider(
-            delaySeconds: Double(providerDelay.components.seconds)
-        )
+        // Hold the provider behind a test-controlled, cancellation-ignoring
+        // gate. This proves relative ordering without relying on the provider's
+        // wall-clock delay or leaving an unbounded cleanup continuation.
+        let probe = ControlledStructuredProviderProbe()
+        let provider = CancellationIgnoringStructuredProvider(probe: probe)
         let router = InferenceRouter(
             eventBus: EventBus(), metrics: EngineMetrics(), currentMode: { .remoteCompatible },
             remoteEndpoint: { "" }, providerOverrides: [.remoteCompatible: provider]
         )
         let clock = ContinuousClock()
-        let started = clock.now
-        await #expect(throws: InferenceError.timeBudgetExceeded) {
-            _ = try await router.generateStructured(.init(
-                request: .init(systemPrompt: "plan", userText: "request"),
-                jsonSchema: #"{"type":"object","required":["paths"]}"#,
-                timeBudget: .milliseconds(5),
-                maximumRetries: 0
-            ))
+        let routerTask = Task {
+            let outcome: StructuredTimeoutOutcome
+            do {
+                _ = try await router.generateStructured(.init(
+                    request: .init(systemPrompt: "plan", userText: "request"),
+                    jsonSchema: #"{"type":"object","required":["paths"]}"#,
+                    timeBudget: .seconds(1),
+                    maximumRetries: 0
+                ))
+                outcome = .succeeded
+            } catch InferenceError.timeBudgetExceeded {
+                outcome = .timeBudgetExceeded
+            } catch {
+                outcome = .failed(String(describing: error))
+            }
+            await probe.recordRouterOutcome(outcome)
         }
-        let elapsed = started.duration(to: clock.now)
-        #expect(elapsed < .milliseconds(750))
-        #expect(elapsed < providerDelay)
+
+        let providerStartDeadline = clock.now.advanced(by: .seconds(2))
+        var snapshot = await probe.snapshot()
+        while !snapshot.providerStarted,
+              snapshot.routerOutcome == nil,
+              clock.now < providerStartDeadline {
+            try? await Task.sleep(for: .milliseconds(1))
+            snapshot = await probe.snapshot()
+        }
+        guard snapshot.providerStarted else {
+            await probe.releaseProvider()
+            routerTask.cancel()
+            Issue.record("The structured provider did not start before the bounded test deadline")
+            return
+        }
+
+        let routerDeadline = clock.now.advanced(by: .seconds(2))
+        while snapshot.routerOutcome == nil, clock.now < routerDeadline {
+            try? await Task.sleep(for: .milliseconds(1))
+            snapshot = await probe.snapshot()
+        }
+        guard let outcome = snapshot.routerOutcome else {
+            await probe.releaseProvider()
+            routerTask.cancel()
+            Issue.record("The structured router did not finish before the bounded test deadline")
+            return
+        }
+
+        #expect(outcome == .timeBudgetExceeded)
+        #expect(!snapshot.providerCompleted)
+
+        // Release the provider's deliberate suspension on every successful
+        // path. Completion polling is bounded, so a regression records a test
+        // issue instead of hanging the suite.
+        await probe.releaseProvider()
+        let providerCompletionDeadline = clock.now.advanced(by: .seconds(1))
+        snapshot = await probe.snapshot()
+        while !snapshot.providerCompleted, clock.now < providerCompletionDeadline {
+            try? await Task.sleep(for: .milliseconds(1))
+            snapshot = await probe.snapshot()
+        }
+        #expect(snapshot.providerCompleted)
+        routerTask.cancel()
     }
 
     @Test func driftReportsAddedRemovedChangedClassificationAndRevisionOnly() throws {

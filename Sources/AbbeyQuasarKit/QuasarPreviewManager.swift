@@ -2,6 +2,13 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 public struct QuasarPreviewCommand: Sendable {
     public var executableURL: URL
@@ -161,19 +168,60 @@ public actor QuasarPreviewManager {
     public func stopAll() async { for id in entries.keys { _ = await stop(siteID: id) } }
 
     private func terminate(_ process: Process) async -> Bool {
-        guard process.isRunning else { return true }
+        guard !Self.hasExited(process) else { return true }
         process.terminate()
         if await waitForExit(process) { return true }
         process.interrupt()
+        if await waitForExit(process) { return true }
+        Self.killOwnedProcess(process)
         return await waitForExit(process)
+    }
+
+    private nonisolated static func killOwnedProcess(_ process: Process) {
+        // TERM and INT can be inherited as ignored dispositions. Escalate only
+        // the exact child PID this manager launched, then retain the same
+        // bounded exit proof before allowing archive or replacement work.
+        #if canImport(Darwin)
+        _ = Darwin.kill(process.processIdentifier, SIGKILL)
+        #elseif canImport(Glibc)
+        _ = Glibc.kill(process.processIdentifier, SIGKILL)
+        #elseif canImport(Musl)
+        _ = Musl.kill(process.processIdentifier, SIGKILL)
+        #else
+        process.terminate()
+        #endif
     }
 
     private func waitForExit(_ process: Process) async -> Bool {
         for _ in 0..<40 {
-            guard process.isRunning else { return true }
+            guard !Self.hasExited(process) else { return true }
             try? await Task.sleep(for: .milliseconds(25))
         }
-        return !process.isRunning
+        return Self.hasExited(process)
+    }
+
+    private nonisolated static func hasExited(_ process: Process) -> Bool {
+        guard process.isRunning else { return true }
+        #if os(Linux)
+        // swift-corelibs-foundation flips `isRunning` only after its manager
+        // thread reaps the child. Under load, a child that has already exited
+        // can remain a zombie beyond this manager's bounded grace period. A
+        // zombie cannot execute or write into a site, so it satisfies the
+        // archive safety contract even while Foundation catches up.
+        guard FileManager.default.fileExists(atPath: "/proc/self/stat") else {
+            return false
+        }
+        let statPath = "/proc/\(process.processIdentifier)/stat"
+        guard let stat = try? String(contentsOfFile: statPath, encoding: .utf8) else {
+            return !FileManager.default.fileExists(atPath: statPath)
+        }
+        guard let commandEnd = stat.lastIndex(of: ")") else { return false }
+        let remainder = stat[stat.index(after: commandEnd)...]
+        guard let state = remainder.first(where: { !$0.isWhitespace }) else { return false }
+        return state == "Z" || state == "X"
+        #else
+        return false
+        #endif
     }
 
     nonisolated static func lines(_ value: String) -> [String] {
