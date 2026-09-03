@@ -1,5 +1,10 @@
 # AbbeyBot
 
+> **Intelligence Without Limits** — Abbey desktop + Discord companion (Swift).  
+> Local-first assistance with memory, personas, and explicit safety boundaries.  
+> Discord voice and live services need operator config; see claims in `docs/`.
+
+
 Swift 6.4 dual product on **macOS 27**: **desktop companion** + **headless Discord server**.
 
 | Layer | Tech |
