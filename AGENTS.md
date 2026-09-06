@@ -1,6 +1,6 @@
 # AGENTS.md — AbbeyBot
 
-Unified Abbey bot at `~/dev/active/AbbeyBot` — **two products** in one package. **macOS 27**.
+Unified Abbey bot at `~/dev/active/AbbeyBot` — one package, one executable product (`AbbeyBot`, entry `AbbeyEntry`) with the **four surfaces** below, plus the `AbbeyCore`, `AbbeyQuasarKit`, and `AbbeyServerKit` libraries. **macOS 27**.
 
 ## Stack
 
@@ -28,7 +28,7 @@ bash Scripts/run-web-smoke.sh      # SPA lint/test/build + packed-resource asser
 bash Scripts/run-smoke.sh          # all five Swift test bundles + desktop build/launch
 bash Scripts/run-server-smoke.sh   # AbbeyServer + compose Postgres or sqlite file + GET /health
 bash Scripts/run-cli-smoke.sh      # abbey CLI boot + DATABASE_URL isolation
-bash Scripts/check-server-snapshot.sh # server graph under a swiftly nightly (builds + runs CI's four test filters)
+bash Scripts/check-server-snapshot.sh # server graph under a swiftly nightly (builds + runs CI's five test filters)
 bash Scripts/check-server-linux.sh    # server graph cross-compiled for Linux (musl static SDK; product only, no tests)
 bash Scripts/verify-all.sh         # all gates
 ```
@@ -52,7 +52,7 @@ CI: `.github/workflows/abbey-ci.yml`, Linux job (`ubuntu-latest` + `docker run s
 
 ### Server-graph snapshot parity
 
-`bash Scripts/check-server-snapshot.sh` builds and tests the **server** graph (`ABBEY_PACKAGE_ROLE=server`) locally under a swiftly-managed Swift development snapshot, mirroring the Linux CI job: resolve → `swift build --product AbbeyBot` → the four CI test filters (`AbbeyServerKitTests` with `DATABASE_URL=sqlite://memory`; the other three without it, exactly like CI). It auto-picks the newest installed `main-snapshot-*` (override: `ABBEY_SNAPSHOT_TOOLCHAIN=...`), selects it **per-invocation only** via swiftly's `+toolchain` selector, writes each gate's output to a log, and echoes the real exit code per gate. Build scratch lives under `${TMPDIR}` like the other scripts.
+`bash Scripts/check-server-snapshot.sh` builds and tests the **server** graph (`ABBEY_PACKAGE_ROLE=server`) locally under a swiftly-managed Swift development snapshot, mirroring the Linux CI job: resolve → `swift build --product AbbeyBot` → the five CI test filters (`AbbeyServerKitTests` with `DATABASE_URL=sqlite://memory`; the other four without it, exactly like CI). It auto-picks the newest installed `main-snapshot-*` (override: `ABBEY_SNAPSHOT_TOOLCHAIN=...`), selects it **per-invocation only** via swiftly's `+toolchain` selector, writes each gate's output to a log, and echoes the real exit code per gate. Build scratch lives under `${TMPDIR}` like the other scripts.
 
 Hard rules: the swiftly global default is never changed, and **desktop work must never use snapshot toolchains** — the desktop target REQUIRES the Xcode toolchain (SwiftData macros and codesigning break under DEVELOPMENT-SNAPSHOT toolchains). This script exists only so server-graph changes can be checked against the same nightly-6.4.x-line compiler CI uses without waiting on Docker/Actions.
 
@@ -67,7 +67,7 @@ Setup is in the script's header and is a one-time cost: `swiftly install main-sn
 - **musl, not glibc.** The Static Linux SDK is musl; CI's `swiftlang/swift:nightly-6.4.x-bookworm` is glibc. The gap is not theoretical: glibc declares `extern FILE *stderr;` (mutable global → Swift 6 strict concurrency rejects every reference) while musl declares `extern FILE *const stderr;` (a `let`, compiles clean). A musl-green build hid exactly that break in `Sources/AbbeyEntry/main.swift`. The `glibc-divergence` gate statically flags references to `stdin`/`stdout`/`stderr` (use `FileHandle.standardError`/`.standardOutput` instead) and warns about `canImport(Glibc)` branches that lack a `canImport(Musl)` companion, since this SDK does not compile them.
 - **No tests.** The Static Linux SDK ships no `Testing` and no `XCTest` module, so `swift build --build-tests` cannot even compile the test targets. Test sources are covered natively by `check-server-snapshot.sh`.
 
-The two scripts are **complementary, not redundant**: snapshot = macOS host, nightly compiler, builds *and runs* the four CI test filters; linux = real Linux target, product graph only. Neither is the gate of record.
+The two scripts are **complementary, not redundant**: snapshot = macOS host, nightly compiler, builds *and runs* the five CI test filters (core, quasar, cli, server-kit, server); linux = real Linux target, product graph only. Neither is the gate of record.
 
 **`.swift-version` is machine-local and gitignored — never commit it.** On macOS dev machines keep an untracked `.swift-version` containing `xcode` at the repo root: it pins swiftly-proxied `swift` to the Xcode toolchain and protects the desktop path even if the machine-wide default changes. The primary dev machine's global default is currently Xcode, but project-local selection remains the durable repository boundary. The file must not be tracked because `xcode` is a macOS-only swiftly selector: on Linux a committed copy breaks every swiftly-proxied invocation (`ABBEY_SWIFT=swiftly bash Scripts/run-abbey.sh` → "version xcode ... doesn't match any of the installed toolchains"). Linux checkouts simply have no `.swift-version` and fall back to that machine's swiftly default; CI uses the Docker image and never consults swiftly. `check-server-snapshot.sh` is unaffected either way — its explicit `+toolchain` selector overrides `.swift-version`. If a branch has committed `.swift-version` (e.g. the phase-4 voice branch), drop it at reconcile with `git rm --cached .swift-version` — the local file stays on disk.
 
@@ -190,7 +190,7 @@ Three personas ship in AbbeyCore as `AbbeyPersona`, `AvivaPersona`, and `AbiPers
 
 **Live dispatch:** `AbbeyEngine` and `BotRuntime` call `ABIRouter.route(intent:)` (via `IntentClassifier`) on message ingress `craftReply` and slash `/ask` — not only `currentPersona()`.
 
-**Roles reference:** `research_mlai.md` (Abbey-Aviva-Abi framework §2) is the role/policy source of truth only; do not port WDBX throughput, Python stack, or industry pilot claims as AbbeyBot product features.
+**Roles reference:** the research-era Abbey-Aviva-Abi framework document (not in this repo) is the role/policy source only; do not port WDBX throughput, Python stack, or industry pilot claims as AbbeyBot product features.
 
 **Not shipped (do not claim as product features):** Python persona framework, TensorFlow/PyTorch stack, live blockchain decentralization, industry healthcare/finance pilots as certified products, GDPR certification, or HIPAA compliance modules. `IndustryProfile` / `WDBXMemoryFacade` / `DecentralizationPolicy` are claim-honest shells only (see Phase 2).
 

@@ -37,7 +37,7 @@ Test targets: five in the server graph — `AbbeyCoreTests`, `AbbeyQuasarKitTest
 
 ```bash
 swift test --filter AbbeyCoreTests
-swift test --filter AbbeyCoreTests.SomeTestCase/testSomeName
+swift test --filter AbbeyCoreTests.InteractionRouterGuardsTests/validatedForgetIndexAcceptsPositiveOneBased   # Swift Testing: Target.Suite/test
 
 # Non-desktop targets without dragging in SwiftUI/SwiftData (also what CI/Docker/swiftly do):
 ABBEY_PACKAGE_ROLE=server swift test --filter 'AbbeyCoreTests|AbbeyQuasarKitTests|AbbeyCLITests|AbbeyServerKitTests|AbbeyServerTests'
@@ -94,7 +94,7 @@ Optional Browserbase Functions (`functions/`, bun — not in verify-all): `cd fu
 
 ## Guardrails specific to this repo
 
-- Don't port claims from `research_mlai.md` (Python/TensorFlow stack, WDBX throughput numbers, blockchain, HIPAA/GDPR, industry pilots) into product docs or code comments as if shipped — see AGENTS.md's "Not shipped" list.
+- Don't port research-era claims (Python/TensorFlow stack, WDBX throughput numbers, blockchain, HIPAA/GDPR, industry pilots) into product docs or code comments as if shipped — see AGENTS.md's "Not shipped" list.
 - `IndustryProfile`, `WDBXMemoryFacade`, and `DecentralizationPolicy` (`Sources/AbbeyCore/{Industry,WDBX,Decentralization}/`) are deliberate **claim-honest shells** — a prompt-suffix flag, a local journal facade, and a policy stub that must stay disabled. Don't extend them to imply HIPAA/GDPR certification, real Zig-abi WDBX throughput, or an actual blockchain node; that's exactly the drift AGENTS.md's "Not shipped" list exists to prevent.
 - Twitch: IRC PRIVMSG→ingest and persona reply (with cooldown) are shipped; IRC and EventSub chat share `BotRuntime.handleTwitchChat`. EventSub: `POST /api/twitch/eventsub` verifies HMAC-SHA256 + 10-min replay window when `TWITCH_EVENTSUB_SECRET` is set; duplicates by `Twitch-Eventsub-Message-Id` are acked without reprocessing (`TwitchEventSubReplayGuard`, backed by a Fluent `twitch_eventsub_deliveries` table — survives restarts, not in-process memory); `channel.chat.message` notifications ingest + persona-reply; `stream.online`/`stream.offline` update `twitchStreamLive` (on `/api/status`) + event bus + interaction log; follow/subscribe/cheer log interactions and soft-ingest social context (`BotRuntime.handleTwitchChannelSocial`); auto-subscribe on boot ships env-gated for all six notification types (`ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` + full `TWITCH_*` contract, `TwitchEventSubAutoSubscriber`, off by default, unverified live). **Not shipped:** PubSub (won't ship — Twitch deprecated it), live-verified Helix handshake (needs a real public HTTPS callback this environment doesn't have).
 - No CRDT merge (won't ship) — desktop and CLI pull with persisted per-entity compound cursors, LWW by `updatedAt`/`generatedAt`, and all-six-entity tombstones; 500-row pages drain via the server-issued timestamp + stable-ID boundary. CLI push remains messages + memory facts only. `/sync` stays a read-only status report. Codegen sandbox is a won't-ship (static `CodeProposalValidator` only).
