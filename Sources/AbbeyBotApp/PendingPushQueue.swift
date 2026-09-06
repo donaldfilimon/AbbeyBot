@@ -1,4 +1,5 @@
 import Foundation
+import AbbeyCore
 
 /// Durable JSONL outbox for `AbbeyServerClient` POSTs that failed to reach the server
 /// (network blip, server down). Mirrors `AbbeyCore.ExperienceJournal`'s append-only-file
@@ -36,6 +37,36 @@ public struct PendingPushQueue: Sendable {
         var path: String
         var bodyJSON: Data
         var enqueuedAt: Date
+        var endpoint: String?
+        var originalLine: Data?
+
+        enum CodingKeys: String, CodingKey {
+            case path, bodyJSON, enqueuedAt, endpoint
+        }
+    }
+
+    /// Endpoint identity excludes credentials and preserves the base path.
+    static func normalizedEndpoint(_ endpoint: String) throws -> String {
+        let url = try SyncTransportPolicy.validate(baseURL: endpoint)
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw SyncTransportPolicy.PolicyError.invalidURL
+        }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        if (components.scheme == "https" && components.port == 443)
+            || (components.scheme == "http" && components.port == 80) {
+            components.port = nil
+        }
+        // The transport removes exactly one trailing slash before joining a request path.
+        // A sole slash is redundant; repeated slashes must survive normalization so
+        // passing this identity back through the transport preserves the destination.
+        if components.percentEncodedPath.hasSuffix("/"), !components.percentEncodedPath.hasSuffix("//") {
+            components.percentEncodedPath.removeLast()
+        }
+        guard let normalized = components.url else { throw SyncTransportPolicy.PolicyError.invalidURL }
+        return normalized.absoluteString
     }
 
     public enum QueueError: Error, LocalizedError, Sendable {
@@ -53,24 +84,30 @@ public struct PendingPushQueue: Sendable {
     }
 
     /// Append one failed push for later retry.
-    public func enqueue(path: String, jsonObjectBody: [String: Any]) throws {
+    /// Omitting the endpoint retains source compatibility but quarantines the record.
+    public func enqueue(path: String, jsonObjectBody: [String: Any], endpoint: String? = nil) throws {
         let bodyJSON: Data
         do {
             bodyJSON = try JSONSerialization.data(withJSONObject: jsonObjectBody)
         } catch {
             throw QueueError.encode(error.localizedDescription)
         }
-        let record = Record(path: path, bodyJSON: bodyJSON, enqueuedAt: Date())
+        let record = Record(
+            path: path, bodyJSON: bodyJSON, enqueuedAt: Date(),
+            endpoint: try endpoint.map(Self.normalizedEndpoint)
+        )
         try coordination.withLock {
             try appendLine(record)
         }
     }
 
-    /// Attempt to resend every queued entry via `send(path, bodyJSON) -> succeeded`, in
-    /// enqueue order. Rewrites the file to keep only entries that still failed. Returns
-    /// the number successfully sent.
+    /// Resend entries bound to this endpoint in enqueue order. Legacy destination-less
+    /// entries and other destinations remain pending, with their original JSONL bytes.
+    /// Omitting the endpoint sends nothing. Returns the number successfully sent.
     @discardableResult
-    public func drain(send: (String, Data) async -> Bool) async throws -> Int {
+    public func drain(endpoint: String? = nil, send: (String, Data) async -> Bool) async throws -> Int {
+        guard let endpoint else { return 0 }
+        let destination = try Self.normalizedEndpoint(endpoint)
         let records: [Record]? = try coordination.withLock {
             guard !coordination.drainInProgress else { return nil }
             let records = try readAll()
@@ -90,13 +127,14 @@ public struct PendingPushQueue: Sendable {
         var stillPending: [Record] = []
         var sentCount = 0
         for record in records {
-            if await send(record.path, record.bodyJSON) {
+            if record.endpoint == destination, await send(record.path, record.bodyJSON) {
                 sentCount += 1
             } else {
                 stillPending.append(record)
             }
         }
 
+        guard sentCount > 0 else { return 0 }
         try coordination.withLock {
             // `enqueue` only appends while this drain is in flight and another drain is
             // excluded, so everything after the snapshot prefix is newly queued work.
@@ -155,13 +193,17 @@ public struct PendingPushQueue: Sendable {
             throw QueueError.io(error.localizedDescription)
         }
         guard !data.isEmpty else { return [] }
-        let text = String(decoding: data, as: UTF8.self)
-        let lines = text.split(whereSeparator: \.isNewline).filter { !$0.isEmpty }
         var out: [Record] = []
-        out.reserveCapacity(lines.count)
-        for line in lines {
+        var start = data.startIndex
+        while start < data.endIndex {
+            let end = data[start...].firstIndex(of: 0x0A).map { $0 + 1 } ?? data.endIndex
+            let line = data.subdata(in: start..<end)
+            start = end
+            if line.allSatisfy({ $0 == 0x0A || $0 == 0x0D }) { continue }
             do {
-                out.append(try decoder.decode(Record.self, from: Data(line.utf8)))
+                var record = try decoder.decode(Record.self, from: line)
+                record.originalLine = line
+                out.append(record)
             } catch {
                 throw QueueError.corrupt(error.localizedDescription)
             }
@@ -176,6 +218,10 @@ public struct PendingPushQueue: Sendable {
         }
         var data = Data()
         for record in records {
+            if let originalLine = record.originalLine {
+                data.append(originalLine)
+                continue
+            }
             let encoded: Data
             do {
                 encoded = try encoder.encode(record)

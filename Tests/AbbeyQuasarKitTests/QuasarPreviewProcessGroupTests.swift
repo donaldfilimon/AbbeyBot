@@ -11,6 +11,32 @@ import Musl
 
 @Suite("Quasar preview process groups")
 struct QuasarPreviewProcessGroupTests {
+    @Test func supervisorLossProbeInvalidatesOwnershipWhileNumericGroupRemainsLive() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        defer {
+            if process.isRunning { terminateExactProcessIDs([process.processIdentifier]) }
+            process.waitUntilExit()
+        }
+        let probes = SupervisorLossReuseProbe()
+        let processID = process.processIdentifier
+        #expect(probes.validate(processID) == processID)
+        #expect(probes.signal(processID, SIGTERM) == .delivered)
+        #expect(probes.validate(processID) == nil)
+        #expect(probes.liveness(processID) == .live)
+        #expect(probes.validate(processID) == nil)
+        #expect(probes.signals == [SIGTERM])
+    }
+
+    @Test func onlyGroupAbsenceProvesExit() {
+        #expect(QuasarProcessGroupLiveness.absent.satisfiesExitProof)
+        #expect(!QuasarProcessGroupLiveness.zombieOnly.satisfiesExitProof)
+        #expect(!QuasarProcessGroupLiveness.live.satisfiesExitProof)
+        #expect(!QuasarProcessGroupLiveness.unverifiable.satisfiesExitProof)
+    }
+
     @Test func supervisorLossNeverAuthorizesSignalFromReusedNumericGroup() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -1075,9 +1101,11 @@ private final class SupervisorLossReuseProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var validated: [Int32] = []
     private var recordedSignals: [Int32] = []
+    private var lostSupervisorID: Int32?
 
     func validate(_ processID: Int32) -> Int32? {
         lock.lock(); defer { lock.unlock() }
+        guard processID != lostSupervisorID else { return nil }
         if !validated.contains(processID) { validated.append(processID) }
         return processID
     }
@@ -1087,13 +1115,13 @@ private final class SupervisorLossReuseProbe: @unchecked Sendable {
         lock.lock()
         recordedSignals.append(signal)
         shouldDropSupervisor = recordedSignals.count == 1
+        // Model ownership loss independently of Foundation's asynchronous
+        // child reaping. A live numeric PGID must not restore the lost anchor.
+        if shouldDropSupervisor { lostSupervisorID = groupID }
         lock.unlock()
 
         if shouldDropSupervisor {
             terminateExactProcessIDs([groupID])
-            for _ in 0..<200 where exactProcessExists(groupID) {
-                Thread.sleep(forTimeInterval: 0.005)
-            }
         }
         return .delivered
     }

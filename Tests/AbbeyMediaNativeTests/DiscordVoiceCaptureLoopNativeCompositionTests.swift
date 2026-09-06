@@ -61,6 +61,45 @@ struct DiscordVoiceCaptureLoopNativeCompositionTests {
         #expect(await loop.snapshot().sentFrameCount == 2)
     }
 
+    @Test("capture stop cancels and drains a parked transport send before media reset")
+    func captureStopDrainsTransportBeforeReset() async throws {
+        let transport = CompositionDatagramDouble(holdSend: true)
+        let daveSession = CompositionDAVESessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: transport
+        )
+        _ = try await plane.install(
+            try DiscordVoiceNegotiatedMediaCapability(
+                generation: 31,
+                ssrc: 0x2222_2222,
+                transportMode: .aeadXChaCha20Poly1305RTPSIZE,
+                transportKey: [UInt8](repeating: 0x5c, count: 32),
+                daveProtocolVersion: 1
+            )
+        )
+        let source = CompositionCaptureSourceDouble()
+        let loop = DiscordVoiceCaptureLoop(source: source, sender: plane)
+        try await loop.start(generation: 31)
+        await source.emit(compositionPCMFrame(seed: 0))
+        await transport.waitUntilSendStarted()
+        let stop = Task { await loop.stop() }
+        await transport.waitUntilCancelled()
+        // Cancellation alone must not let the pump return before transport
+        // cleanup. Reset is deliberately not called to unblock this stop.
+        #expect(await loop.snapshot().phase != .stopped)
+        #expect(await plane.snapshot().isInstalled)
+        await transport.releaseSend()
+        await stop.value
+        #expect(await loop.snapshot().phase == .stopped)
+        #expect(await loop.snapshot().sentFrameCount == 0)
+        #expect(await source.stopCount == 1)
+        #expect(await transport.sentPackets.isEmpty)
+        await plane.reset()
+        #expect(await plane.snapshot().isInstalled == false)
+    }
+
     @Test("a capture loop started before negotiation sends nothing and fails closed")
     func captureLoopBeforeNegotiationFailsClosed() async throws {
         let transport = CompositionDatagramDouble()
@@ -160,10 +199,71 @@ private actor CompositionSpeakingRecorder {
 }
 
 private actor CompositionDatagramDouble: DiscordVoiceMediaDatagramTransport {
+    private var watchdog: Task<Void, Never>?
     private(set) var sentPackets: [[UInt8]] = []
+    private let holdSend: Bool
+    private var sendStarted = false
+    private var cancelled = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(holdSend: Bool = false) { self.holdSend = holdSend }
+
+    deinit { watchdog?.cancel() }
 
     func sendProtectedPacket(_ bytes: [UInt8]) async throws {
+        if holdSend {
+            sendStarted = true
+            for waiter in startWaiters { waiter.resume() }
+            startWaiters.removeAll()
+            await withTaskCancellationHandler {
+                if !released {
+                    await withCheckedContinuation { releaseWaiter = $0 }
+                }
+            } onCancel: {
+                Task { await self.recordCancellation() }
+            }
+            try Task.checkCancellation()
+        }
         sentPackets.append(bytes)
+    }
+
+    func waitUntilSendStarted() async {
+        if watchdog == nil {
+            watchdog = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                await self?.expire()
+            }
+        }
+        if !sendStarted { await withCheckedContinuation { startWaiters.append($0) } }
+    }
+
+    func waitUntilCancelled() async {
+        if !cancelled { await withCheckedContinuation { cancellationWaiters.append($0) } }
+    }
+
+    func releaseSend() {
+        watchdog?.cancel()
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+
+    private func recordCancellation() {
+        cancelled = true
+        for waiter in cancellationWaiters { waiter.resume() }
+        cancellationWaiters.removeAll()
+    }
+
+    private func expire() {
+        Issue.record("Timed out waiting for capture transport test gate; releasing all barriers")
+        sendStarted = true
+        for waiter in startWaiters { waiter.resume() }
+        startWaiters.removeAll()
+        recordCancellation()
+        releaseSend()
     }
 
     func receiveProtectedPacket() async throws -> [UInt8] { [] }

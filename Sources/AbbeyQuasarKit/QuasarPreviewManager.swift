@@ -714,6 +714,13 @@ public actor QuasarPreviewManager {
         return current
     }
 
+    /// Permanently close admission before stopping processes. Unlike shutdown,
+    /// stopAll remains reusable by callers that intend to start previews again.
+    public func shutdown() async {
+        isShuttingDown = true
+        await stopAll()
+    }
+
     private func validatedProcessGroup(for process: Process) -> OwnedProcessGroup? {
         let leaderPID = process.processIdentifier
         guard leaderPID > 1, process.isRunning else { return nil }

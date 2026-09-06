@@ -14,11 +14,11 @@ struct PendingPushQueueTests {
         let (queue, url) = makeQueue()
         defer { try? FileManager.default.removeItem(at: url) }
 
-        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "hello"])
-        try queue.enqueue(path: "/api/state/remember", jsonObjectBody: ["fact": "likes tea"])
+        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "hello"], endpoint: "https://a.example")
+        try queue.enqueue(path: "/api/state/remember", jsonObjectBody: ["fact": "likes tea"], endpoint: "https://a.example")
 
         var sentPaths: [String] = []
-        let flushed = try await queue.drain { path, _ in
+        let flushed = try await queue.drain(endpoint: "https://a.example") { path, _ in
             sentPaths.append(path)
             return true
         }
@@ -32,10 +32,10 @@ struct PendingPushQueueTests {
         let (queue, url) = makeQueue()
         defer { try? FileManager.default.removeItem(at: url) }
 
-        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "will succeed"])
-        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "will fail"])
+        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "will succeed"], endpoint: "https://a.example")
+        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "will fail"], endpoint: "https://a.example")
 
-        let flushed = try await queue.drain { _, bodyData in
+        let flushed = try await queue.drain(endpoint: "https://a.example") { _, bodyData in
             let text = String(decoding: bodyData, as: UTF8.self)
             return !text.contains("will fail")
         }
@@ -44,7 +44,7 @@ struct PendingPushQueueTests {
         #expect(try queue.pendingCount() == 1)
 
         // A second drain with everything succeeding clears the retained entry.
-        let secondFlush = try await queue.drain { _, _ in true }
+        let secondFlush = try await queue.drain(endpoint: "https://a.example") { _, _ in true }
         #expect(secondFlush == 1)
         #expect(try queue.pendingCount() == 0)
     }
@@ -60,16 +60,46 @@ struct PendingPushQueueTests {
         #expect(try queue.pendingCount() == 2)
     }
 
+    @Test func legacyBytesRemainQuarantinedWhenBoundRecordDrains() async throws {
+        let (queue, url) = makeQueue()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let legacy = Data("{ \"path\":\"/api/ingest\", \"bodyJSON\":\"e30=\", \"enqueuedAt\":\"2026-09-06T00:00:00Z\" }\r\n".utf8)
+        try legacy.write(to: url)
+        try queue.enqueue(path: "/api/state/remember", jsonObjectBody: ["fact": "bound"], endpoint: "https://a.example")
+        var paths: [String] = []
+        #expect(try await queue.drain(endpoint: "https://a.example") { path, _ in
+            paths.append(path)
+            return true
+        } == 1)
+        #expect(paths == ["/api/state/remember"])
+        #expect(try Data(contentsOf: url) == legacy)
+        #expect(try queue.pendingCount() == 1)
+        #expect(try await queue.drain { _, _ in
+            Issue.record("Destination-less drain must not send")
+            return true
+        } == 0)
+        #expect(try Data(contentsOf: url) == legacy)
+    }
+
+    @Test func endpointIdentityPreservesBasePathAndRejectsCredentials() throws {
+        #expect(try PendingPushQueue.normalizedEndpoint(" HTTPS://A.EXAMPLE:443/base/ ") == "https://a.example/base")
+        for endpoint in ["https://user:secret@a.example", "https://a.example?token=secret", "https://a.example#secret"] {
+            #expect(throws: (any Error).self) {
+                try PendingPushQueue.normalizedEndpoint(endpoint)
+            }
+        }
+    }
+
     @Test func enqueueDuringAwaitedDrainIsPreserved() async throws {
         let (queue, url) = makeQueue()
         defer { try? FileManager.default.removeItem(at: url) }
 
-        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "snapshot"])
+        try queue.enqueue(path: "/api/ingest", jsonObjectBody: ["content": "snapshot"], endpoint: "https://a.example")
         let concurrentWriter = PendingPushQueue(url: url)
         let gate = DrainGate()
 
         let draining = Task {
-            try await queue.drain { _, _ in
+            try await queue.drain(endpoint: "https://a.example") { _, _ in
                 await gate.markSendStartedAndWaitForRelease()
                 return true
             }
@@ -78,7 +108,8 @@ struct PendingPushQueueTests {
         await gate.waitUntilSendStarted()
         try concurrentWriter.enqueue(
             path: "/api/state/remember",
-            jsonObjectBody: ["fact": "arrived during drain"]
+            jsonObjectBody: ["fact": "arrived during drain"],
+            endpoint: "https://a.example"
         )
         await gate.releaseSend()
 
@@ -86,7 +117,7 @@ struct PendingPushQueueTests {
         #expect(try queue.pendingCount() == 1)
 
         var replayedPaths: [String] = []
-        #expect(try await queue.drain { path, _ in
+        #expect(try await queue.drain(endpoint: "https://a.example") { path, _ in
             replayedPaths.append(path)
             return true
         } == 1)
