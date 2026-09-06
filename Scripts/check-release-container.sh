@@ -23,10 +23,28 @@ CADDY_CONTAINER="${GATE_ID}-caddy"
 GATE_NETWORK="${GATE_ID}-network"
 
 cleanup() {
+    local status=$?
+    # Only the readiness probes dump logs. Every stage after them can fail with
+    # nothing but an HTTP status to go on -- a bare 500 from /api/sites cost a
+    # 35-minute round trip with no diagnosis -- so surface what the containers
+    # recorded before they are removed.
+    if (( status != 0 )); then
+        local container
+        for container in "$SERVER_CONTAINER" "$PREVIEW_CONTAINER" "$PROVIDER_CONTAINER" \
+            "$PROXY_FIXTURE_CONTAINER" "$CADDY_CONTAINER"; do
+            docker inspect "$container" >/dev/null 2>&1 || continue
+            echo "-- docker logs ${container} --" >&2
+            docker logs --tail 200 "$container" >&2 2>&1 || true
+        done
+    fi
     docker rm -f "$SERVER_CONTAINER" "$PREVIEW_CONTAINER" "$PROVIDER_CONTAINER" \
         "$PROXY_FIXTURE_CONTAINER" "$CADDY_CONTAINER" >/dev/null 2>&1 || true
     docker network rm "$GATE_NETWORK" >/dev/null 2>&1 || true
-    rm -rf "$WORK_DIR"
+    # Containers write here as their own uid, so removal fails with EPERM and
+    # printed a wall of "cannot remove" onto the end of every failing run,
+    # directly above the real error. Bash keeps the pre-trap exit status, so
+    # this was noise rather than a wrong verdict.
+    rm -rf "$WORK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
