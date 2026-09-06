@@ -428,6 +428,7 @@ public actor AVAudioEngineAdapter {
         case .configurationChanged, .deviceConfigurationChanged:
             state = .configurationChanged
         }
+        captureStartOperation?.task.cancel()
         generation &+= 1
         assembler.reset()
         let pendingPlayback = beginPlaybackTeardown()

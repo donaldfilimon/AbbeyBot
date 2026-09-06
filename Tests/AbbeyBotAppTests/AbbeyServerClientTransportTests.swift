@@ -69,6 +69,44 @@ struct AbbeyServerClientTransportTests {
         #expect(state.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer rotated-token-a")
     }
 
+    @Test(arguments: ["//", "///"])
+    func repeatedTrailingSlashesPreserveGETPOSTParityAndQueueIsolation(slashes: String) async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("DesktopOutbox-\(UUID()).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let queue = PendingPushQueue(url: url)
+        let endpoint = "https://a.example/base" + slashes
+        let normalized = try PendingPushQueue.normalizedEndpoint(endpoint)
+        #expect(normalized == endpoint)
+        #expect(try PendingPushQueue.normalizedEndpoint(normalized) == normalized)
+        let state = OutboxTransportState()
+        state.configure(endpoint: endpoint, token: "token-a")
+        let client = AbbeyServerClient(
+            syncServerURL: { state.endpoint }, syncAPIToken: { state.token }, outbox: queue,
+            transport: { request in
+                if state.record(request) == 1 { throw URLError(.cannotConnectToHost) }
+                return (Data(), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        )
+        let get = try client.makeRequest(path: "/api/state/remember", method: "GET")
+        #expect(get.url?.absoluteString == "https://a.example/base" + slashes + "api/state/remember")
+        await client.remember(guildId: "g", userId: "u", fact: "bound to repeated slashes")
+        #expect(state.requests.first?.url == get.url)
+        #expect(try queue.pendingCount() == 1)
+        let persisted = try Data(contentsOf: url)
+
+        state.configure(endpoint: "https://a.example/base/", token: "token-a")
+        let otherGET = try client.makeRequest(path: "/api/state/remember", method: "GET")
+        #expect(otherGET.url != get.url)
+        #expect(await client.flushPendingPushes() == 0)
+        #expect(state.requests.count == 1)
+        #expect(try Data(contentsOf: url) == persisted)
+
+        state.configure(endpoint: endpoint, token: "token-a")
+        #expect(await client.flushPendingPushes() == 1)
+        #expect(state.requests.map { $0.url } == [get.url, get.url])
+        #expect(try queue.pendingCount() == 0)
+    }
+
     @Test func flushSnapshotsDestinationAndTokenForEveryRecord() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("DesktopOutbox-\(UUID()).jsonl")
         defer { try? FileManager.default.removeItem(at: url) }

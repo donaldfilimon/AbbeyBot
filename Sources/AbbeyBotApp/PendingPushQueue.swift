@@ -59,7 +59,12 @@ public struct PendingPushQueue: Sendable {
             || (components.scheme == "http" && components.port == 80) {
             components.port = nil
         }
-        while components.percentEncodedPath.hasSuffix("/") { components.percentEncodedPath.removeLast() }
+        // The transport removes exactly one trailing slash before joining a request path.
+        // A sole slash is redundant; repeated slashes must survive normalization so
+        // passing this identity back through the transport preserves the destination.
+        if components.percentEncodedPath.hasSuffix("/"), !components.percentEncodedPath.hasSuffix("//") {
+            components.percentEncodedPath.removeLast()
+        }
         guard let normalized = components.url else { throw SyncTransportPolicy.PolicyError.invalidURL }
         return normalized.absoluteString
     }
