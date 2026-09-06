@@ -199,6 +199,7 @@ private actor CompositionSpeakingRecorder {
 }
 
 private actor CompositionDatagramDouble: DiscordVoiceMediaDatagramTransport {
+    private var watchdog: Task<Void, Never>?
     private(set) var sentPackets: [[UInt8]] = []
     private let holdSend: Bool
     private var sendStarted = false
@@ -209,6 +210,8 @@ private actor CompositionDatagramDouble: DiscordVoiceMediaDatagramTransport {
     private var releaseWaiter: CheckedContinuation<Void, Never>?
 
     init(holdSend: Bool = false) { self.holdSend = holdSend }
+
+    deinit { watchdog?.cancel() }
 
     func sendProtectedPacket(_ bytes: [UInt8]) async throws {
         if holdSend {
@@ -228,6 +231,12 @@ private actor CompositionDatagramDouble: DiscordVoiceMediaDatagramTransport {
     }
 
     func waitUntilSendStarted() async {
+        if watchdog == nil {
+            watchdog = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                await self?.expire()
+            }
+        }
         if !sendStarted { await withCheckedContinuation { startWaiters.append($0) } }
     }
 
@@ -236,6 +245,7 @@ private actor CompositionDatagramDouble: DiscordVoiceMediaDatagramTransport {
     }
 
     func releaseSend() {
+        watchdog?.cancel()
         released = true
         releaseWaiter?.resume()
         releaseWaiter = nil
@@ -245,6 +255,15 @@ private actor CompositionDatagramDouble: DiscordVoiceMediaDatagramTransport {
         cancelled = true
         for waiter in cancellationWaiters { waiter.resume() }
         cancellationWaiters.removeAll()
+    }
+
+    private func expire() {
+        Issue.record("Timed out waiting for capture transport test gate; releasing all barriers")
+        sendStarted = true
+        for waiter in startWaiters { waiter.resume() }
+        startWaiters.removeAll()
+        recordCancellation()
+        releaseSend()
     }
 
     func receiveProtectedPacket() async throws -> [UInt8] { [] }

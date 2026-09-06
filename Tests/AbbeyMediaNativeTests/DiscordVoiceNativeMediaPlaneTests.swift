@@ -2083,12 +2083,15 @@ private actor SuspendableSpeakingSignal {
 /// A datagram transport whose send suspends until released, honoring task
 /// cancellation, so tests can pin what `reset()` does to an in-flight send.
 private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
+    private var watchdog: Task<Void, Never>?
     private(set) var deliveredPackets: [[UInt8]] = []
     private var released = false
     private var sendStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var sendStarted = false
     private var sendContinuation: CheckedContinuation<Void, any Error>?
     private var cancelled = false
+
+    deinit { watchdog?.cancel() }
 
     func sendProtectedPacket(_ bytes: [UInt8]) async throws {
         sendStarted = true
@@ -2120,20 +2123,36 @@ private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
     func disconnect() async {}
 
     func waitUntilSendStarted() async {
+        if watchdog == nil {
+            watchdog = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                await self?.expire()
+            }
+        }
         guard !sendStarted else { return }
         await withCheckedContinuation { sendStartWaiters.append($0) }
     }
 
     func release() {
+        watchdog?.cancel()
         released = true
         sendContinuation?.resume()
         sendContinuation = nil
     }
 
     private func cancelSend() {
+        watchdog?.cancel()
         cancelled = true
         sendContinuation?.resume(throwing: CancellationError())
         sendContinuation = nil
+    }
+
+    private func expire() {
+        Issue.record("Timed out waiting for native datagram test gate; releasing all barriers")
+        sendStarted = true
+        for waiter in sendStartWaiters { waiter.resume() }
+        sendStartWaiters.removeAll()
+        cancelSend()
     }
 }
 

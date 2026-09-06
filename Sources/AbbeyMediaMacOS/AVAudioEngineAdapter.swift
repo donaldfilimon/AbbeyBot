@@ -170,6 +170,7 @@ public actor AVAudioEngineAdapter {
 
     @discardableResult
     public func startCapture() async throws -> UInt64 {
+        guard playbackTeardownCount == 0 else { throw CancellationError() }
         if state == .capturing { return generation }
         if let operation = captureStartOperation {
             return try await operation.task.value
@@ -237,6 +238,9 @@ public actor AVAudioEngineAdapter {
         pendingStart?.task.cancel()
         generation &+= 1
         assembler.reset()
+        // Remove the microphone tap without waiting for a playback runtime
+        // that may ignore cancellation. The final stop still follows schedules.
+        await runtime.stopCapture()
         for task in pendingPlayback { _ = await task.result }
         await runtime.stopNow()
         if let pendingStart {
@@ -428,6 +432,7 @@ public actor AVAudioEngineAdapter {
         assembler.reset()
         let pendingPlayback = beginPlaybackTeardown()
         defer { playbackTeardownCount -= 1 }
+        await runtime.stopCapture()
         for task in pendingPlayback { _ = await task.result }
         await runtime.stopNow()
     }

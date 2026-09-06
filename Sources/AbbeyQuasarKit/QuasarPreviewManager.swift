@@ -375,6 +375,7 @@ public actor QuasarPreviewManager {
         done
         """
     private var entries: [String: Entry] = [:]
+    private var isShuttingDown = false
     private let readinessAttempts: Int
     private let pollInterval: Duration
     private let command: QuasarPreviewCommand
@@ -450,6 +451,7 @@ public actor QuasarPreviewManager {
     }
 
     public func start(siteID: String, siteRoot: URL, port: Int) async -> PreviewStatus {
+        guard !isShuttingDown else { return .init(state: .stopped) }
         guard await stop(siteID: siteID) else {
             return .init(
                 state: .crashed,
@@ -457,6 +459,9 @@ public actor QuasarPreviewManager {
                 logTail: ["Prior preview process did not stop; replacement was not launched."]
             )
         }
+        // stop() suspends while terminating a prior process. Shutdown may have
+        // closed admission in the meantime, including when no entry existed.
+        guard !isShuttingDown else { return .init(state: .stopped) }
         let commandArguments = command.arguments(port)
         let launchGate = LaunchGate()
         let lifecyclePipe = Pipe()
@@ -542,16 +547,17 @@ public actor QuasarPreviewManager {
         }
         let url = URL(string: "http://127.0.0.1:\(port)/")!
         for _ in 0..<readinessAttempts {
-            guard entries[siteID]?.generationID == generationID else {
+            guard !isShuttingDown, entries[siteID]?.generationID == generationID else {
                 _ = await terminate(processGroup, process: process, launchGate: launchGate)
                 return .init(state: .stopped, logTail: logs.lines())
             }
             if refreshChildLifecycle(siteID: siteID, generationID: generationID) || !process.isRunning { break }
-            if await readinessProbe(url) {
-                guard entries[siteID]?.generationID == generationID else {
-                    _ = await terminate(processGroup, process: process, launchGate: launchGate)
-                    return .init(state: .stopped, logTail: logs.lines())
-                }
+            let ready = await readinessProbe(url)
+            guard !isShuttingDown, entries[siteID]?.generationID == generationID else {
+                _ = await terminate(processGroup, process: process, launchGate: launchGate)
+                return .init(state: .stopped, logTail: logs.lines())
+            }
+            if ready {
                 guard
                     !refreshChildLifecycle(siteID: siteID, generationID: generationID),
                     process.isRunning
@@ -561,6 +567,10 @@ public actor QuasarPreviewManager {
                 return status
             }
             try? await Task.sleep(for: pollInterval)
+        }
+        guard !isShuttingDown, entries[siteID]?.generationID == generationID else {
+            _ = await terminate(processGroup, process: process, launchGate: launchGate)
+            return .init(state: .stopped, logTail: logs.lines())
         }
         if entries[siteID]?.generationID == generationID {
             entries[siteID]?.terminationInProgress = true
@@ -628,6 +638,13 @@ public actor QuasarPreviewManager {
     }
 
     public func stopAll() async { for id in entries.keys { _ = await stop(siteID: id) } }
+
+    /// Permanently close admission before stopping processes. Unlike shutdown,
+    /// stopAll remains reusable by callers that intend to start previews again.
+    public func shutdown() async {
+        isShuttingDown = true
+        await stopAll()
+    }
 
     private func validatedProcessGroup(for process: Process) -> OwnedProcessGroup? {
         let leaderPID = process.processIdentifier

@@ -91,6 +91,124 @@ struct QuasarRecoveryTests {
         #expect(!FileManager.default.fileExists(atPath: base.appendingPathComponent("sites/shutdown/recovery.txt").path))
     }
 
+    @Test func previewAdmissionRemainsClosedAfterServiceAndManagerShutdown() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let launches = RecoveryCounter()
+        let preview = QuasarPreviewManager(command: .init(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: { _ in launches.increment(); return ["30"] }
+        ))
+        let service = try QuasarService(home: base, planner: recoveryPlanner, preview: preview)
+        let site = try await service.registry.reserve(name: "Stopped", prompt: "ready")
+        try await service.registry.finish(id: site.id)
+        await service.shutdown()
+        await #expect(throws: QuasarError.processFailed("Quasar service is shut down")) {
+            _ = try await service.startPreview(id: site.id)
+        }
+        #expect(await preview.start(siteID: site.id, siteRoot: base, port: 4_710).state == .stopped)
+        #expect(launches.value == 0)
+        #expect(try await service.site(id: site.id).previewPort == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func serviceShutdownInvalidatesSuspendedPreviewReadiness(ready: Bool) async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let gate = RecoveryPlannerGate()
+        let preview = QuasarPreviewManager(
+            readinessAttempts: 1,
+            command: .init(executableURL: URL(fileURLWithPath: "/bin/sleep"), arguments: { _ in ["30"] }),
+            readinessProbe: { _ in
+                do { try await gate.suspend(); return ready }
+                catch { return false }
+            }
+        )
+        let service = try QuasarService(home: base, planner: recoveryPlanner, preview: preview)
+        let site = try await service.registry.reserve(name: "Starting", prompt: "ready")
+        try await service.registry.finish(id: site.id)
+        try FileManager.default.createDirectory(
+            at: base.appendingPathComponent("sites/starting"), withIntermediateDirectories: true
+        )
+        let start = Task { try await service.startPreview(id: site.id) }
+        let completion = RecoveryCompletion()
+        Task { _ = await start.result; await completion.finish() }
+        do {
+            try await gate.waitUntilStarted()
+            await service.shutdown()
+            await gate.release()
+            try await recoveryWait { await completion.finished }
+            await #expect(throws: QuasarError.processFailed("Quasar service is shut down")) {
+                _ = try await start.value
+            }
+            #expect(await preview.status(siteID: site.id).state == .stopped)
+            #expect(try await service.site(id: site.id).previewPort == nil)
+        } catch {
+            await gate.release()
+            await service.shutdown()
+            throw error
+        }
+    }
+
+    @Test func managerShutdownPreventsReplacementAfterSuspendedStop() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let launches = RecoveryCounter()
+        let signals = RecoveryCounter()
+        let live = QuasarProcessGroupSystem.live
+        let preview = QuasarPreviewManager(
+            command: .init(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: { _ in launches.increment(); return ["30"] }
+            ),
+            readinessProbe: { _ in true },
+            processGroups: .init(
+                processGroupID: live.processGroupID,
+                currentProcessGroupID: live.currentProcessGroupID,
+                signalGroup: { group, signal in
+                    signals.increment()
+                    return live.signalGroup(group, signal)
+                },
+                liveness: live.liveness
+            )
+        )
+        do {
+            let initial = await preview.start(siteID: "replacement", siteRoot: base, port: 4_710)
+            try #require(initial.state == .running)
+            let replacement = Task { await preview.start(siteID: "replacement", siteRoot: base, port: 4_710) }
+            let completion = RecoveryCompletion()
+            Task { _ = await replacement.value; await completion.finish() }
+            try await recoveryWait { signals.value > 0 }
+            await preview.shutdown()
+            try await recoveryWait { await completion.finished }
+            #expect(await replacement.value.state != .running)
+            #expect(launches.value == 1)
+        } catch {
+            await preview.shutdown()
+            throw error
+        }
+    }
+
+    @Test func stopAllStillAllowsSubsequentPreviewStart() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let launches = RecoveryCounter()
+        let preview = QuasarPreviewManager(
+            command: .init(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: { _ in launches.increment(); return ["30"] }
+            ),
+            readinessProbe: { _ in true }
+        )
+        await preview.stopAll()
+        let started = await preview.start(siteID: "reusable", siteRoot: base, port: 4_710)
+        await preview.shutdown()
+        #expect(started.state == .running)
+        #expect(launches.value == 1)
+    }
+
     @Test(arguments: [false, true])
     func shutdownInvalidatesLatePlannerCompletion(fails: Bool) async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -103,7 +221,7 @@ struct QuasarRecoveryTests {
         let planner = QuasarPlanner(
             readPlan: { _, _ in .init(paths: []) },
             mutationPlan: { _, _ in
-                await gate.suspend()
+                try await gate.suspend()
                 if fails { throw QuasarError.processFailed("late planner failure") }
                 return .init(
                     summary: "late", operations: [.write(path: "late.txt", content: "late")],
@@ -117,8 +235,9 @@ struct QuasarRecoveryTests {
             site: site, prompt: "late", siteRoot: root,
             registry: registry, planner: planner, executor: executor
         )
-        await gate.waitUntilStarted()
+        try await gate.waitUntilStarted()
         let cancelledTasks = await coordinator.shutdown(registry: registry)
+        await gate.release()
         #expect(cancelledTasks.count == 1)
         let interrupted = try #require(await registry.site(id: site.id))
         #expect(interrupted.status == .error)
@@ -126,8 +245,12 @@ struct QuasarRecoveryTests {
 
         // The planner ignores cancellation. Await the entire generation task,
         // not a sleep or just the planner callback, before checking for late writes.
-        await gate.release()
-        for task in cancelledTasks { await task.value }
+        let completion = RecoveryCompletion()
+        Task {
+            for task in cancelledTasks { await task.value }
+            await completion.finish()
+        }
+        try await recoveryWait { await completion.finished }
         #expect(await coordinator.pending(siteID: site.id) == nil)
         #expect(await coordinator.events(siteID: site.id, since: 0).events.isEmpty)
         #expect(await registry.site(id: site.id) == interrupted)
@@ -152,25 +275,65 @@ private let recoveryPlanner = QuasarPlanner(
 )
 
 private actor RecoveryPlannerGate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var started: CheckedContinuation<Void, Never>?
+    private var continuation: CheckedContinuation<Void, any Error>?
+    private var hasStarted = false
+    private var released = false
 
-    func suspend() async {
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            started?.resume()
-            started = nil
+    func suspend() async throws {
+        hasStarted = true
+        guard !released else { return }
+        // Deliberately ignore caller cancellation, but never retain a continuation
+        // forever if startup/assertions fail before the test can release it.
+        let timeout = Task {
+            do { try await Task.sleep(for: .seconds(10)) }
+            catch { return }
+            expire()
         }
+        defer { timeout.cancel() }
+        try await withCheckedThrowingContinuation { continuation = $0 }
     }
 
-    func waitUntilStarted() async {
-        if continuation != nil { return }
-        await withCheckedContinuation { started = $0 }
+    func waitUntilStarted() async throws {
+        try await recoveryWait { await self.hasStarted }
     }
 
     func release() {
+        released = true
         continuation?.resume()
         continuation = nil
+    }
+
+    private func expire() {
+        continuation?.resume(throwing: QuasarError.processFailed("timed out waiting for test gate release"))
+        continuation = nil
+    }
+}
+
+private actor RecoveryCompletion {
+    private(set) var finished = false
+    func finish() { finished = true }
+}
+
+private final class RecoveryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+    func increment() {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+    }
+}
+
+private func recoveryWait(_ condition: @Sendable () async -> Bool) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !(await condition()) {
+        guard ContinuousClock.now < deadline else {
+            throw QuasarError.processFailed("timed out waiting for recovery test progress")
+        }
+        try await Task.sleep(for: .milliseconds(10))
     }
 }
 

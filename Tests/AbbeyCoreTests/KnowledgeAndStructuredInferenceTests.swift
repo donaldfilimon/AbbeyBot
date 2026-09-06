@@ -104,6 +104,15 @@ private actor ControlledStructuredProviderProbe {
             routerOutcome: routerOutcome
         )
     }
+
+    func waitForRouterOutcome() async -> StructuredTimeoutOutcome? {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while routerOutcome == nil, clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return routerOutcome
+    }
 }
 
 @Suite("Signed knowledge and structured inference")
@@ -154,18 +163,28 @@ struct KnowledgeAndStructuredInferenceTests {
 
     @Test func structuredProviderCancellationIsNotRetriedOrReportedAsFailure() async {
         let provider = CancellingStructuredProvider()
+        let probe = ControlledStructuredProviderProbe()
         let metrics = EngineMetrics()
         let router = InferenceRouter(
             eventBus: EventBus(), metrics: metrics, currentMode: { .remoteCompatible },
             remoteEndpoint: { "" }, providerOverrides: [.remoteCompatible: provider]
         )
-        await #expect(throws: CancellationError.self) {
-            _ = try await router.generateStructured(.init(
-                request: .init(systemPrompt: "plan", userText: "request"),
-                jsonSchema: #"{"type":"object"}"#,
-                maximumRetries: 2
-            ))
+        let task = Task {
+            do {
+                _ = try await router.generateStructured(.init(
+                    request: .init(systemPrompt: "plan", userText: "request"),
+                    jsonSchema: #"{"type":"object"}"#,
+                    maximumRetries: 2
+                ))
+                await probe.recordRouterOutcome(.succeeded)
+            } catch is CancellationError {
+                await probe.recordRouterOutcome(.cancelled)
+            } catch {
+                await probe.recordRouterOutcome(.failed(String(describing: error)))
+            }
         }
+        defer { task.cancel() }
+        #expect(await probe.waitForRouterOutcome() == .cancelled)
         #expect(await provider.calls == 1)
         #expect(metrics.totalInferenceCalls == 0)
         #expect(metrics.totalInferenceFailures == 0)
@@ -173,21 +192,28 @@ struct KnowledgeAndStructuredInferenceTests {
 
     @Test func structuredInferenceDoesNotStartProviderWhenAlreadyCancelled() async {
         let provider = CancellingStructuredProvider()
+        let probe = ControlledStructuredProviderProbe()
         let router = InferenceRouter(
             eventBus: EventBus(), metrics: EngineMetrics(), currentMode: { .remoteCompatible },
             remoteEndpoint: { "" }, providerOverrides: [.remoteCompatible: provider]
         )
         let task = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            await #expect(throws: CancellationError.self) {
+            do {
                 _ = try await router.generateStructured(.init(
                     request: .init(systemPrompt: "plan", userText: "request"),
                     jsonSchema: #"{"type":"object"}"#,
                     maximumRetries: 2
                 ))
+                await probe.recordRouterOutcome(.succeeded)
+            } catch is CancellationError {
+                await probe.recordRouterOutcome(.cancelled)
+            } catch {
+                await probe.recordRouterOutcome(.failed(String(describing: error)))
             }
         }
-        await task.value
+        defer { task.cancel() }
+        #expect(await probe.waitForRouterOutcome() == .cancelled)
         #expect(await provider.calls == 0)
     }
 
@@ -235,6 +261,15 @@ struct KnowledgeAndStructuredInferenceTests {
         #expect(metrics.totalInferenceCalls == 0)
         #expect(metrics.totalInferenceFailures == 0)
         await probe.releaseProvider()
+        // Do not join an unbounded task if the router regresses. Still verify
+        // that the test-owned provider continuation was released and completed.
+        let cleanupDeadline = clock.now.advanced(by: .seconds(2))
+        snapshot = await probe.snapshot()
+        while !snapshot.providerCompleted, clock.now < cleanupDeadline {
+            try? await Task.sleep(for: .milliseconds(1))
+            snapshot = await probe.snapshot()
+        }
+        #expect(snapshot.providerCompleted)
     }
 
     @Test func structuredInferenceNeverCredentialSwitchesOrCapabilityDowngrades() async {

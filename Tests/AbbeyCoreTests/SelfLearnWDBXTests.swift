@@ -220,6 +220,52 @@ struct SelfLearnWDBXTests {
         #expect(reopened.manifestSnapshot.segmentCount == 2)
     }
 
+    @Test(arguments: [false, true])
+    func wdbxReopenRepairsInterruptedTailBeforeAppending(withCommittedPrefix: Bool) throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-tail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let segment = dir.appendingPathComponent("segments/seg-0000.jsonl")
+        do {
+            let store = try WDBXStore(root: dir, dimension: 1)
+            if withCommittedPrefix {
+                try store.upsert(WDBXRecord(id: "before", vector: [1], payload: [:]))
+            }
+        }
+        let prefix = try (withCommittedPrefix ? Data(contentsOf: segment) : Data())
+        var interrupted = prefix
+        interrupted.append(contentsOf: #"{"id":"interrupted","payload":{"text":""#.utf8)
+        interrupted.append(0xC3) // Interrupted UTF-8, not just incomplete JSON.
+        try interrupted.write(to: segment)
+
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(try Data(contentsOf: segment) == prefix)
+        #expect(reopened.recordCount == (withCommittedPrefix ? 1 : 0))
+        try reopened.upsert(WDBXRecord(id: "after", vector: [2], payload: [:]))
+        let again = try WDBXStore(root: dir, dimension: 1)
+        #expect(again.recent().map(\.id) == (withCommittedPrefix ? ["after", "before"] : ["after"]))
+        #expect(again.manifestSnapshot.recordCount == (withCommittedPrefix ? 2 : 1))
+    }
+
+    @Test func wdbxReopenPreservesCompleteLegacyTailWithoutNewline() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-legacy-tail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let segment = dir.appendingPathComponent("segments/seg-0000.jsonl")
+        do {
+            let store = try WDBXStore(root: dir, dimension: 1)
+            try store.upsert(WDBXRecord(id: "legacy", vector: [1], payload: [:]))
+        }
+        let terminated = try Data(contentsOf: segment)
+        try Data(terminated.dropLast()).write(to: segment)
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(reopened.recent().map(\.id) == ["legacy"])
+        #expect(try Data(contentsOf: segment) == terminated)
+        try reopened.upsert(WDBXRecord(id: "after", vector: [2], payload: [:]))
+        let again = try WDBXStore(root: dir, dimension: 1)
+        #expect(again.recent().map(\.id) == ["after", "legacy"])
+    }
+
     @Test func wdbxManifestFailureRetainsCommittedLogAndRepairsOnReopen() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("abbey-wdbx-manifest-\(UUID().uuidString)", isDirectory: true)
