@@ -697,7 +697,7 @@ status: done
   feature branch and PR workflow, never by committing or pushing this work directly to `main`.
 
 ## Release container publishes from main
-status: in_progress
+status: done
 
 `Release container images` had never passed on `main`. The workflow arrived with
 `1d499d4` on `cursor/quasar-completion-20260906`, and that branch was still
@@ -748,3 +748,46 @@ and deleted on 2026-09-06, so the job landed unfinished rather than regressed.
   succeeded. Next slice: read the server log the `642f8fd` run now emits and fix
   the site-creation failure. The goal closes when `Release container images`
   completes green on an exact `main` SHA.
+
+### GREEN on `5e2162a` (2026-09-06 23:55 UTC)
+
+`Release container images` passed for the first time. All seven stages ran:
+build, runtime/bundled-resource assertions, server boot on disposable SQLite,
+restart against persisted state, packaged Quasar scaffold prepare/render,
+scaffold restart, and production Caddy routing. `RELEASE CONTAINER GREEN`, with
+`QUASAR_MANAGER_CREATE_GREEN`, `QUASAR_MANAGER_RESTART_GREEN`,
+`CADDY_PROXY_FIXTURE_GREEN` and `RESTORE_CONTAINER_GREEN` (real PostgreSQL,
+three-store rollback, corrupt-dump refusal, encrypted restic retrieval).
+
+Four defects, each hidden by the one before it and each first reachable only
+once the gate cleared the previous:
+
+1. `a027502` -- `QuasarScaffolder` copies the packaged template with
+   `FileManager.copyItem`, which preserves ownership on Linux. As uid 10001
+   against root-owned bundle files that chown is EPERM, so every site creation
+   failed. Darwin does not chown on copy, so it was unreachable locally.
+2. `64fcd1f` -- the packaged `next-site/bun.lock` has been `lockfileVersion: 2`
+   since its first commit while Bun was pinned to 1.3.14, which reads only
+   version 1. The pin moved instead of the lockfile, leaving dependency
+   resolution byte-identical.
+3. `c423426` -- `caddy adapt --validate` provisions the config, so the 29-char
+   placeholder failed caddy-dns/cloudflare's `^[A-Za-z0-9_-]{35,50}$`. Still a
+   fake token; no credential was introduced.
+4. `5e2162a` -- `proxy-check.py` did `import http.client` then `def http(...)`,
+   so the function shadowed the module and stage 7 could never have run.
+
+What made this tractable was `46d1f92`: `mapQuasarError`'s catch-all told
+operators to read logs it never wrote, so the failure was a bare 500 with no
+cause anywhere and each guess cost a full container build. Once it logged, the
+next run named the exact `NSSourceFilePathErrorKey` and the rest was mechanical.
+
+`container-gate` shows `skipped` on main **by design** --
+`if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'` --
+so it is not an outstanding gap. An earlier note here implying otherwise was
+wrong.
+
+Note for future runs: `AbbeyCoreTests` is timing-flaky on the Linux runner.
+`64fcd1f` failed on three structured-inference cancellation tests and passed on
+re-run of identical code; `c423426` failed on a different DAVE-heartbeat test
+with `.conditionTimedOut` and also passed on re-run. A different test each time,
+all timeout-based, unrelated to any change here.
