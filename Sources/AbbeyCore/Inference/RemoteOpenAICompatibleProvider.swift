@@ -122,7 +122,10 @@ public struct RemoteOpenAICompatibleProvider: InferenceProvider {
         let body = ChatCompletionRequest(
             model: configuredModel.isEmpty ? "abbey-remote" : configuredModel,
             messages: messages,
-            temperature: 0.7
+            // GPT-5 reasoning models reject non-default sampling parameters.
+            // Let the provider choose its default while retaining the existing
+            // sampling behavior for local OpenAI-compatible model servers.
+            temperature: configuredModel.lowercased().hasPrefix("gpt-5") ? nil : 0.7
         )
 
         var urlRequest = URLRequest(url: url)
@@ -232,7 +235,7 @@ private struct ChatMessage: Codable {
 private struct ChatCompletionRequest: Codable {
     let model: String
     let messages: [ChatMessage]
-    let temperature: Double
+    let temperature: Double?
 }
 
 private struct ChatCompletionResponse: Codable {

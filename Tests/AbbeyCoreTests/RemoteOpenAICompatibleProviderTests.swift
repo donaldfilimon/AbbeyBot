@@ -7,6 +7,18 @@ import Testing
 
 @Suite("Remote OpenAI-compatible provider")
 struct RemoteOpenAICompatibleProviderTests {
+    @Test func reasoningModelsOmitUnsupportedTemperature() throws {
+        let request = try RemoteOpenAICompatibleProvider.makeURLRequest(
+            endpoint: "https://api.openai.com/v1/chat/completions",
+            model: "gpt-5.4-mini",
+            bearerToken: "",
+            request: .init(systemPrompt: "system", userText: "hello")
+        )
+        let body = try #require(request.httpBody)
+        let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(object["temperature"] == nil)
+    }
+
     @Test func requestUsesConfiguredModelAndBearerWithoutChangingPromptBoundary() throws {
         let request = try RemoteOpenAICompatibleProvider.makeURLRequest(
             endpoint: "https://inference.example/v1/chat/completions",
@@ -43,6 +55,7 @@ struct RemoteOpenAICompatibleProviderTests {
         let body = try #require(request.httpBody)
         let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
         #expect(object["model"] as? String == "abbey-remote")
+        #expect(object["temperature"] as? Double == 0.7)
     }
 
     @Test func redirectsStayOnTheExactOrigin() {
