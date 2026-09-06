@@ -157,21 +157,21 @@ func quasarRoutes(_ app: Application, allowsTokenlessLoopback: Bool) {
             let service = try await req.application.quasarServiceProvider.value()
             let site = try await service.create(name: body.name, prompt: body.prompt)
             return try await site.encodeResponse(status: .accepted, for: req)
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post("restore") { req async throws -> Site in
         let receipt = try req.content.decode(QuasarArchiveReceipt.self)
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.restore(receipt)
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
     sites.get(":id") { req async throws -> Site in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.site(id: try req.parameters.require("id"))
         }
-        catch { throw mapQuasarError(error) }
+        catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post(":id", "edit") { req async throws -> Response in
         let body = try req.content.decode(EditSiteDTO.self)
@@ -179,14 +179,14 @@ func quasarRoutes(_ app: Application, allowsTokenlessLoopback: Bool) {
             let service = try await req.application.quasarServiceProvider.value()
             let site = try await service.edit(id: try req.parameters.require("id"), prompt: body.prompt)
             return try await site.encodeResponse(status: .accepted, for: req)
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
     sites.get(":id", "events") { req async throws -> EventPage in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.events(id: try req.parameters.require("id"), since: max(req.query[Int.self, at: "since"] ?? 0, 0))
         }
-        catch { throw mapQuasarError(error) }
+        catch { throw mapQuasarError(error, req.logger) }
     }
     sites.get(":id", "plan") { req async throws -> QuasarMutationPreview in
         do {
@@ -196,60 +196,68 @@ func quasarRoutes(_ app: Application, allowsTokenlessLoopback: Bool) {
             }
             return plan
         } catch let abort as Abort { throw abort }
-        catch { throw mapQuasarError(error) }
+        catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post(":id", "plan", "approve") { req async throws -> QuasarMutationReceipt in
         let body = try req.content.decode(ApprovePlanDTO.self)
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.approve(id: try req.parameters.require("id"), planDigest: body.planDigest)
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post(":id", "plan", "reject") { req async throws -> HTTPStatus in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             try await service.reject(id: try req.parameters.require("id"))
             return .noContent
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post(":id", "rollback") { req async throws -> QuasarRollbackReceipt in
         let body = try req.content.decode(RollbackPlanDTO.self)
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.rollback(id: try req.parameters.require("id"), planDigest: body.planDigest)
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
     sites.get(":id", "preview") { req async throws -> PreviewStatus in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.previewStatus(id: try req.parameters.require("id"))
         }
-        catch { throw mapQuasarError(error) }
+        catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post(":id", "preview", "start") { req async throws -> PreviewStatus in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.startPreview(id: try req.parameters.require("id"))
         }
-        catch { throw mapQuasarError(error) }
+        catch { throw mapQuasarError(error, req.logger) }
     }
     sites.post(":id", "preview", "stop") { req async throws -> PreviewStatus in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             return try await service.stopPreview(id: try req.parameters.require("id"))
         }
-        catch { throw mapQuasarError(error) }
+        catch { throw mapQuasarError(error, req.logger) }
     }
     sites.delete(":id") { req async throws -> Response in
         do {
             let service = try await req.application.quasarServiceProvider.value()
             let receipt = try await service.archive(id: try req.parameters.require("id"))
             return try await receipt.encodeResponse(status: .ok, for: req)
-        } catch { throw mapQuasarError(error) }
+        } catch { throw mapQuasarError(error, req.logger) }
     }
 }
 
-func mapQuasarError(_ error: Error) -> Abort {
+/// Map a Quasar failure to a client response.
+///
+/// The catch-all deliberately withholds the cause from the client, and its
+/// reason tells the operator to read the logs instead -- but nothing wrote one,
+/// so the cause reached neither the client nor the operator. A release-gate
+/// boot failure surfaced as a bare 500 with no diagnosis anywhere, at a cost of
+/// one full container build per guess. Pass the request logger so the promised
+/// operator record exists; the client response is unchanged.
+func mapQuasarError(_ error: Error, _ logger: Logger? = nil) -> Abort {
     switch error {
     case QuasarError.notFound: return Abort(.notFound)
     case QuasarError.jobRunning, QuasarError.proposalChanged: return Abort(.conflict, reason: error.localizedDescription)
@@ -258,6 +266,13 @@ func mapQuasarError(_ error: Error) -> Abort {
     case QuasarError.invalidInput, QuasarError.pathRejected, QuasarError.fileTooLarge,
          QuasarError.malformedPlan, QuasarError.budgetExceeded: return Abort(.badRequest, reason: error.localizedDescription)
     case QuasarError.providerUnqualified: return Abort(.serviceUnavailable, reason: error.localizedDescription)
-    default: return Abort(.internalServerError, reason: "Quasar operation failed; inspect redacted operator logs")
+    default:
+        // `String(reflecting:)` keeps the case and its associated value, which is
+        // what distinguishes registryLocked from processFailed("...").
+        logger?.error(
+            "Quasar operation failed",
+            metadata: ["quasarError": .string(String(reflecting: error))]
+        )
+        return Abort(.internalServerError, reason: "Quasar operation failed; inspect redacted operator logs")
     }
 }
