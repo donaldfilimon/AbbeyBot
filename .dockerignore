@@ -1,0 +1,15 @@
+.git
+.build
+.swiftpm
+.env
+.env.*
+**/.env
+**/.env.*
+**/node_modules
+**/.next
+**/.DS_Store
+.cursor
+.claude
+.codex
+.remember
+deploy/production/backups

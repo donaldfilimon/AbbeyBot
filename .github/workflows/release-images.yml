@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test deployment recovery control flow
+        run: bash deploy/production/tests/run.sh
+
       - name: Build and test release images
         env:
           ABBEY_RELEASE_IMAGE: abbeybot-release-gate:${{ github.sha }}
@@ -42,6 +45,9 @@ jobs:
       GHCR_CADDY_IMAGE: ghcr.io/donaldfilimon/abbeybot-caddy:sha-${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Test deployment recovery control flow
+        run: bash deploy/production/tests/run.sh
 
       - name: Build and test release images
         env:

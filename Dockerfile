@@ -18,6 +18,7 @@ ENV ABBEY_PACKAGE_ROLE=server
 COPY Package.swift Package.resolved* ./
 COPY Contracts ./Contracts
 COPY Sources ./Sources
+COPY Tests ./Tests
 COPY --from=web-build /Sources/AbbeyServer/Resources/Public ./Sources/AbbeyServer/Resources/Public
 RUN swift package resolve
 RUN swift build -c release --product AbbeyBot
@@ -56,7 +57,7 @@ COPY --from=build /build/.build/release/AbbeyBot_AbbeyServer.resources /app/Abbe
 
 RUN groupadd --system --gid 10001 abbey \
     && useradd --system --uid 10001 --gid abbey --home-dir /var/lib/abbey --create-home abbey \
-    && install -d -o abbey -g abbey /var/lib/abbey/quasar /var/cache/abbey/bun
+    && install -d -o abbey -g abbey /var/lib/abbey/quasar /var/lib/abbey/.abbey /var/cache/abbey/bun
 
 ENV ABBEY_PACKAGE_ROLE=server \
     BUN_INSTALL_BIN=/var/lib/abbey/.bun/bin \

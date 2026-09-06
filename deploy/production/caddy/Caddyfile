@@ -1,0 +1,78 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+}
+
+{$ABBEY_API_DOMAIN} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	@internal path /internal/*
+	respond @internal 404
+
+	reverse_proxy abbey:8080 {
+		header_up -X-Abbey-Preview-Service-Token
+		header_up -X-Abbey-Preview-Host
+		header_up -X-Abbey-Preview-URI
+		header_up -X-Quasar-Upstream
+		header_up X-Forwarded-Host {http.request.host}
+	}
+}
+
+*.{$ABBEY_QUASAR_PREVIEW_DOMAIN} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	@redeem path /_quasar/preview-session
+	handle @redeem {
+		# Keep the single-use ticket query while replacing only the public path.
+		rewrite * /internal/quasar/preview/redeem?{http.request.uri.query}
+		reverse_proxy abbey:8080 {
+			header_up -Authorization
+			header_up -Cookie
+			header_up -X-Abbey-Token
+			header_up -X-Abbey-Quasar-Token
+			header_up X-Abbey-Preview-Service-Token {$ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN}
+			header_up X-Abbey-Preview-Host {http.request.host}
+			header_up X-Abbey-Preview-URI {http.request.uri}
+			header_up X-Forwarded-Host {http.request.host}
+		}
+	}
+
+	handle {
+		# route preserves this security-sensitive order: authorize with the
+		# session cookie, freeze the server-selected upstream, then remove every
+		# credential before generated code receives the request.
+		route {
+			forward_auth abbey:8080 {
+				uri /internal/quasar/preview/authorize
+				header_up -Authorization
+				header_up -X-Abbey-Token
+				header_up -X-Abbey-Quasar-Token
+				header_up X-Abbey-Preview-Service-Token {$ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN}
+				header_up X-Abbey-Preview-Host {http.request.host}
+				header_up X-Abbey-Preview-URI {http.request.uri}
+				header_up X-Forwarded-Host {http.request.host}
+				copy_headers X-Quasar-Upstream
+			}
+
+			vars preview_upstream {http.request.header.X-Quasar-Upstream}
+			request_header -Authorization
+			request_header -Cookie
+			request_header -X-Abbey-Token
+			request_header -X-Abbey-Quasar-Token
+			request_header -X-Abbey-Preview-Service-Token
+			request_header -X-Abbey-Preview-Host
+			request_header -X-Abbey-Preview-URI
+			request_header -X-Quasar-Upstream
+
+			reverse_proxy {http.vars.preview_upstream} {
+				header_up Host {http.request.host}
+				header_up X-Forwarded-Host {http.request.host}
+				header_down -Set-Cookie
+			}
+		}
+	}
+}

@@ -17,9 +17,12 @@ GATE_ID="release-gate-$$"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-release-container.XXXXXX")"
 SERVER_CONTAINER="${GATE_ID}-server"
 PREVIEW_CONTAINER="${GATE_ID}-preview"
+PROVIDER_CONTAINER="${GATE_ID}-provider"
+GATE_NETWORK="${GATE_ID}-network"
 
 cleanup() {
-    docker rm -f "$SERVER_CONTAINER" "$PREVIEW_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$SERVER_CONTAINER" "$PREVIEW_CONTAINER" "$PROVIDER_CONTAINER" >/dev/null 2>&1 || true
+    docker network rm "$GATE_NETWORK" >/dev/null 2>&1 || true
     rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -86,30 +89,52 @@ docker run --rm --entrypoint /bin/sh "$ABBEY_RELEASE_IMAGE" -c '
     set -eu
     test "$(id -u)" = 10001
     test "$(bun --version)" = 1.3.14
-    test "$(node --version)" = "$(bun --version)"
+    test "$(node -p process.versions.bun)" = "$(bun --version)"
     test -x /app/AbbeyBot
     test -d /app/AbbeyBot_AbbeyCore.resources
     test -d /app/AbbeyBot_AbbeyQuasarKit.resources/next-site
     test -f /app/AbbeyBot_AbbeyQuasarKit.resources/next-site.manifest.json
-    test -f /app/AbbeyBot_AbbeyServer.resources/Views/status.leaf
-    test -f /app/AbbeyBot_AbbeyServer.resources/Public/index.html
+    test -f /app/AbbeyBot_AbbeyServer.resources/Resources/Views/status.leaf
+    test -f /app/AbbeyBot_AbbeyServer.resources/Resources/Public/index.html
 '
+docker run --rm --read-only --network none \
+    --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
+    --entrypoint bun "$ABBEY_RELEASE_IMAGE" /release-fixtures/test-fixtures.mjs
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Scripts/release-container -p 'test_*.py'
 
 mkdir -p "$WORK_DIR/server/home" "$WORK_DIR/server/quasar" "$WORK_DIR/server/bun-cache" "$WORK_DIR/preview"
 chmod -R 0777 "$WORK_DIR/server" "$WORK_DIR/preview"
 
+# Fixture traffic stays on this Docker network. No hosted inference credentials
+# enter the gate; the normal provider/router and authenticated API still execute.
+docker network create "$GATE_NETWORK" >/dev/null
+docker run --detach --init --read-only \
+    --name "$PROVIDER_CONTAINER" --network "$GATE_NETWORK" --network-alias release-provider \
+    --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
+    --entrypoint bun "$ABBEY_RELEASE_IMAGE" /release-fixtures/provider.mjs >/dev/null
+for _ in $(seq 1 30); do
+    if docker exec "$PROVIDER_CONTAINER" curl --fail --silent http://127.0.0.1:8089/health >/dev/null; then break; fi
+    sleep 1
+done
+docker exec "$PROVIDER_CONTAINER" curl --fail --silent http://127.0.0.1:8089/health >/dev/null
+
 run_server() {
     docker rm -f "$SERVER_CONTAINER" >/dev/null 2>&1 || true
-    docker run --detach \
+    docker run --detach --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=1g \
         --name "$SERVER_CONTAINER" \
+        --network "$GATE_NETWORK" \
         --publish 127.0.0.1::8080 \
+        --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
         --volume "$WORK_DIR/server:/data" \
+        --volume "$WORK_DIR/server/home:/var/lib/abbey/.abbey" \
         --env DATABASE_URL=sqlite:///data/abbey.sqlite \
-        --env HOME=/data/home \
         --env ABBEY_QUASAR_HOME=/data/quasar \
         --env BUN_INSTALL_CACHE_DIR=/data/bun-cache \
         --env ABBEY_DRY_RUN=1 \
-        --env ABBEY_INFERENCE_MODE=deterministicFloor \
+        --env ABBEY_INFERENCE_MODE=remoteCompatible \
+        --env ABBEY_REMOTE_ENDPOINT=http://release-provider:8089/v1/chat/completions \
+        --env ABBEY_REMOTE_MODEL=abbey-release-fixture \
+        --env ABBEY_REMOTE_API_TOKEN=abbey-release-fixture-token \
         --env ABBEY_API_TOKEN=abbey-release-gate-operator-token \
         --env ABBEY_QUASAR_API_TOKEN=abbey-release-gate-quasar-token \
         --env ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN=abbey-release-gate-internal-token \
@@ -141,17 +166,23 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     payload = json.load(handle)
 assert payload.get("databaseDialect") == "sqlite-file", payload
 PY
+python3 Scripts/release-container/lifecycle.py create \
+    "http://127.0.0.1:${SERVER_PORT}" "$SERVER_CONTAINER" "$WORK_DIR/manager-lifecycle.json"
 
 echo "======== 4/7 restart full server against the same state ========"
+docker exec "$SERVER_CONTAINER" /bin/sh -c 'test -w "$HOME/.abbey" && printf persisted > "$HOME/.abbey/release-state-probe"'
 docker rm -f "$SERVER_CONTAINER" >/dev/null
 run_server
 SERVER_PORT="$(published_port "$SERVER_CONTAINER" 8080)"
 wait_for_http "$SERVER_CONTAINER" "http://127.0.0.1:${SERVER_PORT}/health" "$WORK_DIR/health-restart.json" "restarted Abbey server"
 test -s "$WORK_DIR/server/abbey.sqlite"
+docker exec "$SERVER_CONTAINER" /bin/sh -c 'test "$(cat "$HOME/.abbey/release-state-probe")" = persisted'
+python3 Scripts/release-container/lifecycle.py restart \
+    "http://127.0.0.1:${SERVER_PORT}" "$SERVER_CONTAINER" "$WORK_DIR/manager-lifecycle.json"
 docker rm -f "$SERVER_CONTAINER" >/dev/null
 
 echo "======== 5/7 prepare and render packaged Quasar scaffold ========"
-docker run --detach \
+docker run --detach --init \
     --name "$PREVIEW_CONTAINER" \
     --publish 127.0.0.1::3100 \
     --volume "$WORK_DIR/preview:/workspace" \
@@ -162,7 +193,7 @@ docker run --detach \
         cd /workspace
         bun install --frozen-lockfile --ignore-scripts
         test -x node_modules/.bin/next
-        exec bun x next dev --hostname 0.0.0.0 --port 3100
+        exec bun ./node_modules/next/dist/bin/next dev --hostname 0.0.0.0 --port 3100
     ' >/dev/null
 PREVIEW_PORT="$(published_port "$PREVIEW_CONTAINER" 3100)"
 wait_for_http "$PREVIEW_CONTAINER" "http://127.0.0.1:${PREVIEW_PORT}/" "$WORK_DIR/preview-first.html" "Quasar preview"
@@ -170,7 +201,7 @@ grep -Fq "generated yet" "$WORK_DIR/preview-first.html"
 docker rm -f "$PREVIEW_CONTAINER" >/dev/null
 
 echo "======== 6/7 restart the prepared Quasar scaffold ========"
-docker run --detach \
+docker run --detach --init \
     --name "$PREVIEW_CONTAINER" \
     --publish 127.0.0.1::3100 \
     --volume "$WORK_DIR/preview:/workspace" \
@@ -180,7 +211,7 @@ docker run --detach \
         cd /workspace
         test -f package.json
         test -x node_modules/.bin/next
-        exec bun x next dev --hostname 0.0.0.0 --port 3100
+        exec bun ./node_modules/next/dist/bin/next dev --hostname 0.0.0.0 --port 3100
     ' >/dev/null
 PREVIEW_PORT="$(published_port "$PREVIEW_CONTAINER" 3100)"
 wait_for_http "$PREVIEW_CONTAINER" "http://127.0.0.1:${PREVIEW_PORT}/" "$WORK_DIR/preview-restart.html" "restarted Quasar preview"
