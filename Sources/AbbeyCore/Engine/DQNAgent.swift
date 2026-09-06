@@ -123,7 +123,7 @@ public actor DQNAgent {
     public func loadExperienceJournalIfPresent(limit: Int = 10_000) throws {
         guard let experiencePersistence else { return }
         let experiences = try experiencePersistence.loadRecent(limit: limit)
-        for experience in experiences {
+        for experience in experiences where isValid(experience) {
             buffer.add(experience)
         }
     }
@@ -212,7 +212,9 @@ public actor DQNAgent {
     /// ε-greedy action selection over raw Q-values.
     public func selectAction(state: [Float]) -> Int {
         guard let actionCount = online.topology.last, actionCount > 0 else { return 0 }
+        guard state.count == online.topology.first, state.allSatisfy(\.isFinite) else { return 0 }
         let qValues = online.forwardLogits(state)
+        guard qValues.allSatisfy(\.isFinite) else { return 0 }
         lastQValues = qValues
         let action: Int
         if Float.random(in: 0...1, using: &rng) < epsilon {
@@ -227,6 +229,7 @@ public actor DQNAgent {
     }
 
     public func remember(_ experience: Experience) {
+        guard isValid(experience) else { return }
         buffer.add(experience)
         if let experiencePersistence {
             try? experiencePersistence.append(experience)
@@ -236,18 +239,18 @@ public actor DQNAgent {
     /// One learning step over a random minibatch. No-op until the buffer has at least
     /// `batchSize` experiences, matching the reference draft's guard.
     public func learn(batchSize: Int = 64) {
-        guard buffer.count >= batchSize else { return }
+        guard batchSize > 0, buffer.count >= batchSize, gamma.isFinite else { return }
         let batch = buffer.sample(size: batchSize, using: &rng)
 
         for experience in batch {
             let nextQValues = target.forwardLogits(experience.nextState)
+            guard nextQValues.allSatisfy(\.isFinite) else { continue }
             let bestNextQ = nextQValues.max() ?? 0
             let bootstrapped = experience.done ? experience.reward : experience.reward + gamma * bestNextQ
 
             var targetVector = online.forwardLogits(experience.state)
-            if experience.action < targetVector.count {
-                targetVector[experience.action] = bootstrapped
-            }
+            guard bootstrapped.isFinite, targetVector.allSatisfy(\.isFinite) else { continue }
+            targetVector[experience.action] = bootstrapped
             online.train(input: experience.state, target: targetVector)
         }
 
@@ -262,6 +265,20 @@ public actor DQNAgent {
     }
 
     public func bufferCount() -> Int { buffer.count }
+
+    /// Live and replayed rows use the same topology/scalar boundary. Invalid
+    /// experiences are ignored without rewriting the append-only journal.
+    private func isValid(_ experience: Experience) -> Bool {
+        guard let inputCount = online.topology.first,
+              let actionCount = online.topology.last,
+              experience.state.count == inputCount,
+              experience.nextState.count == inputCount,
+              experience.action >= 0, experience.action < actionCount,
+              experience.reward.isFinite
+        else { return false }
+        return experience.state.allSatisfy(\.isFinite)
+            && experience.nextState.allSatisfy(\.isFinite)
+    }
 
     public func accelerationInfo() -> String {
         NeuralMath.accelerationBackend

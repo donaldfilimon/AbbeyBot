@@ -201,6 +201,7 @@ public actor InferenceRouter {
 
 
     public func generateStructured(_ structured: StructuredInferenceRequest) async throws -> StructuredInferenceResponse {
+        try Task.checkCancellation()
         let mode = currentMode()
         let provider: any InferenceProvider = providerOverrides[mode] ?? {
             switch mode {
@@ -234,9 +235,11 @@ public actor InferenceRouter {
         var lastError: Error = InferenceError.structuredOutputInvalid("provider returned no output")
         for retry in 0...structured.maximumRetries {
             do {
+                try Task.checkCancellation()
                 let remaining = clock.now.duration(to: deadline)
                 guard remaining > .zero else { throw InferenceError.timeBudgetExceeded }
                 let result = try await Self.generate(provider: provider, request: request, timeout: remaining)
+                try Task.checkCancellation()
                 let normalized = Self.extractJSONObject(from: result.text)
                 let data = Data(normalized.utf8)
                 let tokenByteLimit = structured.maximumOutputTokens * 6
@@ -268,7 +271,10 @@ public actor InferenceRouter {
                     ),
                     retryInfo: .init(attempts: retry + 1, retries: retry)
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 lastError = error
                 if retry < structured.maximumRetries {
                     request.systemPrompt += "\nThe prior response was rejected. Return one complete JSON value only."

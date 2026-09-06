@@ -48,6 +48,7 @@ public actor QuasarService {
     private let archiveRoot: URL
     private var proposalOperations: [UUID: DiscordQuasarRequest] = [:]
     private var consumedGuildBudget: [String: Int] = [:]
+    private var isShuttingDown = false
 
     public init(
         home: URL = QuasarRegistry.defaultHome(),
@@ -75,6 +76,7 @@ public actor QuasarService {
 
     @discardableResult
     public func create(name: String, prompt: String, installDependencies: Bool = false) async throws -> Site {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await registry.reserve(name: name, prompt: prompt)
         let root = siteRoot(site)
         do {
@@ -90,8 +92,14 @@ public actor QuasarService {
 
     @discardableResult
     public func edit(id: String, prompt: String) async throws -> Site {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await registry.beginEdit(id: id, prompt: prompt)
-        try await coordinator.start(site: site, prompt: prompt, siteRoot: siteRoot(site), registry: registry, planner: planner, executor: executor)
+        do {
+            try await coordinator.start(site: site, prompt: prompt, siteRoot: siteRoot(site), registry: registry, planner: planner, executor: executor)
+        } catch {
+            try? await registry.finish(id: id, error: error.localizedDescription)
+            throw error
+        }
         return site
     }
 
@@ -369,7 +377,11 @@ public actor QuasarService {
         }
     }
 
-    public func shutdown() async { await preview.stopAll() }
+    public func shutdown() async {
+        isShuttingDown = true
+        await coordinator.shutdown(registry: registry)
+        await preview.stopAll()
+    }
 
     private func siteRoot(_ site: Site) -> URL { sitesRoot.appendingPathComponent(site.slug, isDirectory: true) }
 

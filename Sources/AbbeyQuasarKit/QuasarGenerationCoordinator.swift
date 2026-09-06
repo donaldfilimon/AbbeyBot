@@ -50,6 +50,7 @@ public actor QuasarGenerationCoordinator {
         var applying: Bool
     }
     private var jobs: [String: Job] = [:]
+    private var isShuttingDown = false
     private let maximumEvents: Int
 
     public init(maximumEvents: Int = 512) { self.maximumEvents = min(max(maximumEvents, 8), 2_048) }
@@ -62,6 +63,7 @@ public actor QuasarGenerationCoordinator {
         planner: QuasarPlanner,
         executor: QuasarMutationExecutor
     ) throws {
+        guard !isShuttingDown else { throw QuasarError.processFailed("generation coordinator is shut down") }
         if let current = jobs[site.id], current.task != nil || current.prepared != nil || current.applying {
             throw QuasarError.jobRunning
         }
@@ -183,6 +185,25 @@ public actor QuasarGenerationCoordinator {
     }
 
     public func cancel(siteID: String) { jobs[siteID]?.task?.cancel() }
+
+    /// Invalidate before suspending. Planners may ignore cancellation, so shutdown
+    /// must not wait for them or let their eventual completion publish a plan.
+    /// Already-approved applications retain their existing completion contract.
+    @discardableResult
+    func shutdown(registry: QuasarRegistry) async -> [Task<Void, Never>] {
+        isShuttingDown = true
+        let interrupted = jobs
+        jobs.removeAll()
+        let tasks = interrupted.values.compactMap(\.task)
+        for task in tasks { task.cancel() }
+        for (siteID, job) in interrupted where !job.applying && (job.task != nil || job.prepared != nil) {
+            try? await registry.finish(
+                id: siteID,
+                error: "generation interrupted by shutdown; prepare and approve a new plan"
+            )
+        }
+        return tasks
+    }
 
     /// Cancels and removes all in-memory state for a site that is leaving the
     /// active registry. This prevents archived sites from retaining mutation

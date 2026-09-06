@@ -201,6 +201,80 @@ struct AVAudioEngineAdapterTests {
         #expect(await runtime.startCount() == 0)
     }
 
+    @Test("event installation cannot admit playback across a stop or deafen", arguments: [0, 1, 2])
+    func playbackAdmissionInvalidatedDuringEventInstall(stopKind: Int) async throws {
+        let fixture = try AudioFixture()
+        let gate = PlaybackTestGate()
+        await fixture.runtime.holdEventInstallation(gate)
+        let frame = try AudioPCMFrame(
+            float32: Array(repeating: 0, count: AudioPCMFrame.interleavedSampleCount)
+        )
+        let play = Task { try await fixture.adapter.play(frame) }
+        await gate.waitUntilEntered()
+        switch stopKind {
+        case 0: await fixture.adapter.stopPlayback()
+        case 1: await fixture.adapter.stopNow()
+        default:
+            await fixture.adapter.setDeafened(true)
+            await fixture.adapter.setDeafened(false)
+        }
+        await gate.release()
+        #expect(try await play.value == false)
+        #expect(await fixture.runtime.playCount() == 0)
+        #expect(await fixture.adapter.playbackQueueDepth() == 0)
+        #expect(await fixture.adapter.currentState() == .stopped)
+        #expect(try await fixture.adapter.play(frame))
+    }
+
+    @Test("event installation revalidates capacity after another caller fills the queue")
+    func playbackAdmissionRechecksCapacity() async throws {
+        let fixture = try AudioFixture(maximumPendingPlaybackFrames: 1)
+        let gate = PlaybackTestGate()
+        await fixture.runtime.holdEventInstallation(gate)
+        let frame = try AudioPCMFrame(
+            float32: Array(repeating: 0, count: AudioPCMFrame.interleavedSampleCount)
+        )
+        let first = Task { try await fixture.adapter.play(frame) }
+        await gate.waitUntilEntered()
+        #expect(try await fixture.adapter.play(frame))
+        await gate.release()
+        #expect(try await first.value == false)
+        #expect(await fixture.adapter.playbackQueueDepth() == 1)
+        #expect(await fixture.adapter.droppedPlaybackFrameCount() == 1)
+        #expect(await fixture.runtime.playCount() == 1)
+    }
+
+    @Test("stop drains a cancellation-ignoring schedule before stopping runtime", arguments: [0, 1, 2, 3])
+    func stopDuringPlaybackSchedule(stopKind: Int) async throws {
+        let fixture = try AudioFixture()
+        let gate = PlaybackTestGate()
+        await fixture.runtime.holdPlaybackSchedule(gate)
+        let frame = try AudioPCMFrame(
+            float32: Array(repeating: 0, count: AudioPCMFrame.interleavedSampleCount)
+        )
+        let play = Task { try await fixture.adapter.play(frame) }
+        await gate.waitUntilEntered()
+        let stop = Task {
+            switch stopKind {
+            case 0: await fixture.adapter.stopPlayback()
+            case 1: await fixture.adapter.stopNow()
+            case 2: await fixture.adapter.setDeafened(true)
+            default: await fixture.runtime.emit(event: .configurationChanged)
+            }
+        }
+        await gate.waitUntilCancelled()
+        #expect(try await fixture.adapter.play(frame) == false)
+        #expect(await fixture.runtime.playbackStopCount() == 0)
+        #expect(await fixture.runtime.stopNowCount() == 0)
+        await gate.release()
+        await stop.value
+        #expect(try await play.value == false)
+        #expect(await fixture.runtime.activePlaybackCount() == 0)
+        #expect(await fixture.adapter.playbackQueueDepth() == 0)
+        let expectedState: AudioEngineState = stopKind == 3 ? .configurationChanged : .stopped
+        #expect(await fixture.adapter.currentState() == expectedState)
+    }
+
     @Test("playback queue rejects overflow instead of growing unbounded")
     func playbackBackpressure() async throws {
         let fixture = try AudioFixture(maximumPendingPlaybackFrames: 2)
@@ -243,6 +317,10 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
     private var captureStops = 0
     private var fullStops = 0
     private var plays = 0
+    private var playbackStops = 0
+    private var activePlayback = 0
+    private var eventInstallGate: PlaybackTestGate?
+    private var scheduleGate: PlaybackTestGate?
     private var holdStart = false
     private var failStart = false
     private var heldStartContinuation: CheckedContinuation<Void, Never>?
@@ -250,8 +328,9 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
 
     func installEventHandler(
         _ handler: @escaping @Sendable (AudioRuntimeEvent) async -> Void
-    ) {
+    ) async {
         eventHandler = handler
+        if let eventInstallGate { await eventInstallGate.enter() }
     }
 
     func startCapture(
@@ -279,13 +358,32 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
         selection: AudioDeviceSelection,
         token: UInt64,
         completion: @escaping @Sendable (UInt64) async -> Void
-    ) {
+    ) async {
+        if let scheduleGate {
+            await withTaskCancellationHandler {
+                await scheduleGate.enter()
+            } onCancel: {
+                Task { await scheduleGate.cancelled() }
+            }
+        }
         plays += 1
+        activePlayback += 1
     }
 
     func stopCapture() { captureStops += 1 }
-    func stopPlayback() {}
-    func stopNow() { fullStops += 1 }
+    func stopPlayback() {
+        playbackStops += 1
+        activePlayback = 0
+    }
+    func stopNow() {
+        fullStops += 1
+        activePlayback = 0
+    }
+
+    func holdEventInstallation(_ gate: PlaybackTestGate) { eventInstallGate = gate }
+    func holdPlaybackSchedule(_ gate: PlaybackTestGate) { scheduleGate = gate }
+    func playbackStopCount() -> Int { playbackStops }
+    func activePlaybackCount() -> Int { activePlayback }
 
     func emit(_ samples: [Float], generation: UInt64) async {
         await deliver?(generation, .samples(samples))
@@ -339,6 +437,45 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
 
 private enum AudioRuntimeSpyError: Error {
     case startFailed
+}
+
+/// Explicit entry, cancellation and release barriers, with no sleeps or yield races.
+private actor PlaybackTestGate {
+    private var entered = false
+    private var isCancelled = false
+    private var released = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func enter() async {
+        entered = true
+        for waiter in entryWaiters { waiter.resume() }
+        entryWaiters.removeAll()
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+    }
+
+    func waitUntilEntered() async {
+        if !entered { await withCheckedContinuation { entryWaiters.append($0) } }
+    }
+
+    func cancelled() {
+        isCancelled = true
+        for waiter in cancellationWaiters { waiter.resume() }
+        cancellationWaiters.removeAll()
+    }
+
+    func waitUntilCancelled() async {
+        if !isCancelled { await withCheckedContinuation { cancellationWaiters.append($0) } }
+    }
+
+    func release() {
+        released = true
+        for waiter in releaseWaiters { waiter.resume() }
+        releaseWaiters.removeAll()
+    }
 }
 
 private actor PermissionProviderSpy: MediaPermissionProviding {

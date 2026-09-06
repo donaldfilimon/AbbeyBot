@@ -1046,11 +1046,22 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
     ) async throws {
         let sendID = nextSendID
         nextSendID &+= 1
-        let sendTask = Task { try await transport.sendProtectedPacket(wirePacket) }
+        let sendTask = Task {
+            try Task.checkCancellation()
+            try await transport.sendProtectedPacket(wirePacket)
+        }
         inFlightSends[sendID] = sendTask
         defer { inFlightSends[sendID] = nil }
         do {
-            try await sendTask.value
+            // This task belongs only to this send, unlike the shared Speaking
+            // obligation. Forward pump cancellation, but still drain the task
+            // before removing it from reset's registry or returning to stop().
+            try await withTaskCancellationHandler {
+                try await sendTask.value
+                try Task.checkCancellation()
+            } onCancel: {
+                sendTask.cancel()
+            }
         } catch is CancellationError {
             throw DiscordVoiceNativeMediaPlaneError.sendInterrupted
         }

@@ -88,6 +88,9 @@ public actor AVAudioEngineAdapter {
     private var generation: UInt64 = 0
     private var playbackToken: UInt64 = 0
     private var playbackQueue: [PendingPlayback] = []
+    private var playbackGeneration: UInt64 = 0
+    private var playbackSchedules: [UInt64: Task<Void, any Error>] = [:]
+    private var playbackTeardownCount = 0
     private var assembler = DiscordAudioFrameAssembler()
     private var captureStartOperation: CaptureStartOperation?
     private var captureTeardownInProgress = false
@@ -227,12 +230,14 @@ public actor AVAudioEngineAdapter {
     /// Stops capture and playback synchronously from the actor's perspective. It never schedules a
     /// restart; a later capture requires another explicit `startCapture()` call.
     public func stopNow() async {
+        let pendingPlayback = beginPlaybackTeardown()
+        defer { playbackTeardownCount -= 1 }
         captureTeardownInProgress = true
         let pendingStart = captureStartOperation
         pendingStart?.task.cancel()
         generation &+= 1
         assembler.reset()
-        playbackQueue.removeAll(keepingCapacity: true)
+        for task in pendingPlayback { _ = await task.result }
         await runtime.stopNow()
         if let pendingStart {
             _ = try? await pendingStart.task.value
@@ -247,17 +252,22 @@ public actor AVAudioEngineAdapter {
         guard !policy.mediaDisabled() else {
             throw MediaRuntimeError.disabledByEnvironment
         }
-        guard !deafened else { return false }
+        guard !deafened, playbackTeardownCount == 0 else { return false }
+        let admittedGeneration = playbackGeneration
+        await installEventsIfNeeded()
+        guard admittedGeneration == playbackGeneration,
+              !deafened, playbackTeardownCount == 0
+        else { return false }
         guard playbackQueue.count < configuration.maximumPendingPlaybackFrames else {
             playbackDropCount += 1
             return false
         }
-        await installEventsIfNeeded()
-
         playbackToken &+= 1
         let token = playbackToken
         playbackQueue.append(PendingPlayback(token: token))
-        do {
+        let selection = selection
+        let task = Task { [runtime, weak self] in
+            try Task.checkCancellation()
             try await runtime.schedulePlayback(
                 frame,
                 selection: selection,
@@ -265,19 +275,28 @@ public actor AVAudioEngineAdapter {
             ) { [weak self] completedToken in
                 await self?.completePlayback(token: completedToken)
             }
-            if state == .stopped {
+        }
+        playbackSchedules[token] = task
+        defer { playbackSchedules[token] = nil }
+        do {
+            try await task.value
+            guard admittedGeneration == playbackGeneration else { return false }
+            if state == .stopped, !playbackQueue.isEmpty {
                 state = .playbackOnly
             }
             return true
         } catch {
             playbackQueue.removeAll { $0.token == token }
+            guard admittedGeneration == playbackGeneration else { return false }
             state = .failed(Self.describe(error))
             throw error
         }
     }
 
     public func stopPlayback() async {
-        playbackQueue.removeAll(keepingCapacity: true)
+        let pendingPlayback = beginPlaybackTeardown()
+        defer { playbackTeardownCount -= 1 }
+        for task in pendingPlayback { _ = await task.result }
         await runtime.stopPlayback()
         state = state == .capturing ? .capturing : .stopped
     }
@@ -403,8 +422,21 @@ public actor AVAudioEngineAdapter {
         }
         generation &+= 1
         assembler.reset()
-        playbackQueue.removeAll(keepingCapacity: true)
+        let pendingPlayback = beginPlaybackTeardown()
+        defer { playbackTeardownCount -= 1 }
+        for task in pendingPlayback { _ = await task.result }
         await runtime.stopNow()
+    }
+
+    private func beginPlaybackTeardown() -> [Task<Void, any Error>] {
+        playbackGeneration &+= 1
+        playbackTeardownCount += 1
+        playbackQueue.removeAll(keepingCapacity: true)
+        let pending = Array(playbackSchedules.values)
+        for task in pending { task.cancel() }
+        // Keep admission closed until all schedules drain and the runtime is
+        // stopped. A cancellation-ignoring runtime must not schedule after stop.
+        return pending
     }
 
     private func completePlayback(token: UInt64) {

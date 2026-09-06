@@ -168,17 +168,7 @@ public final class WDBXStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        if let idx = cache.firstIndex(where: { $0.id == record.id }) {
-            cache.remove(at: idx)
-        }
-        cache.append(record)
-        manifest.recordCount = cache.count
-
         let segmentIndex = appendedRecordCount / maxRecordsPerSegment
-        appendedRecordCount += 1
-        manifest.segmentCount = max(manifest.segmentCount, segmentIndex + 1)
-        manifest.updatedAt = .now
-
         let segURL = segmentURL(index: segmentIndex)
         var line = try encoder.encode(record)
         line.append(0x0A)
@@ -190,6 +180,17 @@ public final class WDBXStore: @unchecked Sendable {
         } else {
             try line.write(to: segURL, options: .atomic)
         }
+        // The segment log is authoritative. Do not publish a row or consume a
+        // segment slot until encoding and the append succeed. A later manifest
+        // failure leaves this committed row visible; reopening repairs metadata.
+        if let idx = cache.firstIndex(where: { $0.id == record.id }) {
+            cache.remove(at: idx)
+        }
+        cache.append(record)
+        appendedRecordCount += 1
+        manifest.recordCount = cache.count
+        manifest.segmentCount = max(manifest.segmentCount, segmentIndex + 1)
+        manifest.updatedAt = .now
         try Self.writeManifest(manifest, to: root.appendingPathComponent("manifest.json"), encoder: encoder)
     }
 
