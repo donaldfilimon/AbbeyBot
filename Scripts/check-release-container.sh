@@ -88,17 +88,18 @@ case "$IMAGE_PLATFORM_USER" in
         exit 1
         ;;
 esac
-docker run --rm --entrypoint /bin/sh "$ABBEY_RELEASE_IMAGE" -c '
+docker run --rm --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
+    --entrypoint /bin/sh "$ABBEY_RELEASE_IMAGE" -c '
     set -eu
     test "$(id -u)" = 10001
     test "$(bun --version)" = 1.3.14
     test "$(node -p process.versions.bun)" = "$(bun --version)"
     test -x /app/AbbeyBot
-    test -d /app/AbbeyBot_AbbeyCore.resources
-    test -d /app/AbbeyBot_AbbeyQuasarKit.resources/next-site
-    test -f /app/AbbeyBot_AbbeyQuasarKit.resources/next-site.manifest.json
-    test -f /app/AbbeyBot_AbbeyServer.resources/Resources/Views/status.leaf
-    test -f /app/AbbeyBot_AbbeyServer.resources/Resources/Public/index.html
+    sh /release-fixtures/bundle-root.sh AbbeyCore >/dev/null
+    quasar=$(sh /release-fixtures/bundle-root.sh AbbeyQuasarKit)
+    server=$(sh /release-fixtures/bundle-root.sh AbbeyServer)
+    test -d "$quasar/next-site"
+    test -f "$server/Resources/Views/status.leaf"
 '
 docker run --rm --read-only --network none \
     --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
@@ -189,10 +190,12 @@ docker run --detach --init \
     --name "$PREVIEW_CONTAINER" \
     --publish 127.0.0.1::3100 \
     --volume "$WORK_DIR/preview:/workspace" \
+    --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
     --entrypoint /bin/sh \
     "$ABBEY_RELEASE_IMAGE" -c '
         set -eu
-        cp -R /app/AbbeyBot_AbbeyQuasarKit.resources/next-site/. /workspace/
+        quasar=$(sh /release-fixtures/bundle-root.sh AbbeyQuasarKit)
+        cp -R "$quasar/next-site/." /workspace/
         cd /workspace
         bun install --frozen-lockfile --ignore-scripts
         test -x node_modules/.bin/next

@@ -15,6 +15,9 @@ RUN bun run build
 FROM swiftlang/swift:nightly-6.4.x-bookworm AS build
 WORKDIR /build
 ENV ABBEY_PACKAGE_ROLE=server
+COPY Scripts/release-container/stage-products.sh Scripts/release-container/check-swift-resources.sh /release-tools/
+COPY Scripts/release-container/swift-resource-fixture /release-tools/swift-resource-fixture
+RUN bash /release-tools/check-swift-resources.sh
 COPY Package.swift Package.resolved* ./
 COPY Contracts ./Contracts
 COPY Sources ./Sources
@@ -22,10 +25,9 @@ COPY Tests ./Tests
 COPY --from=web-build /Sources/AbbeyServer/Resources/Public ./Sources/AbbeyServer/Resources/Public
 RUN swift package resolve
 RUN swift build -c release --product AbbeyBot
-RUN test -x .build/release/AbbeyBot \
-    && test -d .build/release/AbbeyBot_AbbeyCore.resources \
-    && test -d .build/release/AbbeyBot_AbbeyQuasarKit.resources \
-    && test -d .build/release/AbbeyBot_AbbeyServer.resources
+RUN bash /release-tools/stage-products.sh \
+    "$(swift build -c release --product AbbeyBot --show-bin-path)" /stage AbbeyBot \
+    AbbeyBot_AbbeyCore AbbeyBot_AbbeyQuasarKit AbbeyBot_AbbeyServer
 
 FROM debian:bookworm-slim AS runtime
 ARG ABBEY_VCS_REF=unknown
@@ -50,10 +52,7 @@ RUN mkdir -p /usr/local/bun-node-fallback-bin \
     && ln -s /usr/local/bin/bun /usr/local/bun-node-fallback-bin/node
 
 WORKDIR /app
-COPY --from=build /build/.build/release/AbbeyBot /app/AbbeyBot
-COPY --from=build /build/.build/release/AbbeyBot_AbbeyCore.resources /app/AbbeyBot_AbbeyCore.resources
-COPY --from=build /build/.build/release/AbbeyBot_AbbeyQuasarKit.resources /app/AbbeyBot_AbbeyQuasarKit.resources
-COPY --from=build /build/.build/release/AbbeyBot_AbbeyServer.resources /app/AbbeyBot_AbbeyServer.resources
+COPY --from=build /stage/ /app/
 
 RUN groupadd --system --gid 10001 abbey \
     && useradd --system --uid 10001 --gid abbey --home-dir /var/lib/abbey --create-home abbey \
