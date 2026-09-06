@@ -1,0 +1,68 @@
+name: ${RESTORE_GATE_ID:?}
+services:
+  db:
+    image: postgres:16.15-alpine3.23
+    environment:
+      POSTGRES_USER: abbey
+      POSTGRES_DB: abbeybot
+      POSTGRES_PASSWORD: synthetic-release-database-password
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready --username=abbey --dbname=abbeybot']
+      interval: 1s
+      timeout: 5s
+      retries: 90
+  abbey:
+    image: ${ABBEYBOT_IMAGE:?}
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1g
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://abbey:synthetic-release-database-password@db:5432/abbeybot
+      ABBEY_DRY_RUN: '1'
+      ABBEY_QUIET: '1'
+      ABBEY_INFERENCE_MODE: deterministicFloor
+      ABBEY_API_TOKEN: synthetic-release-operator
+      ABBEY_QUASAR_API_TOKEN: synthetic-release-quasar
+      ABBEY_QUASAR_HOME: /var/lib/abbey/quasar
+    volumes:
+      - quasar:/var/lib/abbey/quasar
+      - state:/var/lib/abbey/.abbey
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, 'http://127.0.0.1:8080/health']
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
+  caddy:
+    image: ${ABBEY_CADDY_IMAGE:?}
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data
+      - /config
+    depends_on:
+      abbey:
+        condition: service_healthy
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/health']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+volumes:
+  postgres:
+    name: ${RESTORE_GATE_ID:?}_postgres
+  quasar:
+    name: ${RESTORE_GATE_ID:?}_quasar
+  state:
+    name: ${RESTORE_GATE_ID:?}_state
+networks:
+  default:
+    internal: true

@@ -1,0 +1,7 @@
+{
+    auto_https off
+    admin off
+}
+:8080 {
+    reverse_proxy abbey:8080
+}

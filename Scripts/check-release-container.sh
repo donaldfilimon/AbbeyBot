@@ -283,4 +283,9 @@ if ! python3 Scripts/release-container/proxy-check.py "$CADDY_PORT"; then
 fi
 docker rm -f "$CADDY_CONTAINER" "$PROXY_FIXTURE_CONTAINER" >/dev/null
 
+echo "======== real PostgreSQL and release-image restore recovery ========"
+ABBEY_RELEASE_IMAGE="$ABBEY_RELEASE_IMAGE" \
+ABBEY_CADDY_RELEASE_IMAGE="$ABBEY_CADDY_RELEASE_IMAGE" \
+  bash "$ROOT/deploy/production/tests/container-restore.sh"
+
 echo "======== RELEASE CONTAINER GREEN ========"
