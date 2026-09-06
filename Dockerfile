@@ -15,7 +15,8 @@ RUN bun run build
 FROM swiftlang/swift:nightly-6.4.x-bookworm AS build
 WORKDIR /build
 ENV ABBEY_PACKAGE_ROLE=server
-COPY Scripts/release-container/stage-products.sh Scripts/release-container/check-swift-resources.sh /release-tools/
+COPY Scripts/release-container/stage-products.sh Scripts/release-container/check-swift-resources.sh \
+     Scripts/release-container/stage-swift-runtime.sh /release-tools/
 COPY Scripts/release-container/swift-resource-fixture /release-tools/swift-resource-fixture
 RUN bash /release-tools/check-swift-resources.sh
 COPY Package.swift Package.resolved* ./
@@ -28,6 +29,11 @@ RUN swift build -c release --product AbbeyBot
 RUN bash /release-tools/stage-products.sh \
     "$(swift build -c release --product AbbeyBot --show-bin-path)" /stage AbbeyBot \
     AbbeyBot_AbbeyCore AbbeyBot_AbbeyQuasarKit AbbeyBot_AbbeyServer
+# Discover the runtime beside the binary rather than hardcoding a toolchain
+# path: `/usr/lib/swift/linux` vanished under swiftlang/swift nightly 6.4.x and
+# the hardcoded COPY below failed with an opaque "not found" after a 32-minute
+# build. See Scripts/release-container/stage-swift-runtime.sh.
+RUN bash /release-tools/stage-swift-runtime.sh /stage/AbbeyBot /stage-runtime
 
 FROM debian:bookworm-slim AS runtime
 ARG ABBEY_VCS_REF=unknown
@@ -45,7 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # The executable dynamically links the Swift runtime from the pinned builder.
-COPY --from=build /usr/lib/swift/linux /usr/lib/swift/linux
+# Staged at a fixed path in the build stage so this COPY does not depend on the
+# toolchain image's own layout; LD_LIBRARY_PATH below points at the destination.
+COPY --from=build /stage-runtime/ /usr/lib/swift/linux/
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN mkdir -p /usr/local/bun-node-fallback-bin \
     && ln -s /usr/local/bin/bun /usr/local/bin/bunx \
