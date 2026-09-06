@@ -605,8 +605,10 @@ struct DiscordVoiceGatewaySessionTests {
         )
         await plane.waitUntilUpdateStarted()
 
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 1_000)
         try await eventually { await harness.sentOpcodes().contains(3) }
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 2_000)
         try await eventually { await harness.closeCodes().contains(1001) }
         await plane.releaseUpdate()
@@ -883,8 +885,10 @@ struct DiscordVoiceGatewaySessionTests {
         await harness.send(#"{"op":8,"d":{"heartbeat_interval":100},"seq":1}"#)
         try await eventually { await harness.sentOpcodes() == [0] }
 
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 100)
         try await eventually { await harness.sentOpcodes().contains(3) }
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 200)
         try await eventually { await harness.closeCodes().contains(1001) }
 
@@ -923,8 +927,10 @@ struct DiscordVoiceGatewaySessionTests {
         ))
         await plane.waitUntilInstallStarted()
 
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 100)
         try await eventually { await harness.sentOpcodes().contains(3) }
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 200)
         try await eventually { await harness.closeCodes().contains(1001) }
         await plane.releaseInstall()
@@ -955,12 +961,14 @@ struct DiscordVoiceGatewaySessionTests {
         await harness.send(readyJSON(modes: [DiscordVoiceTransportMode.aeadXChaCha20Poly1305RTPSIZE.rawValue]))
         _ = try await connection.value
 
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 100)
         try await eventually { await harness.sentInteger(opcode: 3, key: "t") == 100 }
         await harness.send(#"{"op":6,"d":{"t":100},"seq":3}"#)
         try await eventually {
             !(await gateway.snapshot().heartbeatAwaitingAcknowledgement)
         }
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 200)
         try await eventually { await harness.sentOpcodes().filter { $0 == 3 }.count == 2 }
         let closeCodes = await harness.closeCodes()
@@ -1004,6 +1012,7 @@ struct DiscordVoiceGatewaySessionTests {
         ]))
         try await eventually { await handler.receivedOpcodes() == [.externalSenderPackage] }
 
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 100)
         try await eventually {
             await harness.sentInteger(opcode: 3, key: "seq_ack") == 0x1234
@@ -1226,8 +1235,10 @@ struct DiscordVoiceGatewaySessionTests {
         // close the socket WITHOUT resetting the installed media plane, because
         // this abrupt loss is resume-eligible and a successful Resume reuses
         // the same transport keys and runtime.
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 1_000)
         try await eventually { await harness.sentOpcodes(attempt: 0).contains(3) }
+        try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 2_500)
         try await eventually { await harness.attemptCount() == 2 }
 
@@ -2132,11 +2143,17 @@ private actor DiscordVoiceGatewaySelectSendGate {
 
 private actor DiscordVoiceGatewaySessionManualClock {
     private var milliseconds: UInt64 = 0
+    private var pendingSleeps = 0
 
     func now() -> UInt64 { milliseconds }
+    func hasPendingSleep() -> Bool { pendingSleeps > 0 }
     func advance(to value: UInt64) { milliseconds = max(milliseconds, value) }
 
     func sleep(milliseconds delay: UInt64) async throws {
+        // Observing a sent frame does not mean the heartbeat loop has reached
+        // this relative sleep. Tests wait for registration before advancing.
+        pendingSleeps += 1
+        defer { pendingSleeps -= 1 }
         let target = self.milliseconds + delay
         while self.milliseconds < target {
             try await Task.sleep(for: .milliseconds(1))

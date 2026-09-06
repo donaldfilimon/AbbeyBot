@@ -86,8 +86,10 @@ struct VoiceGatewayClientTests {
         let connection = Task { try await client.connect() }
 
         try await eventually { await harness.sentOpcodes(attempt: 0) == [0] }
+        try await eventually { await clock.hasPendingSleep() }
         await clock.advance(to: 100)
         try await eventually { await harness.sentOpcodes(attempt: 0).contains(3) }
+        try await eventually { await clock.hasPendingSleep() }
         await clock.advance(to: 200)
 
         #expect(try await connection.value == .reconnectLimitReached)
@@ -502,12 +504,18 @@ private actor VoiceGatewayReadyRecorder {
 
 private actor VoiceGatewayManualClock {
     private var milliseconds: UInt64 = 0
+    private var pendingSleeps = 0
 
     func now() -> UInt64 { milliseconds }
+    func hasPendingSleep() -> Bool { pendingSleeps > 0 }
 
     func advance(to value: UInt64) { milliseconds = max(milliseconds, value) }
 
     func sleep(milliseconds delay: UInt64) async throws {
+        // Observing a sent frame does not mean the heartbeat loop has reached
+        // this relative sleep. Tests wait for registration before advancing.
+        pendingSleeps += 1
+        defer { pendingSleeps -= 1 }
         let target = self.milliseconds + delay
         while self.milliseconds < target {
             try await Task.sleep(for: .milliseconds(1))
