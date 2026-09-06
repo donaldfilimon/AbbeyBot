@@ -47,6 +47,15 @@ struct QuasarHTTPWorkspaceTests {
         #expect(QuasarStubProtocol.state.withLock { $0.requests.count } == 1)
     }
 
+    @Test func mutationCancellationAfterDispatchRemainsUncertain() async throws {
+        QuasarStubProtocol.state.withLock { $0 = .init(status: nil, body: "", cancellation: true) }
+        let client = try client()
+        await #expect(throws: QuasarWorkspaceError.uncertainOutcome) {
+            _ = try await client.create(name: "Name", prompt: "Prompt")
+        }
+        #expect(QuasarStubProtocol.state.withLock { $0.requests.count } == 1)
+    }
+
     @Test func rejectsCapabilityMismatchAndUsesDedicatedToken() async throws {
         QuasarStubProtocol.state.withLock { $0 = .init(status: 200, body: #"{"apiVersion":2,"serviceID":"other","discordApproval":false,"contentReview":true,"durableHistory":true,"privatePreviews":false}"#) }
         let client = try client()
@@ -69,6 +78,7 @@ private final class QuasarStubProtocol: URLProtocol, @unchecked Sendable {
     struct State: Sendable {
         var status: Int?
         var body: String
+        var cancellation = false
         var requests: [URLRequest] = []
     }
     static let state = Mutex(State(status: 200, body: "{}"))
@@ -77,7 +87,7 @@ private final class QuasarStubProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         let response = Self.state.withLock { state in state.requests.append(request); return state }
         guard let status = response.status else {
-            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)); return
+            client?.urlProtocol(self, didFailWithError: response.cancellation ? CancellationError() : URLError(.networkConnectionLost)); return
         }
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status,
             httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)

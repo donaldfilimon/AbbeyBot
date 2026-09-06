@@ -617,6 +617,11 @@ public actor QuasarPreviewManager {
                 let status = PreviewStatus(state: .running, port: port, url: url.absoluteString, logTail: logs.lines())
                 entries[siteID]?.status = status
                 await access.activate(.init(siteID: siteID, generation: generation, port: port))
+                guard !isShuttingDown, entries[siteID]?.generationID == generationID,
+                      entries[siteID]?.status.state == .running else {
+                    await access.retire(siteID: siteID)
+                    return .init(state: .stopped, logTail: logs.lines())
+                }
                 return status
             }
             try? await Task.sleep(for: pollInterval)
@@ -712,13 +717,6 @@ public actor QuasarPreviewManager {
             return nil
         }
         return current
-    }
-
-    /// Permanently close admission before stopping processes. Unlike shutdown,
-    /// stopAll remains reusable by callers that intend to start previews again.
-    public func shutdown() async {
-        isShuttingDown = true
-        await stopAll()
     }
 
     private func validatedProcessGroup(for process: Process) -> OwnedProcessGroup? {

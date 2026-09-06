@@ -318,13 +318,32 @@ public actor QuasarService {
         digest: String,
         revalidated facts: QuasarAuthorizationFacts
     ) async throws -> String {
-        var debitedGuild: String?
+        try await approveDiscordProposal(id: id, digest: digest, revalidated: facts, beforeAuthorization: {})
+    }
+
+    // An internal suspension seam lets tests hold admission while another
+    // approval arrives, without blocking a cooperative executor thread.
+    func approveDiscordProposal(
+        id: UUID,
+        digest: String,
+        revalidated facts: QuasarAuthorizationFacts,
+        beforeAuthorization: @Sendable () async -> Void
+    ) async throws -> String {
+        var reservedGuild: String?
+        var authorizationCommitted = false
         do {
             let currentFacts = effectiveFacts(facts)
+            guard currentFacts.permitsMutation else {
+                throw QuasarError.authorizationDenied("current guild policy facts do not permit approval")
+            }
+            // Reserve before the first actor suspension so concurrent approvals
+            // cannot spend the same remaining guild budget.
+            consumedGuildBudget[facts.guildID, default: 0] += 1
+            reservedGuild = facts.guildID
+            await beforeAuthorization()
             let proposal = try await proposals.approve(id: id, digest: digest, revalidated: currentFacts, desktopConfirmed: true)
+            authorizationCommitted = true
             guard let request = proposalOperations.removeValue(forKey: id) else { throw QuasarError.proposalChanged }
-            consumedGuildBudget[proposal.facts.guildID, default: 0] += 1
-            debitedGuild = proposal.facts.guildID
             switch proposal.action {
             case .create:
                 guard let name = request.name, let prompt = request.prompt else { throw QuasarError.invalidInput("name and prompt are required") }
@@ -348,8 +367,10 @@ public actor QuasarService {
                 return "Preview stopped."
             }
         } catch {
-            if let debitedGuild {
-                consumedGuildBudget[debitedGuild] = max((consumedGuildBudget[debitedGuild] ?? 1) - 1, 0)
+            // After authorization an effect can have committed despite a lost
+            // receipt. Retain its debit; only failed authorization is refundable.
+            if !authorizationCommitted, let reservedGuild {
+                consumedGuildBudget[reservedGuild] = max((consumedGuildBudget[reservedGuild] ?? 1) - 1, 0)
             }
             proposalOperations[id] = nil
             throw error
@@ -533,6 +554,7 @@ public actor QuasarService {
         guard await preview.stop(siteID: id) else {
             throw QuasarError.processFailed("preview process did not stop; archive stayed in place")
         }
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         try FileManager.default.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let archiveName = "\(stamp)-\(site.slug)"
@@ -696,6 +718,7 @@ public actor QuasarService {
         guard await preview.activePreview(siteID: siteID) == nil else {
             throw QuasarError.processFailed("preview access did not retire; site stayed unchanged")
         }
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
     }
 
     private func archivePartial(root: URL, slug: String) throws {

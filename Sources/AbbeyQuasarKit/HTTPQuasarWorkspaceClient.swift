@@ -46,7 +46,12 @@ public struct HTTPQuasarWorkspaceClient: QuasarWorkspaceClient {
         let data: Data
         let response: URLResponse
         do { (data, response) = try await session.data(for: request, delegate: redirectGuard) }
-        catch is CancellationError { throw CancellationError() }
+        catch is CancellationError {
+            // Cancellation only ends the local wait; the owning service may
+            // already have applied a dispatched mutation.
+            if mutation { throw QuasarWorkspaceError.uncertainOutcome }
+            throw CancellationError()
+        }
         catch { throw mutation ? QuasarWorkspaceError.uncertainOutcome : .connection }
         guard let http = response as? HTTPURLResponse else { throw mutation ? QuasarWorkspaceError.uncertainOutcome : .invalidResponse }
         if missing && http.statusCode == 404 { return nil }
