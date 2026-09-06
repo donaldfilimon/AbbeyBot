@@ -728,8 +728,23 @@ and deleted on 2026-09-06, so the job landed unfinished rather than regressed.
   `abbey-bot` the same morning, and it recurred inside the fix for it.
 - Local evidence at `fbc1d35`: 23 release-container tests, shellcheck clean,
   `Scripts/verify-all.sh` green. `Abbey CI` green on `cc0369c`.
-- **Not established:** the published image itself. There is no Docker CLI on the
-  development host, so every container claim here is CI-only, and the
-  `container-gate` job has been `skipped` on every run so far because `publish`
-  never succeeded. The goal closes when `Release container images` completes
-  green on an exact `main` SHA.
+- **`fbc1d35` proved the container half.** The publish job reached
+  `1/7 build release images` and `2/7 assert runtime and bundled resources`
+  green: the image builds, the discovered runtime is present and correct, the
+  bundled resources assert, and the 23 staging tests pass on the Linux runner.
+  It now fails at `3/7 boot full server with disposable SQLite`. The server
+  boots and answers `/health`, then `POST /api/sites` returns HTTP 500 and the
+  workspace is archived as `failed-<uuid>-release-manager-fixture`. That is the
+  Quasar site-creation path the merged branch was still building, not a
+  packaging defect.
+- **`642f8fd` makes that failure legible.** Only the readiness probes called
+  `docker logs`, so the 500 arrived with no server-side cause anywhere in a
+  35-minute run. The cleanup trap now dumps every gate container's log tail
+  whenever the script exits non-zero, covering stages 3 through 7.
+- **Not established:** the published image itself, and the site-creation path
+  behind the 500. There is no Docker CLI on the development host, so every
+  container claim here is CI-only and each iteration costs a full build; the
+  `container-gate` job has been `skipped` on every run because `publish` never
+  succeeded. Next slice: read the server log the `642f8fd` run now emits and fix
+  the site-creation failure. The goal closes when `Release container images`
+  completes green on an exact `main` SHA.
