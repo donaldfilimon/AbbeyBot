@@ -13,7 +13,15 @@ extension QuasarArchiveReceipt: Content {}
 actor QuasarServiceProvider {
     private let planner: QuasarPlanner
     private var service: QuasarService?
-    init(service: QuasarService?, planner: QuasarPlanner) { self.service = service; self.planner = planner }
+    let approveDiscord: (@Sendable (UUID, String) async throws -> Void)?
+    init(service: QuasarService?, planner: QuasarPlanner,
+         approveDiscord: (@Sendable (UUID, String) async throws -> Void)? = nil) {
+        self.service = service; self.planner = planner; self.approveDiscord = approveDiscord
+    }
+
+    func workspaceClient() throws -> LocalQuasarWorkspaceClient {
+        LocalQuasarWorkspaceClient(service: try value(), approveDiscord: approveDiscord)
+    }
 
     func value() throws -> QuasarService {
         if let service { return service }
@@ -53,7 +61,7 @@ extension Application {
     }
 }
 
-private struct QuasarAuthMiddleware: AsyncMiddleware {
+struct QuasarAuthMiddleware: AsyncMiddleware {
     let token: String
     let allowedOrigins: Set<String>
     let allowsTokenlessLoopback: Bool
@@ -94,6 +102,7 @@ private struct QuasarAuthMiddleware: AsyncMiddleware {
             }
         }
         let response = try await next.respond(to: request)
+        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         if let origin = request.headers.first(name: .origin), allowedOrigin(origin) {
             response.headers.replaceOrAdd(name: .accessControlAllowOrigin, value: origin)
             response.headers.replaceOrAdd(name: .vary, value: "Origin")
@@ -126,6 +135,7 @@ private struct ApprovePlanDTO: Content { var planDigest: String }
 private struct RollbackPlanDTO: Content { var planDigest: String }
 
 func quasarRoutes(_ app: Application, allowsTokenlessLoopback: Bool) {
+    quasarWorkspaceRoutes(app, allowsTokenlessLoopback: allowsTokenlessLoopback)
     let sites = app.grouped("api", "sites").grouped(QuasarAuthMiddleware(
         allowsTokenlessLoopback: allowsTokenlessLoopback
     ))
@@ -239,7 +249,7 @@ func quasarRoutes(_ app: Application, allowsTokenlessLoopback: Bool) {
     }
 }
 
-private func mapQuasarError(_ error: Error) -> Abort {
+func mapQuasarError(_ error: Error) -> Abort {
     switch error {
     case QuasarError.notFound: return Abort(.notFound)
     case QuasarError.jobRunning, QuasarError.proposalChanged: return Abort(.conflict, reason: error.localizedDescription)

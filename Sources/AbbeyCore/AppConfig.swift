@@ -10,6 +10,11 @@ public enum OperatingMode: String, CaseIterable, Codable, Identifiable, Sendable
     public var id: String { rawValue }
 }
 
+public enum QuasarBackend: String, CaseIterable, Codable, Identifiable, Sendable {
+    case local, remote
+    public var id: String { rawValue }
+}
+
 public enum InferenceMode: String, CaseIterable, Codable, Identifiable, Sendable {
     case deterministicFloor
     case onDevice
@@ -34,6 +39,22 @@ public final class AppConfig: @unchecked Sendable {
     }
     public var remoteEndpoint: String {
         didSet { defaults.set(remoteEndpoint, forKey: Keys.remoteEndpoint) }
+    }
+    /// Quasar settings are independent of sync and captured by the desktop at startup.
+    public var quasarBackend: QuasarBackend {
+        didSet { defaults.set(quasarBackend.rawValue, forKey: Keys.quasarBackend) }
+    }
+    public var quasarEndpoint: String {
+        didSet { defaults.set(quasarEndpoint, forKey: Keys.quasarEndpoint) }
+    }
+    public var quasarAPIToken: String {
+        didSet { TokenStore.set(quasarAPIToken, account: Keys.quasarAPIToken) }
+    }
+    public var remoteModel: String {
+        didSet { defaults.set(remoteModel, forKey: Keys.remoteModel) }
+    }
+    public var remoteAPIToken: String {
+        didSet { TokenStore.set(remoteAPIToken, account: Keys.remoteAPIToken) }
     }
     public var replyCooldownSeconds: Double {
         didSet { defaults.set(replyCooldownSeconds, forKey: Keys.replyCooldownSeconds) }
@@ -98,6 +119,11 @@ public final class AppConfig: @unchecked Sendable {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
         static let remoteEndpoint = "ABBEY_REMOTE_ENDPOINT"
+        static let remoteModel = "ABBEY_REMOTE_MODEL"
+        static let remoteAPIToken = "ABBEY_REMOTE_API_TOKEN"
+        static let quasarBackend = "ABBEY_QUASAR_BACKEND"
+        static let quasarEndpoint = "ABBEY_QUASAR_ENDPOINT"
+        static let quasarAPIToken = "ABBEY_QUASAR_API_TOKEN"
         static let replyCooldownSeconds = "ABBEY_REPLY_COOLDOWN_SECONDS"
         static let consolidationInterval = "ABBEY_MEMORY_CONSOLIDATION_INTERVAL_MIN"
         static let reputationDecay = "ABBEY_REPUTATION_DECAY"
@@ -146,6 +172,12 @@ public final class AppConfig: @unchecked Sendable {
         } else {
             self.remoteEndpoint = defaults.string(forKey: Keys.remoteEndpoint) ?? ""
         }
+        self.quasarBackend = QuasarBackend(rawValue: environment[Keys.quasarBackend]
+            ?? defaults.string(forKey: Keys.quasarBackend) ?? "local") ?? .local
+        self.quasarEndpoint = environment[Keys.quasarEndpoint] ?? defaults.string(forKey: Keys.quasarEndpoint) ?? "https://api.xfoss.dev"
+        self.quasarAPIToken = environment[Keys.quasarAPIToken] ?? TokenStore.get(account: Keys.quasarAPIToken) ?? ""
+        self.remoteModel = environment[Keys.remoteModel] ?? defaults.string(forKey: Keys.remoteModel) ?? "abbey-remote"
+        self.remoteAPIToken = environment[Keys.remoteAPIToken] ?? TokenStore.get(account: Keys.remoteAPIToken) ?? ""
         let cooldown = defaults.double(forKey: Keys.replyCooldownSeconds)
         self.replyCooldownSeconds = cooldown > 0 ? cooldown : 8.0
         let interval = defaults.double(forKey: Keys.consolidationInterval)

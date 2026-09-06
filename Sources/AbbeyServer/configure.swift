@@ -77,7 +77,8 @@ public func configure(_ app: Application) async throws {
     let quasarService = await runtime.quasarService
     let quasarProvider = QuasarServiceProvider(
         service: quasarService,
-        planner: .abbey(router: inferenceRouter)
+        planner: .abbey(router: inferenceRouter),
+        approveDiscord: { id, digest in try await runtime.approveDiscordQuasarProposal(id: id, digest: digest) }
     )
     app.quasarServiceProvider = quasarProvider
     app.lifecycle.use(BotLifecycleHandler())
@@ -99,7 +100,9 @@ public func configureQuasarOnly(
         eventBus: EventBus(),
         metrics: EngineMetrics(),
         currentMode: { config.inferenceMode },
-        remoteEndpoint: { config.remoteEndpoint }
+        remoteEndpoint: { config.remoteEndpoint },
+        remoteModel: { config.remoteModel },
+        remoteAPIToken: { config.remoteAPIToken }
     )
     let planner = QuasarPlanner.abbey(router: router)
     let service = try QuasarService(planner: planner)

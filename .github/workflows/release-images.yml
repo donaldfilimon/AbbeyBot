@@ -1,0 +1,76 @@
+name: Release container images
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  container-gate:
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test release images
+        env:
+          ABBEY_RELEASE_IMAGE: abbeybot-release-gate:${{ github.sha }}
+          ABBEY_CADDY_RELEASE_IMAGE: abbeybot-caddy-release-gate:${{ github.sha }}
+        run: bash Scripts/check-release-container.sh
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      LOCAL_ABBEY_IMAGE: abbeybot-release-gate:${{ github.sha }}
+      LOCAL_CADDY_IMAGE: abbeybot-caddy-release-gate:${{ github.sha }}
+      GHCR_ABBEY_IMAGE: ghcr.io/donaldfilimon/abbeybot:sha-${{ github.sha }}
+      GHCR_CADDY_IMAGE: ghcr.io/donaldfilimon/abbeybot-caddy:sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test release images
+        env:
+          ABBEY_RELEASE_IMAGE: ${{ env.LOCAL_ABBEY_IMAGE }}
+          ABBEY_CADDY_RELEASE_IMAGE: ${{ env.LOCAL_CADDY_IMAGE }}
+        run: bash Scripts/check-release-container.sh
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the tested images
+        run: |
+          docker tag "$LOCAL_ABBEY_IMAGE" "$GHCR_ABBEY_IMAGE"
+          docker tag "$LOCAL_CADDY_IMAGE" "$GHCR_CADDY_IMAGE"
+          docker push "$GHCR_ABBEY_IMAGE"
+          docker push "$GHCR_CADDY_IMAGE"
+
+      - name: Record immutable deployment references
+        run: |
+          abbey_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$GHCR_ABBEY_IMAGE")"
+          caddy_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$GHCR_CADDY_IMAGE")"
+          case "$abbey_ref" in ghcr.io/donaldfilimon/abbeybot@sha256:*) ;; *) exit 1 ;; esac
+          case "$caddy_ref" in ghcr.io/donaldfilimon/abbeybot-caddy@sha256:*) ;; *) exit 1 ;; esac
+          {
+            echo '### Immutable deployment references'
+            echo
+            echo "Abbey: \`${abbey_ref}\`"
+            echo "Caddy: \`${caddy_ref}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

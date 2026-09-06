@@ -14,7 +14,7 @@ final class AbbeyEngine {
     typealias ForgetPushScheduler = @MainActor (_ guildId: String, _ userId: String, _ index: Int) -> Void
 
     let modelContainer: ModelContainer
-    let config = AppConfig.shared
+    let config: AppConfig
     let metrics = EngineMetrics()
 
     let eventBus: EventBus
@@ -30,6 +30,15 @@ final class AbbeyEngine {
     private(set) var knowledgeRefreshCandidate: KnowledgeRefreshCandidate?
     private(set) var knowledgeRefreshError: String?
     let quasarService: QuasarService?
+    private let remoteQuasarClient: HTTPQuasarWorkspaceClient?
+    var quasarWorkspaceClient: (any QuasarWorkspaceClient)? {
+        if let remoteQuasarClient { return remoteQuasarClient }
+        guard let quasarService else { return nil }
+        return LocalQuasarWorkspaceClient(service: quasarService) { [weak self] id, digest in
+            guard let self else { throw QuasarWorkspaceError.connection }
+            try await self.approveOwnedDiscordQuasarProposal(id: id, digest: digest)
+        }
+    }
     let quasarInitializationError: String?
     var equityEngine = EquityResearchEngine()
     /// Local WDBX segment store (`~/.abbey/wdbx/`). Optional if init fails.
@@ -56,6 +65,7 @@ final class AbbeyEngine {
 
     init(
         modelContainer: ModelContainer,
+        config: AppConfig = .shared,
         storeDegraded: Bool = false,
         saveModelContext: @escaping ModelContextSaver = { try $0.save() },
         scheduleRememberPush: @escaping RememberPushScheduler = { guildId, userId, fact in
@@ -80,7 +90,7 @@ final class AbbeyEngine {
         let bus = EventBus()
         self.eventBus = bus
 
-        let config = AppConfig.shared
+        self.config = config
         do {
             try config.validateForStartup()
         } catch {
@@ -116,7 +126,9 @@ final class AbbeyEngine {
             eventBus: bus,
             metrics: metrics,
             currentMode: { config.inferenceMode },
-            remoteEndpoint: { config.remoteEndpoint }
+            remoteEndpoint: { config.remoteEndpoint },
+            remoteModel: { config.remoteModel },
+            remoteAPIToken: { config.remoteAPIToken }
         )
         self.inferenceRouter = inferenceRouter
         do {
@@ -128,10 +140,17 @@ final class AbbeyEngine {
             self.knowledgeInitializationError = OperatorFacingError.message(error)
         }
         do {
-            self.quasarService = try QuasarService(planner: .abbey(router: inferenceRouter))
+            if config.quasarBackend == .remote {
+                self.remoteQuasarClient = try HTTPQuasarWorkspaceClient(endpoint: config.quasarEndpoint, token: config.quasarAPIToken)
+                self.quasarService = nil
+            } else {
+                self.quasarService = try QuasarService(planner: .abbey(router: inferenceRouter))
+                self.remoteQuasarClient = nil
+            }
             self.quasarInitializationError = nil
         } catch {
             self.quasarService = nil
+            self.remoteQuasarClient = nil
             self.quasarInitializationError = OperatorFacingError.message(error)
         }
         self.mediaSession = MediaSessionModel(discordBridge: discordBridge)
@@ -159,7 +178,7 @@ final class AbbeyEngine {
             await socialBrain.warmCache()
             await scheduler.start()
             let token = config.twitchOAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !token.isEmpty {
+            if !config.dryRun, !token.isEmpty {
                 let hooks = TwitchEventHooks { [weak self] msg in
                     guard let self else { return }
                     let botNick = (await self.twitchBridge.loginNick ?? "").lowercased()
@@ -249,6 +268,13 @@ final class AbbeyEngine {
         } catch {
             knowledgeRefreshError = error.localizedDescription
         }
+    }
+
+    private func approveOwnedDiscordQuasarProposal(id: UUID, digest: String) async throws {
+        guard let service = quasarService,
+              let proposal = await service.pendingDiscordProposals().first(where: { $0.id == id }),
+              proposal.digest == digest else { throw QuasarError.proposalChanged }
+        _ = try await approveDiscordQuasarProposal(proposal)
     }
 
     func approveDiscordQuasarProposal(_ proposal: QuasarProposal) async throws -> String {
