@@ -89,7 +89,10 @@ public struct QuasarDependencyFingerprint: Codable, Equatable, Sendable {
     private static func dependencyData(named name: String, root: URL) throws -> Data {
         let candidate = root.appendingPathComponent(name, isDirectory: false)
         let resolved = candidate.resolvingSymlinksInPath()
-        guard resolved.deletingLastPathComponent() == root else {
+        // Foundation URL equality distinguishes directory-hinted URLs (a
+        // trailing slash) from the same filesystem path on Linux. Both sides
+        // already resolve symlinks; compare exact parent paths, never prefixes.
+        guard resolved.deletingLastPathComponent().path == root.path else {
             throw QuasarError.pathRejected("preview dependency input escapes the site root")
         }
         let values = try resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
