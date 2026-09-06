@@ -1,5 +1,7 @@
 # AbbeyBot
 
+Canonical instructions for the Swift checkout, not the separate Rust `abbey-bot` repository.
+
 ## Package Boundaries
 
 - One Swift package and one executable product, `AbbeyBot`. `Sources/AbbeyEntry/main.swift` dispatches desktop (default), `serve`, `cli`, and `quasar serve`; `AbbeyServer` and `AbbeyCLI` are targets, not executable products.
@@ -15,7 +17,7 @@
 
 ```bash
 bash Scripts/run.sh                # signed .app via LaunchServices
-bash Scripts/swift-run.sh help     # raw SPM arguments; not the signed-app launcher
+bash Scripts/swift-run.sh help     # AbbeyBot arguments, not SwiftPM flags; unsigned launch
 bash Scripts/run-server.sh         # server graph; loads .env
 bash Scripts/run-abbey.sh          # CLI graph; loads .env
 ```
@@ -39,6 +41,7 @@ bash Scripts/run-cli-smoke.sh
 
 - Use the relevant smoke during iteration; run `verify-all.sh` before shipping a cross-surface change. Continuation requests include the scoped gate and requested ship steps, not just an intermediate green. Static/security failures must pass or have an explicitly accepted exception.
 - Desktop smoke builds debug and release, runs all ordinary Swift tests, validates signing/privacy metadata, and launches with media disabled. Native media is deliberately excluded. Package-graph checks inspect manifests, not native linking.
+- Desktop smoke clears inherited `ABBEY_DRY_RUN` and `ABBEY_QUIET` for unit tests so injected lifecycle gateways run; its signed-app launch remains explicitly dry-run and media-disabled.
 - Server smoke may start Compose Postgres and honor an inherited `DATABASE_URL`; without Docker it uses a temporary SQLite file. It preserves bot credentials and prints the DB URL. Use a disposable database and explicit `ABBEY_DRY_RUN=1` for non-live verification; do not assume all smokes isolate `HOME` or credentials. SQLite success is not Postgres evidence.
 - Web smoke must precede Swift packaging: Vite empties and writes `Sources/AbbeyServer/Resources/Public/`, not `web/dist`. Standalone server smoke permits a missing dashboard as a skip.
 - Knowledge smoke checks the signed bundled bytes with one test filter; unlike most wrappers it uses the default SwiftPM scratch directory. Do not hand-edit signed snapshot bytes to fix a failure; inspect `Scripts/refresh-knowledge-snapshot.swift`.
@@ -77,4 +80,4 @@ ABBEY_PACKAGE_ROLE=server /usr/bin/xcrun --toolchain default swift test \
 
 - Use the canonical checkout. Changes land via `cursor/*` (preferred) or `codex/*` review branches and PRs into `main`; never commit/push directly or force-push `main`. These prefixes also control push CI. Avoid extra worktrees; remove only inactive, clean, fully merged worktrees/branches after integration.
 - Keep `.env`, `.swift-version`, dependencies, `.cursor/hooks/`, build products, and generated SPA assets untracked. Static/security checks also reject untracked numbered duplicate Swift files such as `Thing 2.swift`.
-- `.claude/skills/abbey-verify/SKILL.md` defines the ship workflow. `CLAUDE.md` is an extended reference, not a substitute for current scripts. Gate/toolchain convention changes also affect `.cursor/agents/abbey.md`, `.codex/agents/abbey.toml`, and the `.claude`/`.agents` verification skill mirrors; check for drift when changing those conventions.
+- `.claude/skills/abbey-verify/SKILL.md` defines the ship workflow. `CLAUDE.md` points here. Gate/toolchain convention changes also affect `.cursor/agents/abbey.md`, `.codex/agents/abbey.toml`, and the `.claude`/`.agents` verification skill mirrors; check for drift when changing those conventions.

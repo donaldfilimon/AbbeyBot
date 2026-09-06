@@ -58,28 +58,30 @@ jobs:
           swift build --product AbbeyBot
 
       - name: Test AbbeyCoreTests
+        # Preview fixtures orphan descendants deliberately. Reap them so exact
+        # process-group absence remains the stop contract, including on Linux.
         run: >
-          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm --init -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyCoreTests
 
       - name: Test AbbeyQuasarKitTests
         run: >
-          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm --init -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyQuasarKitTests
 
       - name: Test AbbeyCLITests
         run: >
-          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm --init -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyCLITests
 
       - name: Test AbbeyServerKitTests
         env:
           DATABASE_URL: sqlite://memory
         run: >
-          docker run --rm -e ABBEY_PACKAGE_ROLE -e DATABASE_URL -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm --init -e ABBEY_PACKAGE_ROLE -e DATABASE_URL -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyServerKitTests
 
       - name: Test AbbeyServerTests
         run: >
-          docker run --rm -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
+          docker run --rm --init -e ABBEY_PACKAGE_ROLE -v "$PWD":/src -w /src "$SWIFT_IMAGE"
           swift test --filter AbbeyServerTests

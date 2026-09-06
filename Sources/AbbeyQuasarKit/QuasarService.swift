@@ -250,21 +250,28 @@ public actor QuasarService {
     }
 
     public func startPreview(id: String) async throws -> PreviewStatus {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await site(id: id)
         guard site.status == .idle, await coordinator.pending(siteID: id) == nil else {
             throw QuasarError.authorizationDenied("approve or reject the pending mutation before preview")
         }
         let used = Set((await registry.list()).compactMap(\.previewPort))
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         var port = 4_710
         while used.contains(port), port < 65_535 { port += 1 }
         guard !used.contains(port), port <= 65_535 else {
             throw QuasarError.budgetExceeded("preview ports")
         }
         try await registry.setPreviewPort(id: id, port: port)
+        guard !isShuttingDown else {
+            try await registry.clearPreviewPort(id: id, ifMatching: port)
+            throw QuasarError.processFailed("Quasar service is shut down")
+        }
         let status = await preview.start(siteID: id, siteRoot: siteRoot(site), port: port)
-        if status.state != .running {
+        if isShuttingDown || status.state != .running {
             try await registry.clearPreviewPort(id: id, ifMatching: port)
         }
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         return status
     }
 
@@ -380,7 +387,7 @@ public actor QuasarService {
     public func shutdown() async {
         isShuttingDown = true
         await coordinator.shutdown(registry: registry)
-        await preview.stopAll()
+        await preview.shutdown()
     }
 
     private func siteRoot(_ site: Site) -> URL { sitesRoot.appendingPathComponent(site.slug, isDirectory: true) }

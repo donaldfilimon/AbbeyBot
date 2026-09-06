@@ -170,6 +170,7 @@ public actor AVAudioEngineAdapter {
 
     @discardableResult
     public func startCapture() async throws -> UInt64 {
+        guard playbackTeardownCount == 0 else { throw CancellationError() }
         if state == .capturing { return generation }
         if let operation = captureStartOperation {
             return try await operation.task.value
@@ -237,6 +238,9 @@ public actor AVAudioEngineAdapter {
         pendingStart?.task.cancel()
         generation &+= 1
         assembler.reset()
+        // Remove the microphone tap without waiting for a playback runtime
+        // that may ignore cancellation. The final stop still follows schedules.
+        await runtime.stopCapture()
         for task in pendingPlayback { _ = await task.result }
         await runtime.stopNow()
         if let pendingStart {
@@ -279,7 +283,11 @@ public actor AVAudioEngineAdapter {
         playbackSchedules[token] = task
         defer { playbackSchedules[token] = nil }
         do {
-            try await task.value
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
             guard admittedGeneration == playbackGeneration else { return false }
             if state == .stopped, !playbackQueue.isEmpty {
                 state = .playbackOnly
@@ -288,6 +296,11 @@ public actor AVAudioEngineAdapter {
         } catch {
             playbackQueue.removeAll { $0.token == token }
             guard admittedGeneration == playbackGeneration else { return false }
+            if error is CancellationError {
+                // Canceling this frame does not fail an independent capture session.
+                if state == .playbackOnly, playbackQueue.isEmpty { state = .stopped }
+                throw error
+            }
             state = .failed(Self.describe(error))
             throw error
         }
@@ -420,10 +433,12 @@ public actor AVAudioEngineAdapter {
         case .configurationChanged, .deviceConfigurationChanged:
             state = .configurationChanged
         }
+        captureStartOperation?.task.cancel()
         generation &+= 1
         assembler.reset()
         let pendingPlayback = beginPlaybackTeardown()
         defer { playbackTeardownCount -= 1 }
+        await runtime.stopCapture()
         for task in pendingPlayback { _ = await task.result }
         await runtime.stopNow()
     }

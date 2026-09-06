@@ -73,6 +73,7 @@ public final class WDBXStore: @unchecked Sendable {
     private var manifest: WDBXManifest
     private var cache: [WDBXRecord] = []
     private var appendedRecordCount = 0
+    private var appendRepairFailure: String?
 
     public static func defaultRoot() throws -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -168,6 +169,9 @@ public final class WDBXStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        if let appendRepairFailure {
+            throw WDBXStoreError.io(appendRepairFailure)
+        }
         let segmentIndex = appendedRecordCount / maxRecordsPerSegment
         let segURL = segmentURL(index: segmentIndex)
         var line = try encoder.encode(record)
@@ -175,8 +179,20 @@ public final class WDBXStore: @unchecked Sendable {
         if FileManager.default.fileExists(atPath: segURL.path) {
             let handle = try FileHandle(forWritingTo: segURL)
             defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: line)
+            let offset = try handle.seekToEnd()
+            do {
+                try handle.write(contentsOf: line)
+            } catch {
+                let writeError = error
+                do {
+                    try handle.truncate(atOffset: offset)
+                } catch {
+                    let detail = "append failed (\(writeError.localizedDescription)); rollback failed (\(error.localizedDescription)); reopen store before writing"
+                    appendRepairFailure = detail
+                    throw WDBXStoreError.io(detail)
+                }
+                throw writeError
+            }
         } else {
             try line.write(to: segURL, options: .atomic)
         }
@@ -266,15 +282,28 @@ public final class WDBXStore: @unchecked Sendable {
 
     private static func loadAllRecords(root: URL, decoder: JSONDecoder) throws -> LoadedRecords {
         let segDir = root.appendingPathComponent("segments", isDirectory: true)
-        let files = (try? FileManager.default.contentsOfDirectory(at: segDir, includingPropertiesForKeys: nil)) ?? []
+        let files = try FileManager.default.contentsOfDirectory(at: segDir, includingPropertiesForKeys: nil)
         let sorted = files.filter { $0.pathExtension == "jsonl" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         var latestByID: [String: (order: Int, record: WDBXRecord)] = [:]
         var appendedRecordCount = 0
         for file in sorted {
-            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
-            for line in text.split(whereSeparator: \.isNewline) {
-                guard let data = line.data(using: .utf8) else { continue }
-                if let rec = try? decoder.decode(WDBXRecord.self, from: data) {
+            var data = try Data(contentsOf: file)
+            if let last = data.last, last != 0x0A, last != 0x0D {
+                let tailStart = data.lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
+                    .map { $0 + 1 } ?? data.startIndex
+                // Writers terminate every row. Preserve a complete legacy row
+                // without its delimiter, but discard an interrupted JSON/UTF-8
+                // tail before any future append can concatenate onto it.
+                if (try? decoder.decode(WDBXRecord.self, from: Data(data[tailStart...]))) != nil {
+                    data.append(0x0A)
+                } else {
+                    data.removeSubrange(tailStart..<data.endIndex)
+                }
+                // Repair atomically and fail initialization closed if it fails.
+                try data.write(to: file, options: .atomic)
+            }
+            for line in data.split(whereSeparator: { $0 == 0x0A || $0 == 0x0D }) {
+                if let rec = try? decoder.decode(WDBXRecord.self, from: Data(line)) {
                     latestByID[rec.id] = (appendedRecordCount, rec)
                     appendedRecordCount += 1
                 }

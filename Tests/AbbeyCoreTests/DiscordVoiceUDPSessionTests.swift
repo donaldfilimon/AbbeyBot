@@ -130,6 +130,10 @@ struct DiscordVoiceUDPSessionTests {
         try await session.open()
         let discovery = Task { try await session.discover(ssrc: ssrc) }
         await server.observation.waitForDiscovery()
+        // This case cancels the response wait, not an in-flight write. Write
+        // cancellation intentionally retires the socket instead of reusing it.
+        try await waitUntil { await session.hasPendingReceiveWaiterForTesting() }
+        try #require(await session.hasPendingReceiveWaiterForTesting())
         discovery.cancel()
         await expectCancellation { _ = try await discovery.value }
         #expect(await session.snapshot().state == .open)
@@ -145,6 +149,73 @@ struct DiscordVoiceUDPSessionTests {
         try await server.sendFromConfiguredSocket([0xD1])
         #expect(try await session.receiveProtectedPacket() == [0xD1])
 
+        await session.close()
+        await server.stop()
+    }
+
+    @Test("Cancelling a queued NIO write closes its socket and resolves every pending write")
+    func cancellationDrainsPendingWrites() async throws {
+        let ssrc: UInt32 = 20
+        let server = try await PersistentUDPTestServer.start(discoverySSRC: ssrc)
+        defer { server.stopEventually() }
+        let session = makeSession(serverPort: server.port)
+        try await session.open()
+        _ = try await session.discover(ssrc: ssrc)
+        let gate = PersistentUDPWriteGate()
+        try await session.installOutboundHandlerForTesting(PersistentUDPHeldWrites(gate: gate))
+
+        let first = Task { try await session.sendProtectedPacket([0x80, 0x01]) }
+        let second = Task { try await session.sendProtectedPacket([0x80, 0x02]) }
+        let watchdog = Task {
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            Issue.record("Timed out waiting for queued UDP write cancellation")
+            await session.close()
+            await gate.finish()
+        }
+        defer { watchdog.cancel() }
+        await gate.waitForWrites(2)
+        first.cancel()
+        await expectCancellation { try await first.value }
+        await expectSessionError(.transportFailure) { try await second.value }
+        await gate.waitUntilClosed()
+        #expect(await gate.wasClosed())
+        #expect(await session.snapshot().state == .failed)
+        #expect(await server.observation.observedSourcePorts().media.isEmpty)
+        await expectSessionError(.transportFailure) {
+            try await session.sendProtectedPacket([0x80, 0x03])
+        }
+        await session.close()
+        #expect(await session.snapshot().state == .closed)
+
+        // Cancellation retires only the captured socket. Recovery requires a
+        // distinct session and discovery, not resurrection of the old mapping.
+        let replacement = makeSession(serverPort: server.port)
+        try await replacement.open()
+        _ = try await replacement.discover(ssrc: ssrc)
+        try await replacement.sendProtectedPacket([0x80, 0x04])
+        await server.observation.waitForMediaCount(1)
+        #expect(await replacement.snapshot().state == .ready)
+        await replacement.close()
+        await server.stop()
+    }
+
+    @Test("A pre-cancelled write sends nothing and leaves the discovered socket usable")
+    func preCancelledWritePreservesSocket() async throws {
+        let ssrc: UInt32 = 21
+        let server = try await PersistentUDPTestServer.start(discoverySSRC: ssrc)
+        defer { server.stopEventually() }
+        let session = makeSession(serverPort: server.port)
+        try await session.open()
+        _ = try await session.discover(ssrc: ssrc)
+        let send = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await session.sendProtectedPacket([0x80, 0x01])
+        }
+        await expectCancellation { try await send.value }
+        #expect(await session.snapshot().state == .ready)
+        #expect(await server.observation.observedSourcePorts().media.isEmpty)
+        try await session.sendProtectedPacket([0x80, 0x02])
+        await server.observation.waitForMediaCount(1)
         await session.close()
         await server.stop()
     }
@@ -745,6 +816,65 @@ private actor PersistentUDPStopGate {
         stopped = true
         return true
     }
+}
+
+/// Event-loop-confined fixture: retain write promises without forwarding bytes
+/// to the socket. Only a real channel close fails them, just as queued NIO writes
+/// must be failed on shutdown. This does not fake async cancellation cooperation.
+private final class PersistentUDPHeldWrites: ChannelOutboundHandler, @unchecked Sendable {
+    typealias OutboundIn = AddressedEnvelope<ByteBuffer>
+    private let gate: PersistentUDPWriteGate
+    private var promises: [EventLoopPromise<Void>] = []
+
+    init(gate: PersistentUDPWriteGate) { self.gate = gate }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        if let promise { promises.append(promise) }
+        Task { await gate.recordWrite() }
+    }
+
+    func flush(context: ChannelHandlerContext) {}
+
+    func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+        let pending = promises
+        promises.removeAll()
+        for write in pending { write.fail(ChannelError.ioOnClosedChannel) }
+        Task { await gate.finish() }
+        context.close(mode: mode, promise: promise)
+    }
+}
+
+private actor PersistentUDPWriteGate {
+    private var writes = 0
+    private var closed = false
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func recordWrite() {
+        writes += 1
+        let ready = waiters.filter { writes >= $0.0 }
+        waiters.removeAll { writes >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+    }
+
+    func waitForWrites(_ count: Int) async {
+        if writes >= count || closed { return }
+        await withCheckedContinuation { waiters.append((count, $0)) }
+    }
+
+    func finish() {
+        closed = true
+        for (_, waiter) in waiters { waiter.resume() }
+        waiters.removeAll()
+        for waiter in closeWaiters { waiter.resume() }
+        closeWaiters.removeAll()
+    }
+
+    func waitUntilClosed() async {
+        if !closed { await withCheckedContinuation { closeWaiters.append($0) } }
+    }
+
+    func wasClosed() -> Bool { closed }
 }
 
 private actor PersistentUDPAsyncGate {
