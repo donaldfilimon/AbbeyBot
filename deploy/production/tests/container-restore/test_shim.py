@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import os
+from unittest.mock import patch
 import unittest
 
 class MappingTests(unittest.TestCase):
@@ -24,6 +26,13 @@ class MappingTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.shim.map_argument('abbeybot_postgres:/source',self.env)
     def test_other_mount_paths_unchanged(self):
         self.assertEqual(self.shim.map_argument('/private/gate/backup:/backup:ro',self.env),'/private/gate/backup:/backup:ro')
+    def test_hostile_inherited_compose_project_name_cannot_select_production(self):
+        env=dict(self.env, RESTORE_GATE_REAL_DOCKER='/usr/bin/docker', COMPOSE_PROJECT_NAME='production')
+        args=['docker','compose','--project-directory','/private/gate/production',
+              '--env-file','/private/gate/production/.env','--file','/private/gate/production/compose.yml','ps']
+        with patch.dict(os.environ, env), patch.object(self.shim.sys, 'argv', args), patch.object(self.shim.subprocess, 'call', return_value=0) as docker:
+            self.assertEqual(self.shim.main(),0)
+        self.assertEqual(docker.call_args.kwargs['env']['COMPOSE_PROJECT_NAME'],'restore-test')
     def test_foreign_compose_project_refused(self):
         with self.assertRaises(ValueError):
             self.shim.validate_compose(['compose','--project-directory','/production','ps'],self.env)

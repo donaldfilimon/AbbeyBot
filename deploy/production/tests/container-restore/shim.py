@@ -57,7 +57,9 @@ def main():
         raise ValueError('missing Docker operation')
     if args[0] == 'compose':
         validate_compose(args, env)
-        env.update(ABBEYBOT_IMAGE=env['RESTORE_GATE_ABBEY_IMAGE'],
+        # Shell project selection outranks compose.yml's name; pin it even when inherited.
+        env.update(COMPOSE_PROJECT_NAME=env['RESTORE_GATE_ID'],
+                   ABBEYBOT_IMAGE=env['RESTORE_GATE_ABBEY_IMAGE'],
                    ABBEY_CADDY_IMAGE=env['RESTORE_GATE_CADDY_IMAGE'])
         if 'stop' in args:
             with (root/'stop-events').open('a') as handle:
