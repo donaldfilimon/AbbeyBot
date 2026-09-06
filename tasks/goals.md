@@ -695,3 +695,41 @@ status: done
   changes were moved to `codex/massive-improve-cleanup` and rebased on current `origin/main`.
 - Local `main` was safely realigned to `origin/main`; no force-push occurred. Continue through the
   feature branch and PR workflow, never by committing or pushing this work directly to `main`.
+
+## Release container publishes from main
+status: in_progress
+
+`Release container images` had never passed on `main`. The workflow arrived with
+`1d499d4` on `cursor/quasar-completion-20260906`, and that branch was still
+iterating on container staging (`e69d0ff`, `aae40b4`) when the branch was merged
+and deleted on 2026-09-06, so the job landed unfinished rather than regressed.
+
+- **Root cause, fixed at `cc0369c`.** The runtime stage did
+  `COPY --from=build /usr/lib/swift/linux`. That directory does not exist in
+  `swiftlang/swift:nightly-6.4.x-bookworm`; BuildKit reported only "not found",
+  after a 32-minute build that had otherwise succeeded and staged its products.
+  Staging now happens in the build stage, where a shell can look, and the path is
+  discovered rather than assumed: `ldd` on the staged executable first (the
+  directory the linker resolved `libswiftCore.so` from is correct by definition),
+  then `swiftc -print-target-info`, then known image layouts. The result is copied
+  to a fixed `/stage-runtime`, so the runtime stage's COPY no longer depends on
+  the toolchain image's layout; `LD_LIBRARY_PATH` is unchanged.
+- **The real layout is `/opt/swift/6.2/usr/lib/swift/linux`** (reported by the
+  `cc0369c` build, not guessed here). It is now also in the fallback candidates
+  and the failure diagnostic's search roots.
+- **`cc0369c` fixed the container and failed on its own test.** The image built,
+  staged and exported; the publish job then failed in
+  `test_swift_runtime_staging.py`, whose fake `swiftc` built JSON with `printf`
+  and escaped quotes. `/bin/sh` is bash on macOS and dash on Debian and their
+  `printf` disagree about backslash escapes, so the runner's shim emitted literal
+  backslashes. Fixed at `fbc1d35`: shim output is written from Python and read
+  back with `cat`, so the shim source carries no backslashes for any shell to
+  reinterpret. This is the same class as the two Windows test defects fixed in
+  `abbey-bot` the same morning, and it recurred inside the fix for it.
+- Local evidence at `fbc1d35`: 23 release-container tests, shellcheck clean,
+  `Scripts/verify-all.sh` green. `Abbey CI` green on `cc0369c`.
+- **Not established:** the published image itself. There is no Docker CLI on the
+  development host, so every container claim here is CI-only, and the
+  `container-gate` job has been `skipped` on every run so far because `publish`
+  never succeeded. The goal closes when `Release container images` completes
+  green on an exact `main` SHA.
