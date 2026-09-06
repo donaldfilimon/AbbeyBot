@@ -110,7 +110,7 @@ docker run --rm --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" 
     --entrypoint /bin/sh "$ABBEY_RELEASE_IMAGE" -c '
     set -eu
     test "$(id -u)" = 10001
-    test "$(bun --version)" = 1.3.14
+    test "$(bun --version)" = 1.4.2
     test "$(node -p process.versions.bun)" = "$(bun --version)"
     test -x /app/AbbeyBot
     sh /release-fixtures/bundle-root.sh AbbeyCore >/dev/null

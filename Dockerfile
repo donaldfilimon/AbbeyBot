@@ -1,10 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
-# Keep this Bun version identical to the Abbey CI setup-bun version. Quasar
-# installs and launches approved Next.js workspaces with this runtime.
-FROM oven/bun:1.3.14-slim AS bun
+# Keep this Bun version identical to the Abbey CI setup-bun version and the
+# release gate's assertion. Quasar installs and launches approved Next.js
+# workspaces with this runtime, and the packaged next-site template's bun.lock
+# has been lockfileVersion 2 since it was committed -- which 1.3.14 cannot parse,
+# so every scaffold died on "Unknown lockfile version" under --frozen-lockfile.
+# Bumping the reader rather than regenerating the lockfile keeps the reviewed
+# dependency resolution byte-identical.
+FROM oven/bun:1.4.2-slim AS bun
 
-FROM oven/bun:1.3.14-slim AS web-build
+FROM oven/bun:1.4.2-slim AS web-build
 WORKDIR /web-build
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
