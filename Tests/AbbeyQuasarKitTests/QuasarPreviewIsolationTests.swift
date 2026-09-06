@@ -27,6 +27,35 @@ struct QuasarPreviewIsolationTests {
         }
     }
 
+    @Test func dependencyFingerprintAcceptsBothDirectoryURLRepresentations() throws {
+        let root = try fixtureSite()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directoryURL = URL(fileURLWithPath: root.path, isDirectory: true)
+        let plainURL = URL(fileURLWithPath: root.path, isDirectory: false)
+        #expect(directoryURL != plainURL)
+        #expect(directoryURL.path == plainURL.path)
+        #expect(try QuasarDependencyFingerprint.capture(siteRoot: directoryURL)
+            == QuasarDependencyFingerprint.capture(siteRoot: plainURL))
+    }
+
+    @Test(arguments: ["package.json", "bun.lock"])
+    func dependencyFingerprintRejectsSymlinkIntoSiblingWithSharedPathPrefix(name: String) throws {
+        let root = try fixtureSite()
+        let sibling = URL(fileURLWithPath: root.path + "-sibling", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: sibling)
+        }
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        let input = root.appendingPathComponent(name)
+        let escaped = sibling.appendingPathComponent(name)
+        try FileManager.default.moveItem(at: input, to: escaped)
+        try FileManager.default.createSymbolicLink(at: input, withDestinationURL: escaped)
+        #expect(throws: QuasarError.pathRejected("preview dependency input escapes the site root")) {
+            _ = try QuasarDependencyFingerprint.capture(siteRoot: root)
+        }
+    }
+
     @Test func preparationRunsFrozenInstallWithoutScriptsInCredentialFreeLocalEnvironment() async throws {
         let root = try fixtureSite()
         defer { try? FileManager.default.removeItem(at: root) }
