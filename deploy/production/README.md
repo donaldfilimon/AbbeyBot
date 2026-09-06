@@ -22,8 +22,14 @@ preview hosts, so ticket query strings are not written to its container log.
 `.github/workflows/release-images.yml` runs a read-only release-image gate on
 pull requests to `main`. It boots the full server with a disposable SQLite
 database, checks every packaged resource bundle, installs and renders the
-bundled Quasar scaffold, restarts both processes from persistent state, and
-validates the Caddy routing configuration including ticket-query preservation.
+bundled Quasar scaffold, and exercises authenticated create, approval, preparation,
+preview and stop through Abbey with a deterministic provider fixture. It verifies
+complete preview process-group absence after API stop and repeats preview after
+server restart. The gate also runs the adapted production Caddy routes on a local
+HTTP listener against fixture authorization and HTTP/WebSocket upstreams, checking
+ticket-query preservation, replay denial, host binding, upstream selection and
+credential/cookie filtering. This fixture gate does not establish public TLS,
+real-provider generation or live Discord acceptance.
 For commits merged to `main`, the same gate runs before the exact local Abbey
 and Caddy images are tagged and pushed. Only that publish job receives
 `packages: write`; it records the immutable GHCR digest references in the

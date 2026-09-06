@@ -18,10 +18,13 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-release-container.XXXXXX")"
 SERVER_CONTAINER="${GATE_ID}-server"
 PREVIEW_CONTAINER="${GATE_ID}-preview"
 PROVIDER_CONTAINER="${GATE_ID}-provider"
+PROXY_FIXTURE_CONTAINER="${GATE_ID}-proxy-fixture"
+CADDY_CONTAINER="${GATE_ID}-caddy"
 GATE_NETWORK="${GATE_ID}-network"
 
 cleanup() {
-    docker rm -f "$SERVER_CONTAINER" "$PREVIEW_CONTAINER" "$PROVIDER_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$SERVER_CONTAINER" "$PREVIEW_CONTAINER" "$PROVIDER_CONTAINER" \
+        "$PROXY_FIXTURE_CONTAINER" "$CADDY_CONTAINER" >/dev/null 2>&1 || true
     docker network rm "$GATE_NETWORK" >/dev/null 2>&1 || true
     rm -rf "$WORK_DIR"
 }
@@ -218,7 +221,7 @@ wait_for_http "$PREVIEW_CONTAINER" "http://127.0.0.1:${PREVIEW_PORT}/" "$WORK_DI
 grep -Fq "generated yet" "$WORK_DIR/preview-restart.html"
 docker rm -f "$PREVIEW_CONTAINER" >/dev/null
 
-echo "======== 7/7 validate production Caddy routing ========"
+echo "======== 7/7 validate production Caddy routing and proxy traffic ========"
 docker run --rm --entrypoint caddy "$ABBEY_CADDY_RELEASE_IMAGE" list-modules \
     | grep -Fqx 'dns.providers.cloudflare'
 docker run --rm \
@@ -249,5 +252,35 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     json.load(handle)
 PY
+
+# Preserve the adapted production routes verbatim. Only listener/TLS settings
+# change for this private-network proxy fixture; no public certificates are used.
+python3 Scripts/release-container/caddy-http-config.py "$WORK_DIR/caddy.json" "$WORK_DIR/caddy-http.json"
+docker run --detach --init --read-only \
+    --name "$PROXY_FIXTURE_CONTAINER" --network "$GATE_NETWORK" \
+    --network-alias abbey --network-alias preview-backend \
+    --volume "$ROOT/Scripts/release-container:/release-fixtures:ro" \
+    --entrypoint bun "$ABBEY_RELEASE_IMAGE" /release-fixtures/proxy-fixture.mjs >/dev/null
+for _ in $(seq 1 30); do
+    if docker exec "$PROXY_FIXTURE_CONTAINER" curl --fail --silent http://127.0.0.1:8080/health >/dev/null; then break; fi
+    sleep 1
+done
+docker exec "$PROXY_FIXTURE_CONTAINER" curl --fail --silent http://127.0.0.1:8080/health >/dev/null
+docker run --detach --init --read-only \
+    --name "$CADDY_CONTAINER" --network "$GATE_NETWORK" \
+    --publish 127.0.0.1::8080 \
+    --tmpfs /config --tmpfs /data --tmpfs /tmp \
+    --volume "$WORK_DIR/caddy-http.json:/release-caddy.json:ro" \
+    --entrypoint caddy "$ABBEY_CADDY_RELEASE_IMAGE" run --config /release-caddy.json >/dev/null
+CADDY_PORT="$(published_port "$CADDY_CONTAINER" 8080)"
+for _ in $(seq 1 30); do
+    if curl --fail --silent --header 'Host: api.example.test' "http://127.0.0.1:${CADDY_PORT}/health" >/dev/null; then break; fi
+    sleep 1
+done
+if ! python3 Scripts/release-container/proxy-check.py "$CADDY_PORT"; then
+    docker logs "$CADDY_CONTAINER" >&2 || true
+    exit 1
+fi
+docker rm -f "$CADDY_CONTAINER" "$PROXY_FIXTURE_CONTAINER" >/dev/null
 
 echo "======== RELEASE CONTAINER GREEN ========"
