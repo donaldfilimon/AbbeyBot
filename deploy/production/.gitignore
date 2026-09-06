@@ -1,0 +1,6 @@
+.backup.env
+.operation.lock
+.restore-input.*/
+.env.tmp.*
+backups/
+__pycache__/

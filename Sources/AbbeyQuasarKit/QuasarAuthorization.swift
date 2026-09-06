@@ -12,6 +12,24 @@ public struct QuasarAuthorizationFacts: Codable, Equatable, Sendable {
     public var quiet: Bool
     public var remainingBudget: Int
 
+    public init(
+        guildID: String,
+        initiatorID: String,
+        ownerAllowed: Bool,
+        discordPermissionAllowed: Bool,
+        guildOptedIn: Bool,
+        quiet: Bool,
+        remainingBudget: Int
+    ) {
+        self.guildID = guildID
+        self.initiatorID = initiatorID
+        self.ownerAllowed = ownerAllowed
+        self.discordPermissionAllowed = discordPermissionAllowed
+        self.guildOptedIn = guildOptedIn
+        self.quiet = quiet
+        self.remainingBudget = remainingBudget
+    }
+
     /// Read-only Discord surfaces still reveal local site identities and status,
     /// so they require the same owner, Discord, opt-in, and QUIET facts. Budget
     /// is deliberately excluded because inspection is not a mutation.

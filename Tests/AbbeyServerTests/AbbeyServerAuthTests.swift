@@ -1,5 +1,6 @@
 import AbbeyCore
-import AbbeyServer
+@testable import AbbeyServer
+import AbbeyQuasarKit
 import AbbeyServerKit
 import Fluent
 import Foundation
@@ -131,6 +132,54 @@ struct AbbeyServerAuthTests {
         }
     }
 
+    @Test func quasarWorkspaceAdditionsUseDedicatedAuthAndStableCapabilities() async throws {
+        try await withApp(token: "operator-token", dryRun: true, quasarToken: "quasar-owner-token") { app in
+            for path in ["/api/quasar/capabilities", "/api/quasar/proposals", "/api/sites/archives", "/api/sites/missing/history", "/api/sites/missing/plan/review"] {
+                try await app.testing().test(.GET, path, headers: bearerHeaders("operator-token")) { response in
+                    #expect(response.status == .unauthorized)
+                }
+            }
+            let service = try await app.quasarServiceProvider.value()
+            let expectedID = try await service.serviceIdentity()
+            try await app.testing().test(.GET, "/api/quasar/capabilities", headers: bearerHeaders("quasar-owner-token")) { response in
+                #expect(response.status == .ok)
+                let caps = try JSONDecoder().decode(QuasarCapabilities.self, from: Data(response.body.readableBytesView))
+                #expect(caps.apiVersion == 1)
+                #expect(caps.serviceID == expectedID)
+                #expect(caps.discordApproval)
+                #expect(caps.contentReview && caps.durableHistory)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+            }
+            try await app.testing().test(.GET, "/api/sites/archives", headers: bearerHeaders("quasar-owner-token")) { response in
+                #expect(response.status == .ok)
+            }
+            // Internal routes do not accept the operator token.
+            try await app.testing().test(.GET, "/internal/quasar/preview/authorize", headers: bearerHeaders("quasar-owner-token")) { response in
+                #expect(response.status == .notFound || response.status == .unauthorized)
+            }
+        }
+    }
+
+    @Test func quasarProposalApprovalIgnoresCallerPermissionClaims() async throws {
+        try await withApp(token: "operator-token", dryRun: true, quasarToken: "quasar-owner-token") { app in
+            let service = try await app.quasarServiceProvider.value()
+            let facts = QuasarAuthorizationFacts.current(guildID: "test-guild", initiatorID: "test-user",
+                discordPermissionAllowed: true, environment: ["DISCORD_OPERATOR_USER_IDS": "test-user",
+                    "ABBEY_QUASAR_GUILD_IDS": "test-guild", "ABBEY_QUASAR_GUILD_BUDGET": "2"])
+            _ = await service.handleDiscord(.init(action: .create, name: "Proposal", prompt: "test",
+                initiatorID: "test-user", guildID: "test-guild", managerAuthorized: true), facts: facts)
+            let proposal = try #require(await service.pendingDiscordProposals().first)
+            var headers = bearerHeaders("quasar-owner-token")
+            headers.replaceOrAdd(name: .contentType, value: "application/json")
+            let body = "{\"digest\":\"\(proposal.digest)\",\"discordPermissionAllowed\":true,\"ownerAllowed\":true,\"guildOptedIn\":true,\"quiet\":false,\"remainingBudget\":999}"
+            try await app.testing().test(.POST, "/api/quasar/proposals/\(proposal.id)/approve", headers: headers, body: jsonBody(body)) { response in
+                // No connected Discord runtime means fresh authorization fails closed.
+                #expect(response.status == .forbidden || response.status == .conflict)
+            }
+            #expect(await service.listSites().isEmpty)
+        }
+    }
+
     @Test func quasarAPIRequiresDedicatedTokenAndRejectsUnallowlistedOrigins() async throws {
         try await withApp(token: "operator-token", quasarToken: "quasar-owner-token") { app in
             try await app.testing().test(.GET, "/api/sites") { response in
@@ -252,6 +301,11 @@ struct AbbeyServerAuthTests {
                 headers: bearerHeaders("quasar-only-token")
             ) { response in
                 #expect(response.status == .ok)
+            }
+            try await app.testing().test(.GET, "/api/quasar/capabilities", headers: bearerHeaders("quasar-only-token")) { response in
+                #expect(response.status == .ok)
+                let caps = try JSONDecoder().decode(QuasarCapabilities.self, from: Data(response.body.readableBytesView))
+                #expect(!caps.discordApproval)
             }
             try await app.testing().test(.GET, "/health") { response in
                 #expect(response.status == .notFound)

@@ -34,6 +34,8 @@ struct SettingsView: View {
                 if config.inferenceMode == .remoteCompatible {
                     TextField("Remote endpoint", text: $config.remoteEndpoint, prompt: Text("https://your-endpoint/v1/chat/completions"))
                         .textFieldStyle(.roundedBorder)
+                    TextField("Model identity", text: $config.remoteModel)
+                    SecureField("Provider bearer token", text: $config.remoteAPIToken)
                     Text("Env: ABBEY_REMOTE_ENDPOINT")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -43,6 +45,17 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            Section("Quasar service") {
+                Picker("Backend (after restart)", selection: $config.quasarBackend) {
+                    Text("Local service").tag(QuasarBackend.local)
+                    Text("Remote service").tag(QuasarBackend.remote)
+                }
+                TextField("Quasar endpoint", text: $config.quasarEndpoint)
+                SecureField("Dedicated Quasar API token", text: $config.quasarAPIToken)
+                Text("Restart Abbey to apply backend settings. Quasar credentials are stored in Keychain and are separate from sync settings.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Timing") {

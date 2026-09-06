@@ -41,6 +41,8 @@ public actor QuasarService {
     public let preview: QuasarPreviewManager
     private let planner: QuasarPlanner
     private let executor: QuasarMutationExecutor
+    private let historyStore: QuasarHistoryStore
+    private let dependencies: QuasarDependencyPreparer
     private let scaffolder: QuasarScaffolder
     private let home: URL
     private let sitesRoot: URL
@@ -48,12 +50,16 @@ public actor QuasarService {
     private let archiveRoot: URL
     private var proposalOperations: [UUID: DiscordQuasarRequest] = [:]
     private var consumedGuildBudget: [String: Int] = [:]
+    private var activeEffects = Set<String>()
+    private var effectDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var preparations: [String: QuasarDependencyPreparation] = [:]
     private var isShuttingDown = false
 
     public init(
         home: URL = QuasarRegistry.defaultHome(),
         planner: QuasarPlanner,
-        preview: QuasarPreviewManager = QuasarPreviewManager()
+        preview: QuasarPreviewManager = QuasarPreviewManager(),
+        dependencies: QuasarDependencyPreparer = QuasarDependencyPreparer()
     ) throws {
         self.home = home.standardizedFileURL
         self.sitesRoot = self.home.appendingPathComponent("sites", isDirectory: true)
@@ -65,10 +71,13 @@ public actor QuasarService {
         self.preview = preview
         self.planner = planner
         self.executor = QuasarMutationExecutor()
+        self.historyStore = try QuasarHistoryStore(home: self.home)
+        self.dependencies = dependencies
         self.scaffolder = try QuasarScaffolder()
     }
 
     public func listSites() async -> [Site] { await registry.list() }
+    public func serviceIdentity() async throws -> String { await registry.serviceIdentity() }
     public func site(id: String) async throws -> Site {
         guard let site = await registry.site(id: id) else { throw QuasarError.notFound }
         return site
@@ -80,10 +89,16 @@ public actor QuasarService {
         let site = try await registry.reserve(name: name, prompt: prompt)
         let root = siteRoot(site)
         do {
+            guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
             try scaffolder.scaffold(at: root, installDependencies: installDependencies)
             try await coordinator.start(site: site, prompt: prompt, siteRoot: root, registry: registry, planner: planner, executor: executor)
+            guard !isShuttingDown else {
+                await coordinator.discard(siteID: site.id)
+                throw QuasarError.processFailed("Quasar service is shut down")
+            }
             return site
         } catch {
+            await coordinator.discard(siteID: site.id)
             try? archivePartial(root: root, slug: site.slug)
             _ = try? await registry.remove(id: site.id)
             throw error
@@ -93,10 +108,21 @@ public actor QuasarService {
     @discardableResult
     public func edit(id: String, prompt: String) async throws -> Site {
         guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        try requireResolvedRecovery(siteID: id)
+        guard beginEffect(siteID: id) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: id) }
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await registry.beginEdit(id: id, prompt: prompt)
+        preparations[id] = nil
         do {
+            guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
             try await coordinator.start(site: site, prompt: prompt, siteRoot: siteRoot(site), registry: registry, planner: planner, executor: executor)
+            guard !isShuttingDown else {
+                await coordinator.discard(siteID: id)
+                throw QuasarError.processFailed("Quasar service is shut down")
+            }
         } catch {
+            await coordinator.discard(siteID: id)
             try? await registry.finish(id: id, error: error.localizedDescription)
             throw error
         }
@@ -108,16 +134,79 @@ public actor QuasarService {
         return await coordinator.pending(siteID: id)
     }
 
+    public func pendingReview(id: String) async throws -> QuasarPlanReview? {
+        _ = try await site(id: id)
+        return await coordinator.pendingReview(siteID: id)
+    }
+
+    public func history(id: String) throws -> [QuasarHistoryRecord] {
+        try historyStore.history(siteID: id)
+    }
+
+    public func reconcileRecovery(
+        id: String,
+        recordID: String,
+        resolution: QuasarRecoveryResolution
+    ) throws -> QuasarHistoryRecord {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        return try historyStore.reconcile(siteID: id, recordID: recordID, resolution: resolution)
+    }
+
     public func approve(id: String, planDigest: String) async throws -> QuasarMutationReceipt {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await site(id: id)
-        return try await coordinator.approve(
+        try requireResolvedRecovery(siteID: id)
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        guard beginEffect(siteID: id) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: id) }
+        guard let review = await coordinator.pendingReview(siteID: id),
+              review.planDigest == planDigest
+        else {
+            return try await coordinator.approve(
+                siteID: id,
+                expectedDigest: planDigest,
+                siteRoot: siteRoot(site),
+                rollbackRoot: rollbackRoot,
+                registry: registry,
+                executor: executor
+            )
+        }
+        try await retirePreviewBeforeSiteWrite(siteID: id)
+        let operation = try historyStore.begin(
             siteID: id,
-            expectedDigest: planDigest,
-            siteRoot: siteRoot(site),
-            rollbackRoot: rollbackRoot,
-            registry: registry,
-            executor: executor
+            generationID: review.generationID,
+            kind: .mutation,
+            planDigest: review.planDigest,
+            dependencyFingerprint: review.dependencyFingerprint,
+            paths: review.files.map(\.path)
         )
+        do {
+            let receipt = try await coordinator.approve(
+                siteID: id,
+                expectedDigest: planDigest,
+                siteRoot: siteRoot(site),
+                rollbackRoot: rollbackRoot,
+                registry: registry,
+                executor: executor
+            )
+            _ = try historyStore.finish(operation.id, siteID: id, status: .succeeded)
+            preparations[id] = nil
+            return receipt
+        } catch {
+            let safeFailure = error as? QuasarError
+            let status: QuasarHistoryRecord.Status = switch safeFailure {
+            case .proposalChanged?, .proposalExpired?, .jobRunning?, .notFound?: .failed
+            default: .uncertain
+            }
+            let problem: QuasarRecoveryProblem? = status == .uncertain
+                ? .init(
+                    code: .outcomePersistenceFailed,
+                    message: "Mutation approval did not produce a durable confirmed outcome. Inspect the site and rollback evidence before continuing."
+                )
+                : nil
+            _ = try? historyStore.finish(operation.id, siteID: id, status: status, problem: problem)
+            throw error
+        }
     }
 
     public func reject(id: String) async throws {
@@ -126,16 +215,49 @@ public actor QuasarService {
     }
 
     public func rollback(id: String, planDigest: String) async throws -> QuasarRollbackReceipt {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await site(id: id)
+        try requireResolvedRecovery(siteID: id)
         guard site.status == .idle, await coordinator.pending(siteID: id) == nil else {
             throw QuasarError.jobRunning
         }
-        return try await executor.rollback(
-            planDigest: planDigest,
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        guard beginEffect(siteID: id) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: id) }
+        guard let mutation = try historyStore.currentMutation(siteID: id),
+              mutation.planDigest == planDigest
+        else {
+            throw QuasarError.notFound
+        }
+        let prior = try historyStore.history(siteID: id)
+        guard !prior.contains(where: {
+            $0.kind == .rollback && $0.planDigest == planDigest && $0.status == .succeeded
+        }) else { throw QuasarError.proposalChanged }
+        try await retirePreviewBeforeSiteWrite(siteID: id)
+        let operation = try historyStore.begin(
             siteID: id,
-            siteRoot: siteRoot(site),
-            rollbackRoot: rollbackRoot
+            kind: .rollback,
+            planDigest: planDigest,
+            paths: mutation.paths
         )
+        do {
+            let receipt = try await executor.rollback(
+                planDigest: planDigest,
+                siteID: id,
+                siteRoot: siteRoot(site),
+                rollbackRoot: rollbackRoot
+            )
+            _ = try historyStore.finish(operation.id, siteID: id, status: .succeeded)
+            preparations[id] = nil
+            return receipt
+        } catch {
+            let status: QuasarHistoryRecord.Status = error is QuasarError ? .failed : .uncertain
+            let problem: QuasarRecoveryProblem? = status == .uncertain
+                ? .init(code: .rollbackIntegrityFailed, message: "Rollback outcome is uncertain; inspect the site and snapshot before continuing.")
+                : nil
+            _ = try? historyStore.finish(operation.id, siteID: id, status: status, problem: problem)
+            throw error
+        }
     }
 
     public func handleDiscord(
@@ -196,13 +318,32 @@ public actor QuasarService {
         digest: String,
         revalidated facts: QuasarAuthorizationFacts
     ) async throws -> String {
-        var debitedGuild: String?
+        try await approveDiscordProposal(id: id, digest: digest, revalidated: facts, beforeAuthorization: {})
+    }
+
+    // An internal suspension seam lets tests hold admission while another
+    // approval arrives, without blocking a cooperative executor thread.
+    func approveDiscordProposal(
+        id: UUID,
+        digest: String,
+        revalidated facts: QuasarAuthorizationFacts,
+        beforeAuthorization: @Sendable () async -> Void
+    ) async throws -> String {
+        var reservedGuild: String?
+        var authorizationCommitted = false
         do {
             let currentFacts = effectiveFacts(facts)
+            guard currentFacts.permitsMutation else {
+                throw QuasarError.authorizationDenied("current guild policy facts do not permit approval")
+            }
+            // Reserve before the first actor suspension so concurrent approvals
+            // cannot spend the same remaining guild budget.
+            consumedGuildBudget[facts.guildID, default: 0] += 1
+            reservedGuild = facts.guildID
+            await beforeAuthorization()
             let proposal = try await proposals.approve(id: id, digest: digest, revalidated: currentFacts, desktopConfirmed: true)
+            authorizationCommitted = true
             guard let request = proposalOperations.removeValue(forKey: id) else { throw QuasarError.proposalChanged }
-            consumedGuildBudget[proposal.facts.guildID, default: 0] += 1
-            debitedGuild = proposal.facts.guildID
             switch proposal.action {
             case .create:
                 guard let name = request.name, let prompt = request.prompt else { throw QuasarError.invalidInput("name and prompt are required") }
@@ -226,8 +367,10 @@ public actor QuasarService {
                 return "Preview stopped."
             }
         } catch {
-            if let debitedGuild {
-                consumedGuildBudget[debitedGuild] = max((consumedGuildBudget[debitedGuild] ?? 1) - 1, 0)
+            // After authorization an effect can have committed despite a lost
+            // receipt. Retain its debit; only failed authorization is refundable.
+            if !authorizationCommitted, let reservedGuild {
+                consumedGuildBudget[reservedGuild] = max((consumedGuildBudget[reservedGuild] ?? 1) - 1, 0)
             }
             proposalOperations[id] = nil
             throw error
@@ -249,11 +392,54 @@ public actor QuasarService {
         return await preview.status(siteID: id)
     }
 
+    public func preparePreview(id: String) async throws -> QuasarDependencyPreparation {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        let site = try await site(id: id)
+        try requireResolvedRecovery(siteID: id)
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        guard beginEffect(siteID: id) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: id) }
+        guard let mutation = try historyStore.currentMutation(siteID: id),
+              let generation = mutation.generationID,
+              let fingerprint = mutation.dependencyFingerprint
+        else {
+            throw QuasarError.authorizationDenied("approve a reviewed generation before preparing its preview")
+        }
+        try await retirePreviewBeforeSiteWrite(siteID: id)
+        let preparation = try await dependencies.prepare(
+            siteID: id,
+            generation: generation,
+            siteRoot: siteRoot(site),
+            reviewedFingerprint: fingerprint
+        )
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        preparations[id] = preparation
+        return preparation
+    }
+
     public func startPreview(id: String) async throws -> PreviewStatus {
         guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         let site = try await site(id: id)
+        try requireResolvedRecovery(siteID: id)
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        guard beginEffect(siteID: id) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: id) }
         guard site.status == .idle, await coordinator.pending(siteID: id) == nil else {
             throw QuasarError.authorizationDenied("approve or reject the pending mutation before preview")
+        }
+        guard let mutation = try historyStore.currentMutation(siteID: id),
+              let generation = mutation.generationID,
+              let fingerprint = mutation.dependencyFingerprint,
+              let preparation = preparations[id],
+              preparation.generation == generation,
+              preparation.fingerprint == fingerprint,
+              try QuasarDependencyFingerprint.capture(siteRoot: siteRoot(site)) == fingerprint
+        else {
+            throw QuasarError.authorizationDenied("prepare the approved dependency inputs before preview")
+        }
+        if let active = await preview.access.current(), active.siteID != id {
+            guard !activeEffects.contains(active.siteID) else { throw QuasarError.jobRunning }
+            _ = try await stopPreview(id: active.siteID)
         }
         let used = Set((await registry.list()).compactMap(\.previewPort))
         guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
@@ -267,7 +453,12 @@ public actor QuasarService {
             try await registry.clearPreviewPort(id: id, ifMatching: port)
             throw QuasarError.processFailed("Quasar service is shut down")
         }
-        let status = await preview.start(siteID: id, siteRoot: siteRoot(site), port: port)
+        let status = await preview.start(
+            siteID: id,
+            generation: generation,
+            siteRoot: siteRoot(site),
+            port: port
+        )
         if isShuttingDown || status.state != .running {
             try await registry.clearPreviewPort(id: id, ifMatching: port)
         }
@@ -284,12 +475,86 @@ public actor QuasarService {
         return await preview.status(siteID: id)
     }
 
+    public func previewSession(id: String) async throws -> QuasarPreviewTicket {
+        _ = try await site(id: id)
+        guard let active = await preview.activePreview(siteID: id) else {
+            throw QuasarError.authorizationDenied("preview generation is not active")
+        }
+        return try await preview.access.issue(siteID: id, generation: active.generation)
+    }
+
+    public func redeemPreviewTicket(
+        _ token: String,
+        host: String
+    ) async throws -> QuasarPreviewCookieGrant {
+        try await preview.access.redeem(ticket: token, host: host)
+    }
+
+    public func authorizePreview(
+        host: String,
+        cookieHeader: String
+    ) async throws -> QuasarPreviewAuthorization {
+        try await preview.access.authorize(host: host, cookieHeader: cookieHeader)
+    }
+
     public func archive(id: String) async throws -> QuasarArchiveReceipt {
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        _ = try await site(id: id)
+        try requireResolvedRecovery(siteID: id)
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        guard beginEffect(siteID: id) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: id) }
+        let operation = try historyStore.begin(siteID: id, kind: .archive, paths: [])
+        do {
+            let receipt = try await performArchive(id: id)
+            _ = try historyStore.finish(operation.id, siteID: id, status: .succeeded)
+            return receipt
+        } catch {
+            _ = try? historyStore.finish(
+                operation.id,
+                siteID: id,
+                status: .uncertain,
+                problem: .init(
+                    code: .archiveIntegrityFailed,
+                    message: "Archive did not produce a durable confirmed outcome. Inspect the active site, archive directory, and receipt before continuing."
+                )
+            )
+            throw error
+        }
+    }
+
+    public func archives() throws -> [QuasarArchiveReceipt] {
+        guard FileManager.default.fileExists(atPath: archiveRoot.path) else { return [] }
+        let sidecars = try FileManager.default.contentsOfDirectory(
+            at: archiveRoot,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        ).filter { $0.lastPathComponent.hasSuffix(".receipt.json") }
+        var verified: [QuasarArchiveReceipt] = []
+        for sidecar in sidecars {
+            guard let values = try? sidecar.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true,
+                  values.isSymbolicLink != true,
+                  let data = try? Data(contentsOf: sidecar),
+                  data.count <= 1_048_576,
+                  let record = try? JSONDecoder().decode(QuasarArchivedSiteRecord.self, from: data),
+                  Self.isVerifiedArchiveRecord(record, archiveRoot: archiveRoot, sidecar: sidecar)
+            else { continue }
+            verified.append(record.receipt)
+        }
+        return verified.sorted {
+            if $0.archivedAt != $1.archivedAt { return $0.archivedAt > $1.archivedAt }
+            return $0.archiveName < $1.archiveName
+        }
+    }
+
+    private func performArchive(id: String) async throws -> QuasarArchiveReceipt {
         let site = try await site(id: id)
         await coordinator.discard(siteID: id)
         guard await preview.stop(siteID: id) else {
             throw QuasarError.processFailed("preview process did not stop; archive stayed in place")
         }
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
         try FileManager.default.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let archiveName = "\(stamp)-\(site.slug)"
@@ -301,6 +566,7 @@ public actor QuasarService {
         else { throw QuasarError.notFound }
         try FileManager.default.moveItem(at: source, to: destination)
         do {
+            try Self.pruneReproducibleDirectories(root: destination)
             let contentDigest = try Self.treeDigest(root: destination)
             let digest = Self.archiveDigest(
                 siteID: site.id,
@@ -323,6 +589,7 @@ public actor QuasarService {
                 to: archiveRoot.appendingPathComponent("\(archiveName).receipt.json")
             )
             _ = try await registry.remove(id: id)
+            preparations[id] = nil
             return receipt
         } catch {
             if FileManager.default.fileExists(atPath: destination.path),
@@ -342,17 +609,39 @@ public actor QuasarService {
     /// used: the archive name is a bounded basename and every resolved path is
     /// required to remain beneath the Quasar archive root.
     public func restore(_ receipt: QuasarArchiveReceipt) async throws -> Site {
-        guard Self.isSafeArchiveName(receipt.archiveName),
-              receipt.slug == QuasarSlug.make(receipt.slug),
-              Self.isDigest(receipt.contentDigest),
-              Self.archiveDigest(
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+        try Self.validateArchiveReceipt(receipt)
+        try requireResolvedRecovery(siteID: receipt.siteID)
+        guard beginEffect(siteID: receipt.siteID) else { throw QuasarError.jobRunning }
+        defer { endEffect(siteID: receipt.siteID) }
+        let operation = try historyStore.begin(siteID: receipt.siteID, kind: .restore, paths: [])
+        do {
+            let site = try await performRestore(receipt)
+            _ = try historyStore.finish(operation.id, siteID: receipt.siteID, status: .succeeded)
+            return site
+        } catch {
+            let safeFailure = error as? QuasarError
+            let status: QuasarHistoryRecord.Status = switch safeFailure {
+            case .invalidInput?, .notFound?, .proposalChanged?, .authorizationDenied?: .failed
+            default: .uncertain
+            }
+            _ = try? historyStore.finish(
+                operation.id,
                 siteID: receipt.siteID,
-                slug: receipt.slug,
-                archivedAt: receipt.archivedAt,
-                archiveName: receipt.archiveName,
-                contentDigest: receipt.contentDigest
-              ) == receipt.archiveDigest
-        else { throw QuasarError.invalidInput("archive receipt failed verification") }
+                status: status,
+                problem: status == .uncertain
+                    ? .init(
+                        code: .archiveIntegrityFailed,
+                        message: "Restore did not produce a durable confirmed outcome. Inspect the archive, active site, and registry before continuing."
+                    )
+                    : nil
+            )
+            throw error
+        }
+    }
+
+    private func performRestore(_ receipt: QuasarArchiveReceipt) async throws -> Site {
+        try Self.validateArchiveReceipt(receipt)
         let source = archiveRoot.appendingPathComponent(receipt.archiveName, isDirectory: true)
         let sidecar = archiveRoot.appendingPathComponent("\(receipt.archiveName).receipt.json")
         try Self.requireContained(source, by: archiveRoot)
@@ -388,15 +677,79 @@ public actor QuasarService {
         isShuttingDown = true
         await coordinator.shutdown(registry: registry)
         await preview.shutdown()
+        if !activeEffects.isEmpty {
+            await withCheckedContinuation { continuation in
+                effectDrainWaiters.append(continuation)
+            }
+        }
     }
 
     private func siteRoot(_ site: Site) -> URL { sitesRoot.appendingPathComponent(site.slug, isDirectory: true) }
+
+    private func requireResolvedRecovery(siteID: String) throws {
+        guard try !historyStore.hasUnresolvedRecovery(siteID: siteID) else {
+            throw QuasarError.authorizationDenied(
+                "resolve the site's uncertain recovery record before starting another effect"
+            )
+        }
+    }
+
+    private func beginEffect(siteID: String) -> Bool {
+        activeEffects.insert(siteID).inserted
+    }
+
+    private func endEffect(siteID: String) {
+        activeEffects.remove(siteID)
+        if activeEffects.isEmpty, !effectDrainWaiters.isEmpty {
+            let waiters = effectDrainWaiters
+            effectDrainWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    /// Preview access is retired before termination begins. A site write may
+    /// proceed only after the manager proves the owned process group exited and
+    /// the registry no longer advertises its port.
+    private func retirePreviewBeforeSiteWrite(siteID: String) async throws {
+        guard await preview.stop(siteID: siteID) else {
+            throw QuasarError.processFailed("preview process did not stop; site stayed unchanged")
+        }
+        try await registry.setPreviewPort(id: siteID, port: nil)
+        guard await preview.activePreview(siteID: siteID) == nil else {
+            throw QuasarError.processFailed("preview access did not retire; site stayed unchanged")
+        }
+        guard !isShuttingDown else { throw QuasarError.processFailed("Quasar service is shut down") }
+    }
 
     private func archivePartial(root: URL, slug: String) throws {
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         try FileManager.default.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
         let destination = archiveRoot.appendingPathComponent("failed-\(UUID().uuidString)-\(slug)", isDirectory: true)
         try FileManager.default.moveItem(at: root, to: destination)
+    }
+
+    private static func pruneReproducibleDirectories(root: URL) throws {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        ) else { throw QuasarError.invalidInput("archive directory is unavailable") }
+        var excluded: [URL] = []
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { continue }
+            if values.isDirectory == true,
+               url.lastPathComponent == "node_modules"
+                   || url.lastPathComponent == ".next"
+                   || url.lastPathComponent == ".quasar-runtime"
+            {
+                enumerator.skipDescendants()
+                excluded.append(url)
+            }
+        }
+        for url in excluded.sorted(by: { $0.path.count > $1.path.count }) {
+            try FileManager.default.removeItem(at: url)
+        }
     }
 
     private static func archiveDigest(
@@ -410,6 +763,41 @@ public actor QuasarService {
             "\(siteID)|\(slug)|\(archivedAt)|\(archiveName)|\(contentDigest)".utf8
         ))
             .map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isVerifiedArchiveRecord(
+        _ record: QuasarArchivedSiteRecord,
+        archiveRoot: URL,
+        sidecar: URL
+    ) -> Bool {
+        let receipt = record.receipt
+        guard (try? validateArchiveReceipt(receipt)) != nil,
+              receipt.siteID == record.site.id,
+              receipt.slug == record.site.slug,
+              sidecar.lastPathComponent == "\(receipt.archiveName).receipt.json"
+        else { return false }
+        let tree = archiveRoot.appendingPathComponent(receipt.archiveName, isDirectory: true)
+        guard (try? requireContained(tree, by: archiveRoot)) != nil,
+              (try? requireContained(sidecar, by: archiveRoot)) != nil,
+              let digest = try? treeDigest(root: tree),
+              digest == receipt.contentDigest
+        else { return false }
+        return true
+    }
+
+    private static func validateArchiveReceipt(_ receipt: QuasarArchiveReceipt) throws {
+        guard isSafeArchiveName(receipt.archiveName),
+              isSafeIdentifier(receipt.siteID),
+              receipt.slug == QuasarSlug.make(receipt.slug),
+              isDigest(receipt.contentDigest),
+              archiveDigest(
+                  siteID: receipt.siteID,
+                  slug: receipt.slug,
+                  archivedAt: receipt.archivedAt,
+                  archiveName: receipt.archiveName,
+                  contentDigest: receipt.contentDigest
+              ) == receipt.archiveDigest
+        else { throw QuasarError.invalidInput("archive receipt failed verification") }
     }
 
     private static func treeDigest(root: URL) throws -> String {
@@ -498,6 +886,13 @@ public actor QuasarService {
         return value.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" || $0 == "."
         }
+    }
+
+    private static func isSafeIdentifier(_ value: String) -> Bool {
+        (1...128).contains(value.utf8.count)
+            && value.allSatisfy {
+                $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ".")
+            }
     }
 
     private static func isDigest(_ value: String) -> Bool {

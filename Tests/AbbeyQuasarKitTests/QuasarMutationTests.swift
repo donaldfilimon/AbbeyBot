@@ -157,4 +157,36 @@ struct QuasarMutationTests {
         }
         #expect(try String(contentsOf: page, encoding: .utf8) == "newer-unrelated-work")
     }
+
+    @Test func rollbackRefusesToOverwriteWorkChangedAfterTheApprovedMutation() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let site = base.appendingPathComponent("site")
+        let rollback = base.appendingPathComponent("rollback")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: site, withIntermediateDirectories: true)
+        let page = site.appendingPathComponent("page.txt")
+        try Data("before".utf8).write(to: page)
+        let executor = QuasarMutationExecutor()
+        let receipt = try await executor.apply(
+            .init(
+                summary: "replace",
+                operations: [.write(path: "page.txt", content: "approved")],
+                idempotencyKey: "postimage"
+            ),
+            siteID: "site",
+            to: site,
+            rollbackRoot: rollback
+        )
+        try Data("operator work".utf8).write(to: page, options: .atomic)
+
+        await #expect(throws: QuasarError.proposalChanged) {
+            _ = try await executor.rollback(
+                planDigest: receipt.planDigest,
+                siteID: "site",
+                siteRoot: site,
+                rollbackRoot: rollback
+            )
+        }
+        #expect(try String(contentsOf: page, encoding: .utf8) == "operator work")
+    }
 }

@@ -112,6 +112,18 @@ public actor BotRuntime {
     public let inferenceRouter: InferenceRouter
     public let knowledgeIndex: KnowledgeIndex
     public let knowledgeInitializationError: String?
+    /// Payloads and permission facts are resolved on this service, never supplied by a desktop.
+    public func approveDiscordQuasarProposal(id: UUID, digest: String) async throws {
+        guard let service = quasarService,
+              let proposal = await service.pendingDiscordProposals().first(where: { $0.id == id }),
+              proposal.digest == digest else { throw QuasarError.proposalChanged }
+        let permission = await discordBridge.currentManagerAuthorization(
+            guildID: proposal.facts.guildID, userID: proposal.facts.initiatorID)
+        let facts = QuasarAuthorizationFacts.current(guildID: proposal.facts.guildID,
+            initiatorID: proposal.facts.initiatorID, discordPermissionAllowed: permission)
+        _ = try await service.approveDiscordProposal(id: id, digest: digest, revalidated: facts)
+    }
+
     public let quasarService: QuasarService?
     public let quasarInitializationError: String?
     let discordBridge = DiscordBridge()
@@ -167,7 +179,9 @@ public actor BotRuntime {
             eventBus: bus,
             metrics: metrics,
             currentMode: { config.inferenceMode },
-            remoteEndpoint: { config.remoteEndpoint }
+            remoteEndpoint: { config.remoteEndpoint },
+            remoteModel: { config.remoteModel },
+            remoteAPIToken: { config.remoteAPIToken }
         )
         self.inferenceRouter = inferenceRouter
         do {
@@ -204,7 +218,7 @@ public actor BotRuntime {
         await socialBrain.warmCache()
         await scheduler.start()
         let twitchToken = config.twitchOAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !twitchToken.isEmpty {
+        if !config.dryRun, !twitchToken.isEmpty {
             let hooks = TwitchEventHooks { [weak self] msg in
                 guard let self else { return }
                 await self.handleTwitchChat(login: msg.login, channel: msg.channel, text: msg.text)

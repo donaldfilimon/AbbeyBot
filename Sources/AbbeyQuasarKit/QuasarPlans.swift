@@ -45,6 +45,73 @@ public struct QuasarMutationReceipt: Codable, Equatable, Sendable {
     public var rollbackDirectory: String
 }
 
+public struct QuasarFileReview: Codable, Equatable, Sendable {
+    public var kind: QuasarMutationChange.Kind
+    public var path: String
+    /// Complete bounded UTF-8 content. `nil` means the file did not exist.
+    public var before: String?
+    /// Complete bounded UTF-8 content. `nil` means approval removes the file.
+    public var after: String?
+
+    public init(kind: QuasarMutationChange.Kind, path: String, before: String?, after: String?) {
+        self.kind = kind
+        self.path = path
+        self.before = before
+        self.after = after
+    }
+}
+
+public struct QuasarPlanReview: Codable, Equatable, Sendable {
+    public var siteID: String
+    public var generationID: String
+    public var summary: String
+    public var planDigest: String
+    public var files: [QuasarFileReview]
+    public var dependencyFingerprint: QuasarDependencyFingerprint
+    public var totalBeforeBytes: Int
+    public var totalAfterBytes: Int
+    public var createdAt: Date
+    public var expiresAt: Date
+
+    public init(
+        siteID: String,
+        generationID: String,
+        summary: String,
+        planDigest: String,
+        files: [QuasarFileReview],
+        dependencyFingerprint: QuasarDependencyFingerprint,
+        totalBeforeBytes: Int,
+        totalAfterBytes: Int,
+        createdAt: Date,
+        expiresAt: Date
+    ) {
+        self.siteID = siteID
+        self.generationID = generationID
+        self.summary = summary
+        self.planDigest = planDigest
+        self.files = files
+        self.dependencyFingerprint = dependencyFingerprint
+        self.totalBeforeBytes = totalBeforeBytes
+        self.totalAfterBytes = totalAfterBytes
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+    }
+
+    public var preview: QuasarMutationPreview {
+        .init(
+            siteID: siteID,
+            summary: summary,
+            planDigest: planDigest,
+            changes: files.map {
+                .init(kind: $0.kind, path: $0.path, byteCount: $0.after?.utf8.count ?? 0)
+            },
+            totalWriteBytes: totalAfterBytes,
+            createdAt: createdAt,
+            expiresAt: expiresAt
+        )
+    }
+}
+
 public struct QuasarRollbackReceipt: Codable, Equatable, Sendable {
     public var planDigest: String
     public var restoredPaths: [String]
@@ -57,6 +124,7 @@ private struct QuasarRollbackManifest: Codable {
         var existedBefore: Bool
         var byteCount: Int
         var sha256: String?
+        var postSHA256: String?
     }
     var siteID: String
     var planDigest: String
@@ -112,6 +180,10 @@ public actor QuasarMutationExecutor {
         var siteID: String
         var idempotencyKey: String
     }
+    private struct Completion: Sendable {
+        var planMaterialDigest: String
+        var receipt: QuasarMutationReceipt
+    }
 
     public struct Limits: Sendable {
         public var maximumOperations = 32
@@ -120,7 +192,7 @@ public actor QuasarMutationExecutor {
         public init() {}
     }
     private let limits: Limits
-    private var completed: [CompletionKey: QuasarMutationReceipt] = [:]
+    private var completed: [CompletionKey: Completion] = [:]
     public init(limits: Limits = .init()) { self.limits = limits }
 
     public func validate(
@@ -130,7 +202,26 @@ public actor QuasarMutationExecutor {
         createdAt: Date = Date(),
         lifetime: Duration = .seconds(300)
     ) throws -> QuasarMutationPreview {
+        try review(
+            plan,
+            siteID: siteID,
+            generationID: Self.legacyGenerationID(plan.idempotencyKey),
+            siteRoot: siteRoot,
+            createdAt: createdAt,
+            lifetime: lifetime
+        ).preview
+    }
+
+    public func review(
+        _ plan: QuasarMutationPlan,
+        siteID: String,
+        generationID: String,
+        siteRoot: URL,
+        createdAt: Date = Date(),
+        lifetime: Duration = .seconds(300)
+    ) throws -> QuasarPlanReview {
         let siteID = try Self.checkedSiteID(siteID)
+        let generationID = try Self.checkedGenerationID(generationID)
         guard !plan.idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw QuasarError.malformedPlan("idempotency key is required")
         }
@@ -144,27 +235,28 @@ public actor QuasarMutationExecutor {
 
         let guarder = try QuasarPathGuard(root: siteRoot)
         var seen = Set<String>()
-        var total = 0
-        var rollbackBytes = 0
-        var changes: [QuasarMutationChange] = []
+        var totalAfter = 0
+        var totalBefore = 0
+        var files: [QuasarFileReview] = []
         for operation in plan.operations {
             let path: String
             let kind: QuasarMutationChange.Kind
-            let byteCount: Int
+            let after: String?
             switch operation {
             case .write(let value, let content):
                 path = value
                 kind = .write
-                byteCount = content.utf8.count
-                guard byteCount <= limits.maximumFileBytes else { throw QuasarError.fileTooLarge }
-                total += byteCount
-                guard total <= limits.maximumTotalBytes else { throw QuasarError.budgetExceeded("total bytes") }
+                after = content
+                guard content.utf8.count <= limits.maximumFileBytes else { throw QuasarError.fileTooLarge }
+                totalAfter += content.utf8.count
+                guard totalAfter <= limits.maximumTotalBytes else { throw QuasarError.budgetExceeded("total bytes") }
             case .remove(let value):
                 path = value
                 kind = .remove
-                byteCount = 0
+                after = nil
             }
             let destination = try guarder.resolve(path)
+            let before: String?
             if FileManager.default.fileExists(atPath: destination.path) {
                 let values = try destination.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
                 guard values.isRegularFile == true,
@@ -173,27 +265,52 @@ public actor QuasarMutationExecutor {
                 else {
                     throw QuasarError.pathRejected("mutation targets must be regular files")
                 }
-                rollbackBytes += existingBytes
-                guard rollbackBytes <= limits.maximumTotalBytes else {
+                let data = try Data(contentsOf: destination)
+                guard data.count == existingBytes,
+                      let content = String(data: data, encoding: .utf8)
+                else { throw QuasarError.malformedPlan("mutation targets must contain valid UTF-8") }
+                totalBefore += data.count
+                guard totalBefore <= limits.maximumTotalBytes else {
                     throw QuasarError.budgetExceeded("rollback snapshot bytes")
                 }
+                before = content
+            } else {
+                before = nil
             }
             guard seen.insert(destination.path).inserted else {
                 throw QuasarError.malformedPlan("duplicate operation destination: \(path)")
             }
-            changes.append(.init(kind: kind, path: path, byteCount: byteCount))
+            files.append(.init(kind: kind, path: path, before: before, after: after))
         }
 
-        let digest = try Self.digest(plan)
-        let seconds = lifetime.components.seconds
-        return QuasarMutationPreview(
+        let components = lifetime.components
+        let requestedLifetime = Double(components.seconds)
+            + Double(components.attoseconds) / 1e18
+        let expiresAt = createdAt.addingTimeInterval(min(max(requestedLifetime, 1), 300))
+        let dependencyFingerprint = try Self.dependencyFingerprint(
+            siteRoot: siteRoot,
+            operations: plan.operations
+        )
+        let digest = try Self.reviewDigest(
+            plan: plan,
             siteID: siteID,
+            generationID: generationID,
+            files: files,
+            dependencyFingerprint: dependencyFingerprint,
+            createdAt: createdAt,
+            expiresAt: expiresAt
+        )
+        return QuasarPlanReview(
+            siteID: siteID,
+            generationID: generationID,
             summary: plan.summary,
             planDigest: digest,
-            changes: changes,
-            totalWriteBytes: total,
+            files: files,
+            dependencyFingerprint: dependencyFingerprint,
+            totalBeforeBytes: totalBefore,
+            totalAfterBytes: totalAfter,
             createdAt: createdAt,
-            expiresAt: createdAt.addingTimeInterval(TimeInterval(seconds))
+            expiresAt: expiresAt
         )
     }
 
@@ -204,13 +321,46 @@ public actor QuasarMutationExecutor {
         rollbackRoot: URL
     ) throws -> QuasarMutationReceipt {
         let siteID = try Self.checkedSiteID(rawSiteID)
-        let planDigest = try Self.digest(plan)
+        let completionKey = CompletionKey(siteID: siteID, idempotencyKey: plan.idempotencyKey)
+        let planMaterialDigest = try Self.digest(plan)
+        if let prior = completed[completionKey] {
+            guard prior.planMaterialDigest == planMaterialDigest else { throw QuasarError.proposalChanged }
+            return prior.receipt
+        }
+        let approvedReview = try review(
+            plan,
+            siteID: siteID,
+            generationID: Self.legacyGenerationID(plan.idempotencyKey),
+            siteRoot: siteRoot
+        )
+        return try apply(
+            plan,
+            approvedReview: approvedReview,
+            to: siteRoot,
+            rollbackRoot: rollbackRoot
+        )
+    }
+
+    public func apply(
+        _ plan: QuasarMutationPlan,
+        approvedReview: QuasarPlanReview,
+        to siteRoot: URL,
+        rollbackRoot: URL,
+        now: Date = Date()
+    ) throws -> QuasarMutationReceipt {
+        let siteID = try Self.checkedSiteID(approvedReview.siteID)
+        _ = try Self.checkedGenerationID(approvedReview.generationID)
+        guard now < approvedReview.expiresAt else { throw QuasarError.proposalExpired }
+        let planMaterialDigest = try Self.digest(plan)
         let completionKey = CompletionKey(siteID: siteID, idempotencyKey: plan.idempotencyKey)
         if let prior = completed[completionKey] {
-            guard prior.planDigest == planDigest else { throw QuasarError.proposalChanged }
-            return prior
+            guard prior.planMaterialDigest == planMaterialDigest,
+                  prior.receipt.planDigest == approvedReview.planDigest
+            else { throw QuasarError.proposalChanged }
+            return prior.receipt
         }
-        _ = try validate(plan, siteID: siteID, siteRoot: siteRoot)
+        try verifyApprovedReview(plan, review: approvedReview, siteRoot: siteRoot)
+        let planDigest = approvedReview.planDigest
         let guarder = try QuasarPathGuard(root: siteRoot)
         let snapshot = rollbackRoot
             .appendingPathComponent(siteID, isDirectory: true)
@@ -255,7 +405,8 @@ public actor QuasarMutationExecutor {
                         path: path,
                         existedBefore: true,
                         byteCount: data.count,
-                        sha256: Self.sha256(data)
+                        sha256: Self.sha256(data),
+                        postSHA256: Self.postimageDigest(operation)
                     ))
                 } else {
                     originallyAbsent.insert(path)
@@ -263,7 +414,8 @@ public actor QuasarMutationExecutor {
                         path: path,
                         existedBefore: false,
                         byteCount: 0,
-                        sha256: nil
+                        sha256: nil,
+                        postSHA256: Self.postimageDigest(operation)
                     ))
                 }
             }
@@ -329,7 +481,7 @@ public actor QuasarMutationExecutor {
             changedPaths: changed,
             rollbackDirectory: snapshot.path
         )
-        completed[completionKey] = receipt
+        completed[completionKey] = .init(planMaterialDigest: planMaterialDigest, receipt: receipt)
         return receipt
     }
 
@@ -388,6 +540,15 @@ public actor QuasarMutationExecutor {
                 currentData = data
             } else {
                 currentData = nil
+            }
+            if let postimage = entry.postSHA256 {
+                if postimage == "absent" {
+                    guard currentData == nil else { throw QuasarError.proposalChanged }
+                } else {
+                    guard let currentData, Self.sha256(currentData) == postimage else {
+                        throw QuasarError.proposalChanged
+                    }
+                }
             }
 
             let restoredData: Data?
@@ -467,11 +628,147 @@ public actor QuasarMutationExecutor {
         return .init(planDigest: planDigest, restoredPaths: restored.sorted(), rolledBackAt: Date())
     }
 
+    private func verifyApprovedReview(
+        _ plan: QuasarMutationPlan,
+        review: QuasarPlanReview,
+        siteRoot: URL
+    ) throws {
+        guard (1...limits.maximumOperations).contains(plan.operations.count),
+              plan.operations.count == review.files.count,
+              plan.summary == review.summary,
+              !plan.idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              review.createdAt < review.expiresAt
+        else { throw QuasarError.proposalChanged }
+        let guarder = try QuasarPathGuard(root: siteRoot)
+        var seen = Set<String>()
+        var totalBefore = 0
+        var totalAfter = 0
+        for (operation, file) in zip(plan.operations, review.files) {
+            let expectedPath: String
+            let expectedKind: QuasarMutationChange.Kind
+            let expectedAfter: String?
+            switch operation {
+            case .write(let path, let content):
+                expectedPath = path
+                expectedKind = .write
+                expectedAfter = content
+                guard content.utf8.count <= limits.maximumFileBytes else { throw QuasarError.fileTooLarge }
+                totalAfter += content.utf8.count
+            case .remove(let path):
+                expectedPath = path
+                expectedKind = .remove
+                expectedAfter = nil
+            }
+            guard file.path == expectedPath,
+                  file.kind == expectedKind,
+                  file.after == expectedAfter,
+                  totalAfter <= limits.maximumTotalBytes
+            else { throw QuasarError.proposalChanged }
+            let destination = try guarder.resolve(file.path)
+            guard seen.insert(destination.path).inserted else { throw QuasarError.proposalChanged }
+            let current: String?
+            if FileManager.default.fileExists(atPath: destination.path) {
+                let values = try destination.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                guard values.isRegularFile == true,
+                      let expectedBytes = values.fileSize,
+                      expectedBytes <= limits.maximumFileBytes
+                else { throw QuasarError.proposalChanged }
+                let data = try Data(contentsOf: destination)
+                guard data.count == expectedBytes,
+                      let string = String(data: data, encoding: .utf8)
+                else { throw QuasarError.proposalChanged }
+                totalBefore += data.count
+                guard totalBefore <= limits.maximumTotalBytes else {
+                    throw QuasarError.budgetExceeded("preimage bytes")
+                }
+                current = string
+            } else {
+                current = nil
+            }
+            guard current == file.before else { throw QuasarError.proposalChanged }
+        }
+        guard totalBefore == review.totalBeforeBytes,
+              totalAfter == review.totalAfterBytes,
+              try Self.reviewDigest(
+                  plan: plan,
+                  siteID: review.siteID,
+                  generationID: review.generationID,
+                  files: review.files,
+                  dependencyFingerprint: review.dependencyFingerprint,
+                  createdAt: review.createdAt,
+                  expiresAt: review.expiresAt
+              ) == review.planDigest
+        else { throw QuasarError.proposalChanged }
+    }
+
     private static func digest(_ plan: QuasarMutationPlan) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let planData = try encoder.encode(plan)
         return SHA256.hash(data: planData).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func reviewDigest(
+        plan: QuasarMutationPlan,
+        siteID: String,
+        generationID: String,
+        files: [QuasarFileReview],
+        dependencyFingerprint: QuasarDependencyFingerprint,
+        createdAt: Date,
+        expiresAt: Date
+    ) throws -> String {
+        struct Binding: Codable {
+            var version: Int
+            var siteID: String
+            var generationID: String
+            var plan: QuasarMutationPlan
+            var files: [QuasarFileReview]
+            var dependencyFingerprint: QuasarDependencyFingerprint
+            var createdAt: Date
+            var expiresAt: Date
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(Binding(
+            version: 1,
+            siteID: siteID,
+            generationID: generationID,
+            plan: plan,
+            files: files,
+            dependencyFingerprint: dependencyFingerprint,
+            createdAt: createdAt,
+            expiresAt: expiresAt
+        ))
+        return sha256(data)
+    }
+
+    private static func postimageDigest(_ operation: QuasarMutationOperation) -> String {
+        switch operation {
+        case .write(_, let content): return sha256(Data(content.utf8))
+        case .remove: return "absent"
+        }
+    }
+
+    private static func dependencyFingerprint(
+        siteRoot: URL,
+        operations: [QuasarMutationOperation]
+    ) throws -> QuasarDependencyFingerprint {
+        let package = siteRoot.appendingPathComponent("package.json")
+        let lock = siteRoot.appendingPathComponent("bun.lock")
+        let changesDependencies = operations.contains { operation in
+            switch operation {
+            case .write(let path, _), .remove(let path):
+                return path == "package.json" || path == "bun.lock"
+            }
+        }
+        if !changesDependencies,
+           !FileManager.default.fileExists(atPath: package.path),
+           !FileManager.default.fileExists(atPath: lock.path)
+        {
+            let unavailable = String(repeating: "0", count: 64)
+            return .init(packageJSONSHA256: unavailable, bunLockSHA256: unavailable)
+        }
+        return try QuasarDependencyFingerprint.capture(siteRoot: siteRoot, applying: operations)
     }
 
     private static func sha256(_ data: Data) -> String {
@@ -487,5 +784,20 @@ public actor QuasarMutationExecutor {
               })
         else { throw QuasarError.invalidInput("site id is invalid") }
         return value
+    }
+
+    private static func checkedGenerationID(_ raw: String) throws -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value == raw,
+              (1...128).contains(value.utf8.count),
+              value.allSatisfy({
+                  $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_")
+              })
+        else { throw QuasarError.invalidInput("generation id is invalid") }
+        return value
+    }
+
+    private static func legacyGenerationID(_ idempotencyKey: String) -> String {
+        "legacy-" + sha256(Data(idempotencyKey.utf8))
     }
 }

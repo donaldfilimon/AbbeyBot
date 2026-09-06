@@ -8,6 +8,7 @@ struct QuasarApprovalWorkflowTests {
     @Test func fullCreateApprovePreviewEditRollbackArchiveLifecycle() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let planCounter = PlanCounter()
         let planner = QuasarPlanner(
             readPlan: { _, _ in .init(paths: []) },
@@ -29,25 +30,73 @@ struct QuasarApprovalWorkflowTests {
             ),
             readinessProbe: { _ in true }
         )
-        let service = try QuasarService(home: base, planner: planner, preview: preview)
+        let fakeBun = try makeFakeBun(at: base)
+        let service = try QuasarService(
+            home: base,
+            planner: planner,
+            preview: preview,
+            dependencies: QuasarDependencyPreparer(bunExecutableURL: fakeBun)
+        )
 
         let site = try await service.create(name: "Lifecycle", prompt: "first")
         let firstPlan = try await waitForPlan(service: service, siteID: site.id)
         let firstReceipt = try await service.approve(id: site.id, planDigest: firstPlan.planDigest)
+        #expect(!(try await service.history(id: site.id)).contains { $0.status == .uncertain }, "first approval")
         let eventPage = try await service.events(id: site.id, since: 0)
         #expect(eventPage.events.contains { $0.type == .done })
 
+        _ = try await service.preparePreview(id: site.id)
         let running = try await service.startPreview(id: site.id)
         #expect(running.state == .running)
         #expect(try await service.previewStatus(id: site.id).state == .running)
-        #expect(try await service.stopPreview(id: site.id).state == .stopped)
+        let preparationTicket = try await service.previewSession(id: site.id)
+        let preparationToken = try #require(
+            URLComponents(string: preparationTicket.url)?.queryItems?.first?.value
+        )
+        _ = try await service.preparePreview(id: site.id)
+        #expect(try await service.previewStatus(id: site.id).state == .stopped)
+        await #expect(throws: QuasarError.self) {
+            _ = try await service.redeemPreviewTicket(
+                preparationToken,
+                host: "\(site.slug).preview.xfoss.dev"
+            )
+        }
+
+        #expect(try await service.startPreview(id: site.id).state == .running)
+        let mutationTicket = try await service.previewSession(id: site.id)
+        let mutationToken = try #require(
+            URLComponents(string: mutationTicket.url)?.queryItems?.first?.value
+        )
 
         _ = try await service.edit(id: site.id, prompt: "second")
         let secondPlan = try await waitForPlan(service: service, siteID: site.id)
         let secondReceipt = try await service.approve(id: site.id, planDigest: secondPlan.planDigest)
+        #expect(try await service.previewStatus(id: site.id).state == .stopped)
+        await #expect(throws: QuasarError.self) {
+            _ = try await service.redeemPreviewTicket(
+                mutationToken,
+                host: "\(site.slug).preview.xfoss.dev"
+            )
+        }
+        #expect(!(try await service.history(id: site.id)).contains { $0.status == .uncertain }, "second approval")
         let proof = base.appendingPathComponent("sites/lifecycle/operator-proof.txt")
         #expect(try String(contentsOf: proof, encoding: .utf8) == "round-2")
+
+        _ = try await service.preparePreview(id: site.id)
+        #expect(try await service.startPreview(id: site.id).state == .running)
+        let secondPreviewTicket = try await service.previewSession(id: site.id)
+        let secondPreviewToken = try #require(
+            URLComponents(string: secondPreviewTicket.url)?.queryItems?.first?.value
+        )
         let rollback = try await service.rollback(id: site.id, planDigest: secondReceipt.planDigest)
+        #expect(try await service.previewStatus(id: site.id).state == .stopped)
+        await #expect(throws: QuasarError.self) {
+            _ = try await service.redeemPreviewTicket(
+                secondPreviewToken,
+                host: "\(site.slug).preview.xfoss.dev"
+            )
+        }
+        #expect(!(try await service.history(id: site.id)).contains { $0.status == .uncertain }, "rollback")
         #expect(rollback.restoredPaths == ["operator-proof.txt"])
         #expect(try String(contentsOf: proof, encoding: .utf8) == "round-1")
         #expect(firstReceipt.planDigest != secondReceipt.planDigest)
@@ -81,6 +130,7 @@ struct QuasarApprovalWorkflowTests {
     @Test func failedPreviewStartupReleasesItsRegistryPort() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let planner = QuasarPlanner(
             readPlan: { _, _ in .init(paths: []) },
             mutationPlan: { _, _ in
@@ -100,13 +150,63 @@ struct QuasarApprovalWorkflowTests {
             ),
             readinessProbe: { _ in false }
         )
-        let service = try QuasarService(home: base, planner: planner, preview: preview)
+        let service = try QuasarService(
+            home: base,
+            planner: planner,
+            preview: preview,
+            dependencies: QuasarDependencyPreparer(bunExecutableURL: try makeFakeBun(at: base))
+        )
         let site = try await service.create(name: "Preview Failure", prompt: "prepare")
         let plan = try await waitForPlan(service: service, siteID: site.id)
         _ = try await service.approve(id: site.id, planDigest: plan.planDigest)
+        _ = try await service.preparePreview(id: site.id)
 
         #expect(try await service.startPreview(id: site.id).state == .crashed)
         #expect(try await service.site(id: site.id).previewPort == nil)
+    }
+
+    @Test func dependencyPreparationSerializesEditAdmissionForTheSite() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let marker = base.appendingPathComponent("dependency-preparation-started")
+        let fakeBun = base.appendingPathComponent("slow-fake-bun")
+        try Data("""
+        #!/bin/sh
+        touch "\(marker.path)"
+        sleep 1
+        mkdir -p node_modules/next/dist/bin
+        printf '#!/bin/sh\\n' > node_modules/next/dist/bin/next
+        """.utf8).write(to: fakeBun, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeBun.path)
+        let planner = QuasarPlanner(
+            readPlan: { _, _ in .init(paths: []) },
+            mutationPlan: { prompt, _ in
+                .init(
+                    summary: prompt,
+                    operations: [.write(path: "proof.txt", content: prompt)],
+                    idempotencyKey: prompt
+                )
+            }
+        )
+        let service = try QuasarService(
+            home: base,
+            planner: planner,
+            dependencies: QuasarDependencyPreparer(bunExecutableURL: fakeBun, timeout: .seconds(5))
+        )
+        let site = try await service.create(name: "Serialized", prompt: "first")
+        let plan = try await waitForPlan(service: service, siteID: site.id)
+        _ = try await service.approve(id: site.id, planDigest: plan.planDigest)
+
+        let preparation = Task { try await service.preparePreview(id: site.id) }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: marker.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+        await #expect(throws: QuasarError.jobRunning) {
+            _ = try await service.edit(id: site.id, prompt: "must wait")
+        }
+        _ = try await preparation.value
     }
 
 
@@ -305,4 +405,15 @@ private func waitForPlan(service: QuasarService, siteID: String) async throws ->
         try await Task.sleep(for: .milliseconds(10))
     }
     throw QuasarError.processFailed("timed out waiting for mutation plan")
+}
+
+private func makeFakeBun(at base: URL) throws -> URL {
+    let executable = base.appendingPathComponent("fake-bun-\(UUID().uuidString)")
+    try Data("""
+    #!/bin/sh
+    mkdir -p node_modules/next/dist/bin
+    printf '#!/bin/sh\\n' > node_modules/next/dist/bin/next
+    """.utf8).write(to: executable, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+    return executable
 }

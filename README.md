@@ -117,7 +117,13 @@ Sources/AbbeyCLI/       # abbey terminal REPL (via `swift run -- cli`)
 Scripts/                # run.sh, run-smoke.sh, run-server-smoke.sh
 deploy/abbeybot.service
 Dockerfile / docker-compose.yml
+deploy/production/      # digest-pinned Compose, Caddy, backup/deploy/restore
 ```
+
+The provider-neutral production runbook is in
+[`deploy/production/README.md`](deploy/production/README.md). Release images
+are built on GitHub Actions from `main`; the server host consumes the recorded
+SHA-256 image references and does not build Swift, Bun, or Caddy locally.
 
 ## API (server)
 

@@ -82,7 +82,7 @@ struct QuasarRecoveryTests {
         await service.shutdown()
         #expect(try await service.pendingPlan(id: site.id) == nil)
         #expect(try await service.site(id: site.id).status == .error)
-        await #expect(throws: QuasarError.notFound) {
+        await #expect(throws: QuasarError.processFailed("Quasar service is shut down")) {
             _ = try await service.approve(id: site.id, planDigest: plan.planDigest)
         }
         await #expect(throws: QuasarError.self) { _ = try await service.edit(id: site.id, prompt: "new") }
@@ -124,19 +124,27 @@ struct QuasarRecoveryTests {
                 catch { return false }
             }
         )
-        let service = try QuasarService(home: base, planner: recoveryPlanner, preview: preview)
-        let site = try await service.registry.reserve(name: "Starting", prompt: "ready")
-        try await service.registry.finish(id: site.id)
-        try FileManager.default.createDirectory(
-            at: base.appendingPathComponent("sites/starting"), withIntermediateDirectories: true
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let fakeBun = base.appendingPathComponent("fake-bun.sh")
+        try Data("#!/bin/sh\nmkdir -p node_modules/next/dist/bin\nprintf entry > node_modules/next/dist/bin/next\n".utf8).write(to: fakeBun)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeBun.path)
+        let service = try QuasarService(
+            home: base, planner: recoveryPlanner, preview: preview,
+            dependencies: QuasarDependencyPreparer(bunExecutableURL: fakeBun, timeout: .seconds(5))
         )
+        let site = try await service.create(name: "Starting", prompt: "ready")
+        let plan = try await recoveryPlan(service: service, siteID: site.id)
+        _ = try await service.approve(id: site.id, planDigest: plan.planDigest)
+        _ = try await service.preparePreview(id: site.id)
         let start = Task { try await service.startPreview(id: site.id) }
         let completion = RecoveryCompletion()
         Task { _ = await start.result; await completion.finish() }
         do {
             try await gate.waitUntilStarted()
-            await service.shutdown()
+            let shutdown = Task { await service.shutdown() }
+            try await recoveryWait { await preview.status(siteID: site.id).state == .stopped }
             await gate.release()
+            await shutdown.value
             try await recoveryWait { await completion.finished }
             await #expect(throws: QuasarError.processFailed("Quasar service is shut down")) {
                 _ = try await start.value

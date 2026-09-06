@@ -11,6 +11,7 @@ public actor QuasarRegistry {
     private static let maximumSites = 10_000
     private static let maximumPromptHistoryEntries = 256
     public let home: URL
+    private let identity: String
     private let registryURL: URL
     private let lockDescriptor: Int32
     private var sites: [Site]
@@ -19,6 +20,7 @@ public actor QuasarRegistry {
         self.home = home.standardizedFileURL
         self.registryURL = self.home.appendingPathComponent("registry.json")
         try FileManager.default.createDirectory(at: self.home, withIntermediateDirectories: true)
+        self.identity = try Self.loadOrCreateIdentity(home: self.home)
         let lockURL = self.home.appendingPathComponent(".writer.lock")
         let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else { throw QuasarError.registryLocked }
@@ -58,6 +60,7 @@ public actor QuasarRegistry {
 
     public func list() -> [Site] { sites }
     public func site(id: String) -> Site? { sites.first { $0.id == id } }
+    public func serviceIdentity() -> String { identity }
 
     public func reserve(name: String, prompt: String) throws -> Site {
         guard sites.count < Self.maximumSites else {
@@ -272,5 +275,30 @@ public actor QuasarRegistry {
             && value.allSatisfy {
                 $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ".")
             }
+    }
+
+    private static func loadOrCreateIdentity(home: URL) throws -> String {
+        let destination = home.appendingPathComponent("service-identity")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            let value = try String(contentsOf: destination, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.hasPrefix("quasar-"), isSafeIdentifier(value, maximum: 128) else {
+                throw QuasarError.invalidInput("Quasar service identity is malformed")
+            }
+            return value
+        }
+        let value = "quasar-\(UUID().uuidString.lowercased())"
+        let temporary = home.appendingPathComponent(".service-identity.\(UUID().uuidString).tmp")
+        try Data((value + "\n").utf8).write(to: temporary, options: .atomic)
+        do {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                return try loadOrCreateIdentity(home: home)
+            }
+            throw error
+        }
+        return value
     }
 }

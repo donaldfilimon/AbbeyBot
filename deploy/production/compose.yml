@@ -1,0 +1,144 @@
+name: abbeybot
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:16.15-alpine3.23
+    environment:
+      POSTGRES_DB: abbeybot
+      POSTGRES_USER: abbey
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a new random POSTGRES_PASSWORD in deploy/production/.env}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=abbey --dbname=abbeybot"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *bounded-logging
+
+  abbey:
+    init: true
+    image: ${ABBEYBOT_IMAGE:?Set ABBEYBOT_IMAGE to a GHCR sha256 digest reference}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://abbey:${POSTGRES_PASSWORD:?Set a new random POSTGRES_PASSWORD in deploy/production/.env}@db:5432/abbeybot
+      HTTP_HOSTNAME: 0.0.0.0
+      HTTP_PORT: "8080"
+      ABBEY_API_TOKEN: ${ABBEY_API_TOKEN:?Set a dedicated operator API token}
+      ABBEY_QUASAR_API_TOKEN: ${ABBEY_QUASAR_API_TOKEN:?Set a dedicated Quasar operator token}
+      ABBEY_QUASAR_ALLOWED_ORIGINS: ${ABBEY_QUASAR_ALLOWED_ORIGINS:-}
+      ABBEY_QUASAR_HOME: /var/lib/abbey/quasar
+      ABBEY_QUASAR_PREVIEW_BIND_HOST: 0.0.0.0
+      ABBEY_QUASAR_PREVIEW_UPSTREAM_HOST: abbey
+      ABBEY_QUASAR_PREVIEW_DOMAIN: ${ABBEY_QUASAR_PREVIEW_DOMAIN:?Set the preview base domain}
+      ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN: ${ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN:?Set a dedicated Caddy-to-Abbey token}
+      ABBEY_INFERENCE_MODE: ${ABBEY_INFERENCE_MODE:-remoteCompatible}
+      ABBEY_REMOTE_ENDPOINT: ${ABBEY_REMOTE_ENDPOINT:-https://api.openai.com/v1/chat/completions}
+      ABBEY_REMOTE_MODEL: ${ABBEY_REMOTE_MODEL:-gpt-5.4-mini}
+      ABBEY_REMOTE_API_TOKEN: ${ABBEY_REMOTE_API_TOKEN:-}
+      ABBEY_DRY_RUN: ${ABBEY_DRY_RUN:-1}
+      ABBEY_QUIET: ${ABBEY_QUIET:-1}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      DISCORD_DEV_GUILD_ID: ${DISCORD_DEV_GUILD_ID:-}
+      DISCORD_OPERATOR_USER_IDS: ${DISCORD_OPERATOR_USER_IDS:-}
+      ABBEY_QUASAR_GUILD_IDS: ${ABBEY_QUASAR_GUILD_IDS:-}
+      ABBEY_QUASAR_GUILD_BUDGET: ${ABBEY_QUASAR_GUILD_BUDGET:-0}
+    volumes:
+      - quasar:/var/lib/abbey/quasar
+      - abbey-state:/var/lib/abbey/.abbey
+      - bun-cache:/var/cache/abbey/bun
+    networks:
+      - edge
+      - data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024
+    restart: unless-stopped
+    stop_grace_period: 60s
+    logging: *bounded-logging
+
+  caddy:
+    image: ${ABBEY_CADDY_IMAGE:?Set ABBEY_CADDY_IMAGE to a GHCR sha256 digest reference}
+    depends_on:
+      abbey:
+        condition: service_healthy
+    environment:
+      ABBEY_API_DOMAIN: ${ABBEY_API_DOMAIN:?Set the API domain}
+      ABBEY_QUASAR_PREVIEW_DOMAIN: ${ABBEY_QUASAR_PREVIEW_DOMAIN:?Set the preview base domain}
+      ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN: ${ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN:?Set a dedicated Caddy-to-Abbey token}
+      ACME_EMAIL: ${ACME_EMAIL:?Set the ACME account email}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set a scoped Cloudflare DNS token}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *bounded-logging
+
+volumes:
+  postgres:
+    name: abbeybot_postgres
+  quasar:
+    name: abbeybot_quasar
+  abbey-state:
+    name: abbeybot_state
+  bun-cache:
+    name: abbeybot_bun_cache
+  caddy-data:
+    name: abbeybot_caddy_data
+  caddy-config:
+    name: abbeybot_caddy_config
+
+networks:
+  edge:
+    name: abbeybot_edge
+  data:
+    name: abbeybot_data
+    internal: true

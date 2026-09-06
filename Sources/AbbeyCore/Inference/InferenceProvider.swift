@@ -164,11 +164,17 @@ public actor InferenceRouter {
         metrics: EngineMetrics,
         currentMode: @escaping @Sendable () -> InferenceMode,
         remoteEndpoint: @escaping @Sendable () -> String,
+        remoteModel: @escaping @Sendable () -> String = { "abbey-remote" },
+        remoteAPIToken: @escaping @Sendable () -> String = { "" },
         providerOverrides: [InferenceMode: any InferenceProvider] = [:]
     ) {
         self.deterministicFloor = DeterministicFloorProvider()
         self.onDevice = FoundationModelsProvider()
-        self.remote = RemoteOpenAICompatibleProvider(endpointProvider: remoteEndpoint)
+        self.remote = RemoteOpenAICompatibleProvider(
+            endpointProvider: remoteEndpoint,
+            modelProvider: remoteModel,
+            bearerTokenProvider: remoteAPIToken
+        )
         self.eventBus = eventBus
         self.metrics = metrics
         self.currentMode = currentMode

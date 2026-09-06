@@ -24,7 +24,14 @@ public struct QuasarPreviewCommand: Sendable {
 
     public static let bunNext = Self(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-        arguments: { ["bun", "x", "next", "dev", "--port", String($0)] }
+        arguments: {
+            let configuredBind = ProcessInfo.processInfo.environment["ABBEY_QUASAR_PREVIEW_BIND_HOST"]
+            let bind = configuredBind == "0.0.0.0" ? "0.0.0.0" : "127.0.0.1"
+            return [
+                "bun", QuasarDependencyPreparer.nextEntryPoint, "dev",
+                "--hostname", bind, "--port", String($0),
+            ]
+        }
     )
 }
 
@@ -334,6 +341,7 @@ public actor QuasarPreviewManager {
 
     private struct Entry {
         var generationID: UUID
+        var contentGeneration: String
         var process: Process
         var processGroup: OwnedProcessGroup?
         var groupExitProven: Bool
@@ -376,22 +384,26 @@ public actor QuasarPreviewManager {
         """
     private var entries: [String: Entry] = [:]
     private var isShuttingDown = false
+    private var startInProgress = false
     private let readinessAttempts: Int
     private let pollInterval: Duration
     private let command: QuasarPreviewCommand
     private let readinessProbe: @Sendable (URL) async -> Bool
     private let processGroups: QuasarProcessGroupSystem
+    public nonisolated let access: QuasarPreviewAccessController
 
     public init(
         readinessAttempts: Int = 30,
         pollInterval: Duration = .milliseconds(500),
         command: QuasarPreviewCommand = .bunNext,
-        readinessProbe: (@Sendable (URL) async -> Bool)? = nil
+        readinessProbe: (@Sendable (URL) async -> Bool)? = nil,
+        access: QuasarPreviewAccessController = QuasarPreviewAccessController()
     ) {
         self.readinessAttempts = min(max(readinessAttempts, 1), 120)
         self.pollInterval = pollInterval
         self.command = command
         self.processGroups = .live
+        self.access = access
         self.readinessProbe = readinessProbe ?? { url in
             var request = URLRequest(url: url)
             request.httpMethod = "HEAD"
@@ -406,12 +418,14 @@ public actor QuasarPreviewManager {
         pollInterval: Duration = .milliseconds(500),
         command: QuasarPreviewCommand = .bunNext,
         readinessProbe: (@Sendable (URL) async -> Bool)? = nil,
-        processGroups: QuasarProcessGroupSystem
+        processGroups: QuasarProcessGroupSystem,
+        access: QuasarPreviewAccessController = QuasarPreviewAccessController()
     ) {
         self.readinessAttempts = min(max(readinessAttempts, 1), 120)
         self.pollInterval = pollInterval
         self.command = command
         self.processGroups = processGroups
+        self.access = access
         self.readinessProbe = readinessProbe ?? { url in
             var request = URLRequest(url: url)
             request.httpMethod = "HEAD"
@@ -421,7 +435,7 @@ public actor QuasarPreviewManager {
         }
     }
 
-    public func status(siteID: String) -> PreviewStatus {
+    public func status(siteID: String) async -> PreviewStatus {
         guard var entry = entries[siteID] else { return PreviewStatus() }
         if entry.processGroup != nil {
             entry.childLifecycle.refresh(from: entry.lifecyclePipe.fileHandleForReading)
@@ -443,6 +457,7 @@ public actor QuasarPreviewManager {
             entry.status.state == .running || entry.status.state == .starting
         {
             entry.status = .init(state: .crashed, port: entry.status.port, logTail: entry.logs.lines())
+            await access.retire(siteID: siteID)
         } else {
             entry.status.logTail = entry.logs.lines()
         }
@@ -451,6 +466,36 @@ public actor QuasarPreviewManager {
     }
 
     public func start(siteID: String, siteRoot: URL, port: Int) async -> PreviewStatus {
+        await start(
+            siteID: siteID,
+            generation: UUID().uuidString,
+            siteRoot: siteRoot,
+            port: port
+        )
+    }
+
+    public func start(
+        siteID: String,
+        generation: String,
+        siteRoot: URL,
+        port: Int
+    ) async -> PreviewStatus {
+        guard !isShuttingDown else { return .init(state: .stopped) }
+        guard !startInProgress else {
+            return .init(state: .crashed, port: port, logTail: ["Another preview start is in progress."])
+        }
+        startInProgress = true
+        defer { startInProgress = false }
+        await access.retireAll()
+        for otherSiteID in Array(entries.keys) where otherSiteID != siteID {
+            guard await stop(siteID: otherSiteID) else {
+                return .init(
+                    state: .crashed,
+                    port: port,
+                    logTail: ["Another preview process did not stop; replacement was not launched."]
+                )
+            }
+        }
         guard !isShuttingDown else { return .init(state: .stopped) }
         guard await stop(siteID: siteID) else {
             return .init(
@@ -459,8 +504,8 @@ public actor QuasarPreviewManager {
                 logTail: ["Prior preview process did not stop; replacement was not launched."]
             )
         }
-        // stop() suspends while terminating a prior process. Shutdown may have
-        // closed admission in the meantime, including when no entry existed.
+        // stop() can suspend while retiring an earlier process. Shutdown may
+        // close admission during that suspension, including for a new site.
         guard !isShuttingDown else { return .init(state: .stopped) }
         let commandArguments = command.arguments(port)
         let launchGate = LaunchGate()
@@ -480,9 +525,15 @@ public actor QuasarPreviewManager {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = lifecyclePipe
-        var environment = ProcessInfo.processInfo.environment
-        environment["ABBEY_QUASAR_CHILD_EXIT_MARKER"] = lifecycleMarker
-        process.environment = environment
+        do {
+            process.environment = try Self.previewEnvironment(
+                siteRoot: siteRoot,
+                lifecycleMarker: lifecycleMarker
+            )
+        } catch {
+            launchGate.close()
+            return .init(state: .crashed, port: port, logTail: ["Preview runtime directories could not be prepared."])
+        }
         let logs = LogBuffer()
         pipe.fileHandleForReading.readabilityHandler = { handle in logs.append(handle.availableData) }
         guard Self.makeNonBlocking(lifecyclePipe.fileHandleForReading) else {
@@ -515,6 +566,7 @@ public actor QuasarPreviewManager {
         let generationID = UUID()
         entries[siteID] = Entry(
             generationID: generationID,
+            contentGeneration: generation,
             process: process,
             processGroup: processGroup,
             groupExitProven: false,
@@ -564,6 +616,12 @@ public actor QuasarPreviewManager {
                 else { break }
                 let status = PreviewStatus(state: .running, port: port, url: url.absoluteString, logTail: logs.lines())
                 entries[siteID]?.status = status
+                await access.activate(.init(siteID: siteID, generation: generation, port: port))
+                guard !isShuttingDown, entries[siteID]?.generationID == generationID,
+                      entries[siteID]?.status.state == .running else {
+                    await access.retire(siteID: siteID)
+                    return .init(state: .stopped, logTail: logs.lines())
+                }
                 return status
             }
             try? await Task.sleep(for: pollInterval)
@@ -600,6 +658,7 @@ public actor QuasarPreviewManager {
     /// false result keeps archive/move callers from racing a live writer.
     @discardableResult
     public func stop(siteID: String) async -> Bool {
+        await access.retire(siteID: siteID)
         guard var entry = entries[siteID] else { return true }
         guard let processGroup = entry.processGroup else {
             if entry.groupExitProven, entry.status.state != .stopped {
@@ -637,13 +696,27 @@ public actor QuasarPreviewManager {
         return stopped
     }
 
-    public func stopAll() async { for id in entries.keys { _ = await stop(siteID: id) } }
+    public func stopAll() async {
+        await access.retireAll()
+        for id in entries.keys { _ = await stop(siteID: id) }
+    }
 
-    /// Permanently close admission before stopping processes. Unlike shutdown,
-    /// stopAll remains reusable by callers that intend to start previews again.
+    /// Permanently closes preview admission before terminating owned process
+    /// groups. `stopAll()` remains reusable for ordinary operator actions.
     public func shutdown() async {
         isShuttingDown = true
         await stopAll()
+    }
+
+    public func activePreview(siteID: String) async -> QuasarActivePreview? {
+        guard let current = await access.current(), current.siteID == siteID else { return nil }
+        guard let entry = entries[siteID], entry.status.state == .running,
+              entry.contentGeneration == current.generation
+        else {
+            await access.retire(siteID: siteID)
+            return nil
+        }
+        return current
     }
 
     private func validatedProcessGroup(for process: Process) -> OwnedProcessGroup? {
@@ -826,6 +899,26 @@ public actor QuasarPreviewManager {
         entry.launchGate.close()
         entry.pipe.fileHandleForReading.readabilityHandler = nil
         entry.lifecyclePipe.fileHandleForReading.readabilityHandler = nil
+    }
+
+    private nonisolated static func previewEnvironment(
+        siteRoot: URL,
+        lifecycleMarker: String,
+        inherited: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> [String: String] {
+        let runtime = try QuasarPreviewRuntime.prepare(siteRoot: siteRoot)
+        var environment: [String: String] = [
+            "ABBEY_QUASAR_CHILD_EXIT_MARKER": lifecycleMarker,
+            "HOME": runtime.home.path,
+            "TMPDIR": runtime.temporary.path,
+            "XDG_CACHE_HOME": runtime.cache.path,
+            "BUN_INSTALL_CACHE_DIR": runtime.cache.path,
+            "NO_COLOR": "1",
+        ]
+        for key in ["PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            if let value = inherited[key], !value.isEmpty { environment[key] = value }
+        }
+        return environment
     }
 
     private nonisolated static func hasExited(_ process: Process) -> Bool {

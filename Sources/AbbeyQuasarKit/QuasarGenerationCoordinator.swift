@@ -39,7 +39,7 @@ public struct QuasarPlanner: Sendable {
 public actor QuasarGenerationCoordinator {
     private struct Prepared: Sendable {
         var plan: QuasarMutationPlan
-        var preview: QuasarMutationPreview
+        var review: QuasarPlanReview
     }
     private struct Job {
         var generationID: UUID
@@ -93,10 +93,15 @@ public actor QuasarGenerationCoordinator {
                 try Task.checkCancellation()
                 let mutation = try await planner.mutationPlan(prompt, approved)
                 try Task.checkCancellation()
-                let preview = try await executor.validate(mutation, siteID: site.id, siteRoot: siteRoot)
+                let review = try await executor.review(
+                    mutation,
+                    siteID: site.id,
+                    generationID: generationID.uuidString,
+                    siteRoot: siteRoot
+                )
                 try Task.checkCancellation()
-                await self?.storePrepared(.init(plan: mutation, preview: preview), siteID: site.id, generationID: generationID)
-                await self?.emit(.plan(preview.planDigest), siteID: site.id, generationID: generationID)
+                await self?.storePrepared(.init(plan: mutation, review: review), siteID: site.id, generationID: generationID)
+                await self?.emit(.plan(review.planDigest), siteID: site.id, generationID: generationID)
             } catch is CancellationError {
                 await self?.failGeneration(
                     "generation cancelled",
@@ -117,7 +122,9 @@ public actor QuasarGenerationCoordinator {
         jobs[site.id]?.task = task
     }
 
-    public func pending(siteID: String) -> QuasarMutationPreview? { jobs[siteID]?.prepared?.preview }
+    public func pending(siteID: String) -> QuasarMutationPreview? { jobs[siteID]?.prepared?.review.preview }
+
+    public func pendingReview(siteID: String) -> QuasarPlanReview? { jobs[siteID]?.prepared?.review }
 
     public func approve(
         siteID: String,
@@ -130,13 +137,13 @@ public actor QuasarGenerationCoordinator {
     ) async throws -> QuasarMutationReceipt {
         guard var job = jobs[siteID], let prepared = job.prepared else { throw QuasarError.notFound }
         guard !job.applying else { throw QuasarError.jobRunning }
-        guard prepared.preview.planDigest == expectedDigest else {
+        guard prepared.review.planDigest == expectedDigest else {
             job.prepared = nil
             jobs[siteID] = job
             try await registry.finish(id: siteID, error: "mutation digest changed; prepare a new plan")
             throw QuasarError.proposalChanged
         }
-        guard now < prepared.preview.expiresAt else {
+        guard now < prepared.review.expiresAt else {
             job.prepared = nil
             jobs[siteID] = job
             try await registry.finish(id: siteID, error: "mutation approval expired")
@@ -147,9 +154,10 @@ public actor QuasarGenerationCoordinator {
         do {
             let receipt = try await executor.apply(
                 prepared.plan,
-                siteID: siteID,
+                approvedReview: prepared.review,
                 to: siteRoot,
-                rollbackRoot: rollbackRoot
+                rollbackRoot: rollbackRoot,
+                now: now
             )
             for path in receipt.changedPaths { emit(.tool(.writeFile, path: path), siteID: siteID) }
             emit(.text(prepared.plan.summary), siteID: siteID)
