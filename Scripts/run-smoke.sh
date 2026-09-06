@@ -22,7 +22,9 @@ echo "======== 2/5 release build ========"
 echo "======== 3/5 all Swift test targets ========"
 # The desktop graph contains all five test bundles. Running without a filter prevents the
 # release gate from silently omitting app, CLI, server-kit, or HTTP route tests.
-"${SWIFT[@]}" test --build-path "$BUILD_PATH"
+# Lifecycle fixtures inject their own fake gateway and policy. Runtime smoke
+# flags must not bypass that gateway or leave a fixture awaiting an event forever.
+env -u ABBEY_DRY_RUN -u ABBEY_QUIET "${SWIFT[@]}" test --build-path "$BUILD_PATH"
 
 echo "======== 4/5 signed macOS application bundle ========"
 APP_BUILD_PATH="$BUILD_PATH"

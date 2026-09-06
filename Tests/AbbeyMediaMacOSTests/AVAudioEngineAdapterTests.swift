@@ -310,6 +310,65 @@ struct AVAudioEngineAdapterTests {
         #expect(await fixture.adapter.playbackQueueDepth() == 0)
     }
 
+    @Test("canceling one playback preserves capture and interruption state", arguments: [0, 1, 2, 3])
+    func cancelledPlaybackPreservesState(initialState: Int) async throws {
+        let fixture = try AudioFixture(maximumCapturedFrames: 1)
+        let generation = try await fixture.adapter.startCapture()
+        let expectedState: AudioEngineState
+        switch initialState {
+        case 0: expectedState = .capturing
+        case 1:
+            await fixture.adapter.stopCapture()
+            expectedState = .stopped
+        case 2:
+            await fixture.runtime.emit(event: .interruptionBegan)
+            expectedState = .interrupted
+        default:
+            await fixture.runtime.emit(event: .configurationChanged)
+            expectedState = .configurationChanged
+        }
+        let gate = PlaybackTestGate()
+        await fixture.runtime.holdPlaybackSchedule(gate, honorsCancellation: true)
+        let frame = try AudioPCMFrame(
+            float32: Array(repeating: 1, count: AudioPCMFrame.interleavedSampleCount)
+        )
+        let play = Task { try await fixture.adapter.play(frame) }
+        await gate.waitUntilEntered()
+        play.cancel()
+        await gate.waitUntilCancelled()
+        await gate.release()
+        await #expect(throws: CancellationError.self) { try await play.value }
+        #expect(await fixture.adapter.playbackQueueDepth() == 0)
+        try #require(await fixture.adapter.currentState() == expectedState)
+
+        if initialState == 0 {
+            await fixture.runtime.emit(frame.float32Samples, generation: generation)
+            await fixture.runtime.emit(frame.float32Samples, generation: generation)
+            // Overflow proves both subsequent frames reached the real capture stream.
+            try #require(await fixture.adapter.droppedCaptureFrameCount() == 1)
+            var iterator = fixture.adapter.capturedFrames.makeAsyncIterator()
+            #expect(await iterator.next()?.float32Samples == frame.float32Samples)
+        }
+        await fixture.adapter.stopNow()
+    }
+
+    @Test("playback runtime failures still mark the adapter failed")
+    func playbackFailureRemainsFailure() async throws {
+        let fixture = try AudioFixture()
+        await fixture.runtime.failNextPlayback()
+        let frame = try AudioPCMFrame(
+            float32: Array(repeating: 0, count: AudioPCMFrame.interleavedSampleCount)
+        )
+        await #expect(throws: AudioRuntimeSpyError.playbackFailed) {
+            try await fixture.adapter.play(frame)
+        }
+        #expect(await fixture.adapter.playbackQueueDepth() == 0)
+        guard case .failed = await fixture.adapter.currentState() else {
+            Issue.record("Expected failed state after playback runtime error")
+            return
+        }
+    }
+
     @Test("playback queue rejects overflow instead of growing unbounded")
     func playbackBackpressure() async throws {
         let fixture = try AudioFixture(maximumPendingPlaybackFrames: 2)
@@ -358,6 +417,8 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
     private var captureStopWaiters: [CheckedContinuation<Void, Never>] = []
     private var eventInstallGate: PlaybackTestGate?
     private var scheduleGate: PlaybackTestGate?
+    private var scheduleHonorsCancellation = false
+    private var failPlayback = false
     private var holdStart = false
     private var failStart = false
     private var heldStartContinuation: CheckedContinuation<Void, Never>?
@@ -396,13 +457,18 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
         selection: AudioDeviceSelection,
         token: UInt64,
         completion: @escaping @Sendable (UInt64) async -> Void
-    ) async {
+    ) async throws {
         if let scheduleGate {
             await withTaskCancellationHandler {
                 await scheduleGate.enter()
             } onCancel: {
                 Task { await scheduleGate.cancelled() }
             }
+        }
+        if scheduleHonorsCancellation { try Task.checkCancellation() }
+        if failPlayback {
+            failPlayback = false
+            throw AudioRuntimeSpyError.playbackFailed
         }
         plays += 1
         activePlayback += 1
@@ -435,7 +501,11 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
     }
 
     func holdEventInstallation(_ gate: PlaybackTestGate) { eventInstallGate = gate }
-    func holdPlaybackSchedule(_ gate: PlaybackTestGate) { scheduleGate = gate }
+    func holdPlaybackSchedule(_ gate: PlaybackTestGate, honorsCancellation: Bool = false) {
+        scheduleGate = gate
+        scheduleHonorsCancellation = honorsCancellation
+    }
+    func failNextPlayback() { failPlayback = true }
     func playbackStopCount() -> Int { playbackStops }
     func activePlaybackCount() -> Int { activePlayback }
 
@@ -491,6 +561,7 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
 
 private enum AudioRuntimeSpyError: Error {
     case startFailed
+    case playbackFailed
 }
 
 /// Barriers drive ordering; the watchdog only reports failures and releases stuck waiters.

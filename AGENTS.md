@@ -41,6 +41,7 @@ bash Scripts/run-cli-smoke.sh
 
 - Use the relevant smoke during iteration; run `verify-all.sh` before shipping a cross-surface change. Continuation requests include the scoped gate and requested ship steps, not just an intermediate green. Static/security failures must pass or have an explicitly accepted exception.
 - Desktop smoke builds debug and release, runs all ordinary Swift tests, validates signing/privacy metadata, and launches with media disabled. Native media is deliberately excluded. Package-graph checks inspect manifests, not native linking.
+- Desktop smoke clears inherited `ABBEY_DRY_RUN` and `ABBEY_QUIET` for unit tests so injected lifecycle gateways run; its signed-app launch remains explicitly dry-run and media-disabled.
 - Server smoke may start Compose Postgres and honor an inherited `DATABASE_URL`; without Docker it uses a temporary SQLite file. It preserves bot credentials and prints the DB URL. Use a disposable database and explicit `ABBEY_DRY_RUN=1` for non-live verification; do not assume all smokes isolate `HOME` or credentials. SQLite success is not Postgres evidence.
 - Web smoke must precede Swift packaging: Vite empties and writes `Sources/AbbeyServer/Resources/Public/`, not `web/dist`. Standalone server smoke permits a missing dashboard as a skip.
 - Knowledge smoke checks the signed bundled bytes with one test filter; unlike most wrappers it uses the default SwiftPM scratch directory. Do not hand-edit signed snapshot bytes to fix a failure; inspect `Scripts/refresh-knowledge-snapshot.swift`.

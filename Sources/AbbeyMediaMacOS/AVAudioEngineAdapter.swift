@@ -296,6 +296,11 @@ public actor AVAudioEngineAdapter {
         } catch {
             playbackQueue.removeAll { $0.token == token }
             guard admittedGeneration == playbackGeneration else { return false }
+            if error is CancellationError {
+                // Canceling this frame does not fail an independent capture session.
+                if state == .playbackOnly, playbackQueue.isEmpty { state = .stopped }
+                throw error
+            }
             state = .failed(Self.describe(error))
             throw error
         }
