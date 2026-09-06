@@ -488,6 +488,65 @@ struct DiscordVoiceNativeMediaPlaneTests {
         #expect(await plane.snapshot().isInstalled == false)
     }
 
+    @Test("caller cancellation interrupts its audio or video transport task without reset", arguments: [false, true])
+    func callerCancellationInterruptsDatagramSend(video: Bool) async throws {
+        let transport = SuspendableDatagramDouble()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: transport
+        )
+        _ = try await plane.install(makeCapability(generation: 34, daveProtocolVersion: 1))
+        if video {
+            await plane.attachVideoAnnouncementSignal { _ in }
+            try await plane.installVideoSource(
+                allocation: makeVideoAllocation(), activeRIDs: ["100"], codec: .h264
+            )
+        }
+        let send = Task {
+            if video {
+                try await plane.sendVideoFrame(
+                    encodedFrame: Data([0, 0, 0, 1, 0x65, 0x88])
+                )
+            } else {
+                try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 0))
+            }
+        }
+        await transport.waitUntilSendStarted()
+        send.cancel()
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await send.value
+        }
+        #expect(await transport.deliveredPackets.isEmpty)
+        #expect(await plane.snapshot().isInstalled)
+        await plane.reset()
+    }
+
+    @Test("cancelling a send does not cancel the generation-owned Speaking signal")
+    func callerCancellationPreservesSpeakingOwnership() async throws {
+        let transport = NativeMediaDatagramDouble()
+        let speaking = SuspendableSpeakingSignal()
+        let daveSession = NativeDAVEMediaSessionDouble(protocolVersion: 1, isMediaReady: true)
+        let plane = DiscordVoiceNativeMediaPlane(
+            aes256GCMAvailable: false,
+            daveSessionProvider: { daveSession },
+            datagramTransport: transport
+        )
+        await plane.attachSpeakingSignal { try await speaking.signal() }
+        _ = try await plane.install(makeCapability(generation: 35, daveProtocolVersion: 1))
+        let first = Task { try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 0)) }
+        await speaking.waitUntilSignalStarted()
+        first.cancel()
+        await speaking.release(failing: false)
+        await #expect(throws: DiscordVoiceNativeMediaPlaneError.sendInterrupted) {
+            try await first.value
+        }
+        try await plane.sendAudioFrame(pcm: fixedPCMFrame(seed: 1))
+        #expect(await speaking.callCount == 1)
+        #expect(await transport.sentPackets.count == 1)
+    }
+
     // MARK: - Video send boundary (Phase 5 pattern extended to .video)
 
     @Test(
@@ -2004,6 +2063,7 @@ private actor SuspendableSpeakingSignal {
         if failWhenReleased {
             throw TestSpeakingFailure.injected
         }
+        try Task.checkCancellation()
     }
 
     func waitUntilSignalStarted() async {
@@ -2027,15 +2087,28 @@ private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
     private var released = false
     private var sendStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var sendStarted = false
+    private var sendContinuation: CheckedContinuation<Void, any Error>?
+    private var cancelled = false
 
     func sendProtectedPacket(_ bytes: [UInt8]) async throws {
         sendStarted = true
         let waiters = sendStartWaiters
         sendStartWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters { waiter.resume() }
-        while !released {
+        try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            try await Task.sleep(for: .milliseconds(1))
+            if !released {
+                try await withCheckedThrowingContinuation { continuation in
+                    if cancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        sendContinuation = continuation
+                    }
+                }
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await self.cancelSend() }
         }
         deliveredPackets.append(bytes)
     }
@@ -2053,6 +2126,14 @@ private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
 
     func release() {
         released = true
+        sendContinuation?.resume()
+        sendContinuation = nil
+    }
+
+    private func cancelSend() {
+        cancelled = true
+        sendContinuation?.resume(throwing: CancellationError())
+        sendContinuation = nil
     }
 }
 

@@ -279,7 +279,11 @@ public actor AVAudioEngineAdapter {
         playbackSchedules[token] = task
         defer { playbackSchedules[token] = nil }
         do {
-            try await task.value
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
             guard admittedGeneration == playbackGeneration else { return false }
             if state == .stopped, !playbackQueue.isEmpty {
                 state = .playbackOnly
