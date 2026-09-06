@@ -1,0 +1,42 @@
+name: Quasar process diagnostic
+on:
+  push:
+    branches: [codex/quasar-linux-process-groups]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SWIFT_IMAGE: swiftlang/swift:nightly-6.4.x-bookworm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 402730ec01c269002557e8232ca509cceb4e8df3
+      - name: Reproduce baseline with and without init
+        shell: bash
+        run: |
+          mkdir -p /tmp/quasar-evidence
+          git rev-parse HEAD | tee /tmp/quasar-evidence/commit.txt
+          docker pull "$SWIFT_IMAGE"
+          docker image inspect "$SWIFT_IMAGE" --format '{{json .RepoDigests}}' | tee /tmp/quasar-evidence/image.txt
+          docker run --rm "$SWIFT_IMAGE" swift --version | tee /tmp/quasar-evidence/swift.txt
+          for mode in no-init init; do
+            flags=()
+            if [[ "$mode" == init ]]; then flags+=(--init); fi
+            id=$(docker run -d "${flags[@]}" -e ABBEY_PACKAGE_ROLE=server -e ABBEY_DRY_RUN=1 -v "$PWD":/src -w /src "$SWIFT_IMAGE" swift test --filter QuasarPreviewProcessGroupTests)
+            while [[ "$(docker inspect --format '{{.State.Running}}' "$id")" == true ]]; do
+              docker exec "$id" ps -eo pid,ppid,pgid,state,comm >> "/tmp/quasar-evidence/$mode-processes.log" 2>/dev/null || true
+              sleep 1
+            done
+            docker logs "$id" > "/tmp/quasar-evidence/$mode-tests.log" 2>&1
+            docker inspect --format '{{.State.ExitCode}}' "$id" | tee "/tmp/quasar-evidence/$mode-exit.txt"
+            tail -70 "/tmp/quasar-evidence/$mode-tests.log"
+            docker rm "$id"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quasar-process-diagnostic
+          path: /tmp/quasar-evidence
