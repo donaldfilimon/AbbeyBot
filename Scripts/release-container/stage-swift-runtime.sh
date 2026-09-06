@@ -51,7 +51,10 @@ fi
 
 # 3. Layouts shipped by past and present toolchain images.
 if [[ -z "$runtime_directory" ]]; then
+  # /opt/swift/<version>/... is what swiftlang/swift:nightly-6.4.x-bookworm
+  # actually ships (observed 2026-09-06: /opt/swift/6.2/usr/lib/swift/linux).
   for candidate in \
+    /opt/swift/*/usr/lib/swift/linux \
     /usr/lib/swift/linux \
     /usr/lib/swift/linux/"$(uname -m)" \
     /usr/libexec/swift/linux \
@@ -67,7 +70,7 @@ if [[ -z "$runtime_directory" ]]; then
   {
     echo "could not locate $core for $executable"
     echo "-- searched toolchain trees --"
-    for root in /usr/lib/swift /usr/libexec/swift /usr/local/lib/swift; do
+    for root in /opt/swift /usr/lib/swift /usr/libexec/swift /usr/local/lib/swift; do
       [[ -d "$root" ]] || continue
       find "$root" -maxdepth 3 -name "$core" -o -maxdepth 2 -type d | head -40
     done
