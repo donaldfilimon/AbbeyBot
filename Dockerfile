@@ -61,6 +61,15 @@ RUN mkdir -p /usr/local/bun-node-fallback-bin \
 
 WORKDIR /app
 COPY --from=build /stage/ /app/
+# QuasarScaffolder materializes next-site out of this bundle into a site
+# workspace with FileManager.copyItem. Linux Foundation preserves ownership on
+# copy, so as uid 10001 against root-owned sources that chown is EPERM and every
+# POST /api/sites failed with a redacted 500. Darwin does not chown, which is why
+# it reproduced only in the container. Hand the runtime user its own resource
+# bundles; the executable stays root-owned so a writable rootfs cannot be used to
+# overwrite it.
+RUN find /app -maxdepth 1 \( -name '*.bundle' -o -name '*.resources' \) \
+    -exec chown -R 10001:10001 {} +
 
 RUN groupadd --system --gid 10001 abbey \
     && useradd --system --uid 10001 --gid abbey --home-dir /var/lib/abbey --create-home abbey \
