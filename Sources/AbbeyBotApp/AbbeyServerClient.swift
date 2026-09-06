@@ -18,16 +18,20 @@ struct AbbeyServerClient: Sendable {
     private let outbox: PendingPushQueue?
     private let syncServerURL: @Sendable () -> String
     private let syncAPIToken: @Sendable () -> String
+    private let transport: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     init(
         session: URLSession = .shared,
         syncServerURL: @escaping @Sendable () -> String = { AppConfig.shared.syncServerURL },
-        syncAPIToken: @escaping @Sendable () -> String = { AppConfig.shared.syncAPIToken }
+        syncAPIToken: @escaping @Sendable () -> String = { AppConfig.shared.syncAPIToken },
+        outbox: PendingPushQueue? = try? PendingPushQueue(url: PendingPushQueue.defaultURL()),
+        transport: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil
     ) {
         self.session = session
-        self.outbox = try? PendingPushQueue(url: PendingPushQueue.defaultURL())
+        self.outbox = outbox
         self.syncServerURL = syncServerURL
         self.syncAPIToken = syncAPIToken
+        self.transport = transport ?? { try await session.data(for: $0) }
     }
 
     /// Resend everything in the durable outbox (pushes that failed to reach the server
@@ -35,9 +39,9 @@ struct AbbeyServerClient: Sendable {
     /// opportunistically whenever the app has reason to believe connectivity may have
     /// returned (e.g. before/after a sync pull).
     func flushPendingPushes() async -> Int {
-        guard let outbox else { return 0 }
-        return (try? await outbox.drain { path, bodyJSON in
-            await self.postRaw(path: path, bodyJSON: bodyJSON)
+        guard let outbox, let destination = try? destinationSnapshot() else { return 0 }
+        return (try? await outbox.drain(endpoint: destination.endpoint) { path, bodyJSON in
+            await self.postRaw(path: path, bodyJSON: bodyJSON, destination: destination)
         }) ?? 0
     }
 
@@ -235,6 +239,15 @@ struct AbbeyServerClient: Sendable {
     }
 
     private func post(path: String, jsonObjectBody: [String: Any]) async {
+        let destination: Destination
+        do {
+            destination = try destinationSnapshot()
+        } catch SyncClientError.notConfigured {
+            return
+        } catch {
+            await recordFailure(path: path, message: OperatorFacingError.message(error))
+            return
+        }
         let bodyJSON: Data
         do {
             bodyJSON = try JSONSerialization.data(withJSONObject: jsonObjectBody)
@@ -244,38 +257,51 @@ struct AbbeyServerClient: Sendable {
             return
         }
 
-        let succeeded = await postRaw(path: path, bodyJSON: bodyJSON)
+        let succeeded = await postRaw(path: path, bodyJSON: bodyJSON, destination: destination)
         if !succeeded {
             // Encode failures above are permanent and never enqueued; network/HTTP
             // failures here are — a later flushPendingPushes() (or app relaunch) retries them.
-            try? outbox?.enqueue(path: path, jsonObjectBody: jsonObjectBody)
+            try? outbox?.enqueue(path: path, jsonObjectBody: jsonObjectBody, endpoint: destination.endpoint)
         }
     }
 
     /// Send pre-encoded JSON to `path`, recording success/failure on `SyncStatus`.
     /// Returns whether it reached the server with a 2xx — never throws.
-    private func postRaw(path: String, bodyJSON: Data) async -> Bool {
+    private func postRaw(path: String, bodyJSON: Data, destination: Destination) async -> Bool {
         do {
-            var request = try makeRequest(path: path, method: "POST")
+            var request = try SyncTransportPolicy.makeRequest(
+                baseURL: destination.endpoint, path: path, method: "POST", bearerToken: destination.token
+            )
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = bodyJSON
 
-            let (_, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let (_, response) = try await transport(request)
+            guard let http = response as? HTTPURLResponse else {
+                throw SyncClientError.httpStatus(0)
+            }
+            if !(200...299).contains(http.statusCode) {
                 print("[sync] \(path) returned status \(http.statusCode)")
                 await recordFailure(path: path, message: "HTTP \(http.statusCode)")
                 return false
             }
             await recordSuccess(path: path)
             return true
-        } catch SyncClientError.notConfigured {
-            // Sync is unconfigured — silently no-op, not a failure worth retrying.
-            return true
         } catch {
             print("[sync] \(path) failed: \(error)")
             await recordFailure(path: path, message: OperatorFacingError.message(error))
             return false
         }
+    }
+
+    private struct Destination: Sendable {
+        let endpoint: String
+        let token: String
+    }
+
+    private func destinationSnapshot() throws -> Destination {
+        let rawBase = syncServerURL().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawBase.isEmpty else { throw SyncClientError.notConfigured }
+        return Destination(endpoint: try PendingPushQueue.normalizedEndpoint(rawBase), token: syncAPIToken())
     }
 
     private func getPage<T: Decodable & Sendable>(

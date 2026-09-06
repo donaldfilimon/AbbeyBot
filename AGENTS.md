@@ -1,5 +1,7 @@
 # AbbeyBot
 
+Canonical instructions for the Swift checkout, not the separate Rust `abbey-bot` repository.
+
 ## Package Boundaries
 
 - One Swift package and one executable product, `AbbeyBot`. `Sources/AbbeyEntry/main.swift` dispatches desktop (default), `serve`, `cli`, and `quasar serve`; `AbbeyServer` and `AbbeyCLI` are targets, not executable products.
@@ -15,7 +17,7 @@
 
 ```bash
 bash Scripts/run.sh                # signed .app via LaunchServices
-bash Scripts/swift-run.sh help     # raw SPM arguments; not the signed-app launcher
+bash Scripts/swift-run.sh help     # AbbeyBot arguments, not SwiftPM flags; unsigned launch
 bash Scripts/run-server.sh         # server graph; loads .env
 bash Scripts/run-abbey.sh          # CLI graph; loads .env
 ```
@@ -77,4 +79,4 @@ ABBEY_PACKAGE_ROLE=server /usr/bin/xcrun --toolchain default swift test \
 
 - Use the canonical checkout. Changes land via `cursor/*` (preferred) or `codex/*` review branches and PRs into `main`; never commit/push directly or force-push `main`. These prefixes also control push CI. Avoid extra worktrees; remove only inactive, clean, fully merged worktrees/branches after integration.
 - Keep `.env`, `.swift-version`, dependencies, `.cursor/hooks/`, build products, and generated SPA assets untracked. Static/security checks also reject untracked numbered duplicate Swift files such as `Thing 2.swift`.
-- `.claude/skills/abbey-verify/SKILL.md` defines the ship workflow. `CLAUDE.md` is an extended reference, not a substitute for current scripts. Gate/toolchain convention changes also affect `.cursor/agents/abbey.md`, `.codex/agents/abbey.toml`, and the `.claude`/`.agents` verification skill mirrors; check for drift when changing those conventions.
+- `.claude/skills/abbey-verify/SKILL.md` defines the ship workflow. `CLAUDE.md` points here. Gate/toolchain convention changes also affect `.cursor/agents/abbey.md`, `.codex/agents/abbey.toml`, and the `.claude`/`.agents` verification skill mirrors; check for drift when changing those conventions.

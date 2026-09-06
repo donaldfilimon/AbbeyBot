@@ -1058,7 +1058,6 @@ public actor DiscordVoiceNativeMediaPlane: DiscordVoiceMediaPlane,
             // before removing it from reset's registry or returning to stop().
             try await withTaskCancellationHandler {
                 try await sendTask.value
-                try Task.checkCancellation()
             } onCancel: {
                 sendTask.cancel()
             }

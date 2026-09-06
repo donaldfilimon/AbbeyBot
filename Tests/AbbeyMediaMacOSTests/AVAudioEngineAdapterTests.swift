@@ -275,6 +275,41 @@ struct AVAudioEngineAdapterTests {
         #expect(await fixture.adapter.currentState() == expectedState)
     }
 
+    @Test("full teardown stops active capture before draining a suspended schedule", arguments: [0, 1, 2, 3])
+    func captureStopsBeforePlaybackDrain(stopKind: Int) async throws {
+        let fixture = try AudioFixture()
+        _ = try await fixture.adapter.startCapture()
+        let gate = PlaybackTestGate()
+        await fixture.runtime.holdPlaybackSchedule(gate)
+        let frame = try AudioPCMFrame(
+            float32: Array(repeating: 0, count: AudioPCMFrame.interleavedSampleCount)
+        )
+        let play = Task { try await fixture.adapter.play(frame) }
+        await gate.waitUntilEntered()
+        let stop = Task {
+            switch stopKind {
+            case 0: await fixture.adapter.stopNow()
+            case 1: await fixture.runtime.emit(event: .interruptionBegan)
+            case 2: await fixture.runtime.emit(event: .configurationChanged)
+            default: await fixture.runtime.emit(event: .deviceConfigurationChanged)
+            }
+        }
+        await gate.waitUntilCancelled()
+        await fixture.runtime.waitUntilCaptureStopped()
+        #expect(await fixture.runtime.isCaptureActive() == false)
+        #expect(await fixture.runtime.stopNowCount() == 0)
+        #expect(try await fixture.adapter.play(frame) == false)
+        await #expect(throws: CancellationError.self) {
+            try await fixture.adapter.startCapture()
+        }
+        await gate.release()
+        await stop.value
+        #expect(try await play.value == false)
+        #expect(await fixture.runtime.stopNowCount() == 1)
+        #expect(await fixture.runtime.activePlaybackCount() == 0)
+        #expect(await fixture.adapter.playbackQueueDepth() == 0)
+    }
+
     @Test("playback queue rejects overflow instead of growing unbounded")
     func playbackBackpressure() async throws {
         let fixture = try AudioFixture(maximumPendingPlaybackFrames: 2)
@@ -319,6 +354,8 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
     private var plays = 0
     private var playbackStops = 0
     private var activePlayback = 0
+    private var captureActive = false
+    private var captureStopWaiters: [CheckedContinuation<Void, Never>] = []
     private var eventInstallGate: PlaybackTestGate?
     private var scheduleGate: PlaybackTestGate?
     private var holdStart = false
@@ -339,6 +376,7 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
         deliver: @escaping @Sendable (UInt64, AudioCaptureRuntimeDelivery) async -> Void
     ) async throws {
         starts += 1
+        captureActive = true
         resumeSatisfiedStartObservers()
         self.deliver = deliver
         if holdStart {
@@ -370,13 +408,29 @@ private actor AudioEngineRuntimeSpy: AudioEngineRuntime {
         activePlayback += 1
     }
 
-    func stopCapture() { captureStops += 1 }
+    func stopCapture() {
+        captureStops += 1
+        captureActive = false
+        for waiter in captureStopWaiters { waiter.resume() }
+        captureStopWaiters.removeAll()
+    }
+
+    func waitUntilCaptureStopped() async {
+        if captureActive {
+            await withCheckedContinuation { captureStopWaiters.append($0) }
+        }
+    }
+
+    func isCaptureActive() -> Bool { captureActive }
     func stopPlayback() {
         playbackStops += 1
         activePlayback = 0
     }
     func stopNow() {
         fullStops += 1
+        captureActive = false
+        for waiter in captureStopWaiters { waiter.resume() }
+        captureStopWaiters.removeAll()
         activePlayback = 0
     }
 
@@ -439,14 +493,17 @@ private enum AudioRuntimeSpyError: Error {
     case startFailed
 }
 
-/// Explicit entry, cancellation and release barriers, with no sleeps or yield races.
+/// Barriers drive ordering; the watchdog only reports failures and releases stuck waiters.
 private actor PlaybackTestGate {
+    private var watchdog: Task<Void, Never>?
     private var entered = false
     private var isCancelled = false
     private var released = false
     private var entryWaiters: [CheckedContinuation<Void, Never>] = []
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
     private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    deinit { watchdog?.cancel() }
 
     func enter() async {
         entered = true
@@ -458,6 +515,12 @@ private actor PlaybackTestGate {
     }
 
     func waitUntilEntered() async {
+        if watchdog == nil {
+            watchdog = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                await self?.expire()
+            }
+        }
         if !entered { await withCheckedContinuation { entryWaiters.append($0) } }
     }
 
@@ -472,9 +535,19 @@ private actor PlaybackTestGate {
     }
 
     func release() {
+        watchdog?.cancel()
         released = true
         for waiter in releaseWaiters { waiter.resume() }
         releaseWaiters.removeAll()
+    }
+
+    private func expire() {
+        Issue.record("Timed out waiting for playback test gate; releasing all barriers")
+        entered = true
+        for waiter in entryWaiters { waiter.resume() }
+        entryWaiters.removeAll()
+        cancelled()
+        release()
     }
 }
 

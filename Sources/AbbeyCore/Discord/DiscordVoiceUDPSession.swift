@@ -402,6 +402,7 @@ public actor DiscordVoiceUDPSession {
     }
 
     private func write(_ bytes: [UInt8], permitsDiscovery: Bool) async throws {
+        try Task.checkCancellation()
         guard !bytes.isEmpty,
               bytes.count <= configuration.maximumDatagramBytes
         else {
@@ -419,15 +420,32 @@ public actor DiscordVoiceUDPSession {
         var buffer = channel.channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
         do {
-            try await channel.channel.writeAndFlush(
-                AddressedEnvelope(remoteAddress: remoteAddress, data: buffer)
-            )
-        } catch is CancellationError {
-            throw CancellationError()
+            // NIO's future-to-async bridge does not cancel pending writes. Close
+            // this exact socket to fail queued writes instead of letting capture
+            // stop wait forever for its cancelled send. A session is single-use:
+            // never rebind after cancellation and invalidate its NAT mapping.
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await channel.channel.writeAndFlush(
+                    AddressedEnvelope(remoteAddress: remoteAddress, data: buffer)
+                )
+                try Task.checkCancellation()
+            } onCancel: {
+                channel.channel.close(promise: nil)
+            }
         } catch {
             if state != .closed {
                 state = .failed
+                bufferedDatagrams.removeAll(keepingCapacity: false)
                 resumeReceiveWaiter(throwing: SessionError.transportFailure)
+            }
+            if Task.isCancelled {
+                // Do not return to the media-plane drain until this socket and
+                // its pipeline have finished closing. Already-sent UDP cannot
+                // be recalled, but no queued packet can be emitted afterwards.
+                channel.channel.close(promise: nil)
+                try? await channel.channel.closeFuture.get()
+                throw CancellationError()
             }
             throw SessionError.transportFailure
         }
@@ -516,5 +534,10 @@ public actor DiscordVoiceUDPSession {
 
     func hasPendingReceiveWaiterForTesting() -> Bool {
         receiveWaiter != nil
+    }
+
+    func installOutboundHandlerForTesting(_ handler: any ChannelHandler & Sendable) async throws {
+        guard let channel else { throw errorForCurrentState() }
+        try await channel.channel.pipeline.addHandler(handler).get()
     }
 }

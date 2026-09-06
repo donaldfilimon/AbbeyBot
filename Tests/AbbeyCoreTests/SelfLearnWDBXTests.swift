@@ -220,6 +220,76 @@ struct SelfLearnWDBXTests {
         #expect(reopened.manifestSnapshot.segmentCount == 2)
     }
 
+    @Test(arguments: [false, true])
+    func wdbxReopenRepairsInterruptedTailBeforeAppending(withCommittedPrefix: Bool) throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-tail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let segment = dir.appendingPathComponent("segments/seg-0000.jsonl")
+        do {
+            let store = try WDBXStore(root: dir, dimension: 1)
+            if withCommittedPrefix {
+                try store.upsert(WDBXRecord(id: "before", vector: [1], payload: [:]))
+            }
+        }
+        let prefix = try (withCommittedPrefix ? Data(contentsOf: segment) : Data())
+        var interrupted = prefix
+        interrupted.append(contentsOf: #"{"id":"interrupted","payload":{"text":""#.utf8)
+        interrupted.append(0xC3) // Interrupted UTF-8, not just incomplete JSON.
+        try interrupted.write(to: segment)
+
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(try Data(contentsOf: segment) == prefix)
+        #expect(reopened.recordCount == (withCommittedPrefix ? 1 : 0))
+        try reopened.upsert(WDBXRecord(id: "after", vector: [2], payload: [:]))
+        let again = try WDBXStore(root: dir, dimension: 1)
+        #expect(again.recent().map(\.id) == (withCommittedPrefix ? ["after", "before"] : ["after"]))
+        #expect(again.manifestSnapshot.recordCount == (withCommittedPrefix ? 2 : 1))
+    }
+
+    @Test func wdbxReopenPreservesCompleteLegacyTailWithoutNewline() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-legacy-tail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let segment = dir.appendingPathComponent("segments/seg-0000.jsonl")
+        do {
+            let store = try WDBXStore(root: dir, dimension: 1)
+            try store.upsert(WDBXRecord(id: "legacy", vector: [1], payload: [:]))
+        }
+        let terminated = try Data(contentsOf: segment)
+        try Data(terminated.dropLast()).write(to: segment)
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(reopened.recent().map(\.id) == ["legacy"])
+        #expect(try Data(contentsOf: segment) == terminated)
+        try reopened.upsert(WDBXRecord(id: "after", vector: [2], payload: [:]))
+        let again = try WDBXStore(root: dir, dimension: 1)
+        #expect(again.recent().map(\.id) == ["after", "legacy"])
+    }
+
+    @Test func wdbxManifestFailureRetainsCommittedLogAndRepairsOnReopen() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-manifest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try WDBXStore(root: dir, dimension: 1)
+        let manifestURL = dir.appendingPathComponent("manifest.json")
+        let staleManifest = try Data(contentsOf: manifestURL)
+        try FileManager.default.removeItem(at: manifestURL)
+        try FileManager.default.createDirectory(at: manifestURL, withIntermediateDirectories: false)
+        // A nonempty directory reliably prevents atomic replacement, even as root.
+        try Data().write(to: manifestURL.appendingPathComponent("blocker"))
+        #expect(throws: (any Error).self) {
+            try store.upsert(WDBXRecord(id: "committed", vector: [1], payload: [:]))
+        }
+        #expect(store.recent().map(\.id) == ["committed"])
+        #expect(store.manifestSnapshot.recordCount == 1)
+        try FileManager.default.removeItem(at: manifestURL)
+        try staleManifest.write(to: manifestURL)
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(reopened.recent().map(\.id) == ["committed"])
+        #expect(reopened.manifestSnapshot.recordCount == 1)
+        #expect(reopened.manifestSnapshot.segmentCount == 1)
+    }
+
     @Test func dqnRejectsInvalidLiveAndReplayedExperiences() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("abbey-dqn-invalid-\(UUID().uuidString)", isDirectory: true)
@@ -268,6 +338,25 @@ struct SelfLearnWDBXTests {
         #expect(await agent.online.weights == expected.weights)
         #expect(await agent.online.biases == expected.biases)
         #expect(await agent.stepCount == 1)
+        let replayed = DQNAgent(topology: [2, 4], epsilon: 0, seed: 7, experienceJournalURL: journalURL)
+        try await replayed.loadExperienceJournalIfPresent()
+        #expect(await replayed.bufferCount() == 1)
+        await replayed.learn(batchSize: 1)
+        #expect(await replayed.online.weights == expected.weights)
+        #expect(await replayed.online.biases == expected.biases)
+    }
+
+    @Test func dqnInvalidSelectionDoesNotChangeReceiptOrRandomSequence() async {
+        let agent = DQNAgent(topology: [2, 4], epsilon: 1, seed: 7)
+        let control = DQNAgent(topology: [2, 4], epsilon: 1, seed: 7)
+        let invalidStates: [[Float]] = [[], [1], [1, 2, 3], [.nan, 1], [1, .infinity]]
+        for state in invalidStates {
+            #expect(await agent.selectAction(state: state) == 0)
+        }
+        #expect(await agent.lastQValues.isEmpty)
+        #expect(await agent.lastStrategy == .answer)
+        let expected = await control.selectAction(state: [1, 1])
+        #expect(await agent.selectAction(state: [1, 1]) == expected)
     }
 
     @Test func dqnSelectsAndRemembersWithFourActions() async {
