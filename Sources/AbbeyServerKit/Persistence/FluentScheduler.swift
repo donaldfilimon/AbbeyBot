@@ -71,8 +71,11 @@ public actor FluentScheduler {
                 let lines = recent.reversed().map {
                     ChannelSummaryBuilder.Line(authorId: $0.authorId, content: $0.content)
                 }
-                channel.summary = ChannelSummaryBuilder.summarize(lines)
+                let summary = ChannelSummaryBuilder.summarize(lines)
+                guard channel.summary != summary || channel.messageCount != recent.count else { continue }
+                channel.summary = summary
                 channel.messageCount = recent.count
+                channel.sourceUpdatedAt = nil
                 try await channel.save(on: db)
                 await eventBus.publish(
                     .channelContextConsolidated(channelId: channel.channelId, messageCount: recent.count)

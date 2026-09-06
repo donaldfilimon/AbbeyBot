@@ -26,6 +26,175 @@ struct ServerSyncApplyTests {
         }
     }
 
+    @Test(arguments: [Int.min, -1, 0, 2, Int.max])
+    func forgetRejectsInvalidIndicesWithoutMutating(index: Int) async throws {
+        try await withRuntime { app, runtime in
+            try await MemoryRepository.appendFact(userId: "u", guildId: "g", fact: "keep", on: app.db)
+            await #expect(throws: MemoryForgetError.invalidIndex) {
+                try await MemoryRepository.forgetFact(userId: "u", guildId: "g", index: index, on: app.db)
+            }
+            await #expect(throws: MemoryForgetError.invalidIndex) {
+                try await runtime.forget(userId: "u", guildId: "g", index: index)
+            }
+            #expect(try await MemoryRepository.facts(userId: "u", guildId: "g", on: app.db) == ["keep"])
+        }
+    }
+
+    enum UserMutation: CaseIterable, Sendable {
+        case append, forget, interaction, penalty, tombstone, resurrect
+    }
+
+    @Test(arguments: UserMutation.allCases)
+    func localUserMutationDefeatsStaleRemoteUpdateAndTombstone(mutation: UserMutation) async throws {
+        try await withRuntime { app, _ in
+            let source = Date(timeIntervalSince1970: 1_000)
+            let stale = Date(timeIntervalSince1970: 2_000)
+            let initial = ServerSyncDTO.User(
+                compositeKey: "g:u", discordUserId: "u", guildId: "g",
+                facts: ["first", "second"], reputation: 0.5, interactionCount: 1, updatedAt: source
+            )
+            try await ServerSyncApply.applyUsers([initial], on: app.db)
+            switch mutation {
+            case .append:
+                try await MemoryRepository.appendFact(userId: "u", guildId: "g", fact: "local", on: app.db)
+            case .forget:
+                try await MemoryRepository.forgetFact(userId: "u", guildId: "g", index: 1, on: app.db)
+            case .interaction, .penalty:
+                let brain = FluentSocialBrain(db: app.db, eventBus: EventBus(), decay: { 0.9 })
+                await brain.warmCache()
+                if mutation == .interaction {
+                    await brain.recordInteraction(userId: "u", guildId: "g", quality: 0.9)
+                } else {
+                    await brain.penalize(userId: "u", guildId: "g", reason: "test")
+                }
+            case .tombstone:
+                try await MemoryRepository.softDelete(userId: "u", guildId: "g", on: app.db)
+            case .resurrect:
+                let row = try #require(try await UserMemory.query(on: app.db).first())
+                row.deletedAt = source
+                try await row.save(on: app.db)
+                try await MemoryRepository.appendFact(userId: "u", guildId: "g", fact: "first", on: app.db)
+            }
+            let local = try #require(try await UserMemory.query(on: app.db).first())
+            #expect(local.sourceUpdatedAt == nil)
+            let localStamp = try #require(local.updatedAt)
+            #expect(localStamp > stale)
+            if mutation == .resurrect { #expect(local.deletedAt == nil) }
+
+            for deletedAt in [nil, stale] as [Date?] {
+                try await ServerSyncApply.applyUsers([.init(
+                    compositeKey: "g:u", discordUserId: "u", guildId: "g",
+                    facts: ["stale"], reputation: 0.1, interactionCount: 0,
+                    updatedAt: stale, deletedAt: deletedAt
+                )], on: app.db)
+                let after = try #require(try await UserMemory.query(on: app.db).first())
+                #expect(after.facts == local.facts)
+                #expect(after.reputation == local.reputation)
+                #expect(after.interactionCount == local.interactionCount)
+                #expect(after.deletedAt == local.deletedAt)
+                #expect(after.sourceUpdatedAt == nil)
+                #expect(after.updatedAt == localStamp)
+            }
+        }
+    }
+
+    enum ChannelMutation: CaseIterable, Sendable {
+        case bump, consolidate, tombstone, resurrect
+    }
+
+    @Test(arguments: ChannelMutation.allCases)
+    func localChannelMutationDefeatsStaleRemoteUpdateAndTombstone(mutation: ChannelMutation) async throws {
+        try await withRuntime { app, _ in
+            let source = Date(timeIntervalSince1970: 1_000)
+            let stale = Date(timeIntervalSince1970: 2_000)
+            try await ServerSyncApply.applyChannels([.init(
+                compositeKey: "g:c", channelId: "c", guildId: "g",
+                summary: "remote", messageCount: 4, updatedAt: source
+            )], on: app.db)
+            switch mutation {
+            case .bump:
+                try await ChannelRepository.bump(channelId: "c", guildId: "g", on: app.db)
+            case .consolidate:
+                try await MessageRepository.insert(
+                    discordMessageId: "m", channelId: "c", guildId: "g",
+                    authorId: "u", content: "local message", on: app.db
+                )
+                let scheduler = FluentScheduler(
+                    db: app.db, logger: app.logger, eventBus: EventBus(), metrics: EngineMetrics(),
+                    cooldownSeconds: { 0 }, consolidationIntervalMinutes: { 1 }
+                )
+                await scheduler.consolidateAllChannels()
+            case .tombstone:
+                try await ChannelRepository.softDelete(channelId: "c", guildId: "g", on: app.db)
+            case .resurrect:
+                let row = try #require(try await ChannelContext.query(on: app.db).first())
+                row.deletedAt = source
+                try await row.save(on: app.db)
+                try await ChannelRepository.bump(channelId: "c", guildId: "g", on: app.db)
+            }
+            let local = try #require(try await ChannelContext.query(on: app.db).first())
+            #expect(local.sourceUpdatedAt == nil)
+            let localStamp = try #require(local.updatedAt)
+            #expect(localStamp > stale)
+            if mutation == .resurrect { #expect(local.deletedAt == nil) }
+
+            for deletedAt in [nil, stale] as [Date?] {
+                try await ServerSyncApply.applyChannels([.init(
+                    compositeKey: "g:c", channelId: "c", guildId: "g",
+                    summary: "stale", messageCount: 0, updatedAt: stale, deletedAt: deletedAt
+                )], on: app.db)
+                let after = try #require(try await ChannelContext.query(on: app.db).first())
+                #expect(after.summary == local.summary)
+                #expect(after.messageCount == local.messageCount)
+                #expect(after.deletedAt == local.deletedAt)
+                #expect(after.sourceUpdatedAt == nil)
+                #expect(after.updatedAt == localStamp)
+            }
+        }
+    }
+
+    @Test func duplicateAndBlankFactsPreserveSourceClockForLaterRemoteChanges() async throws {
+        try await withRuntime { app, _ in
+            let source = Date(timeIntervalSince1970: 1_000)
+            let later = Date(timeIntervalSince1970: 2_000)
+            try await ServerSyncApply.applyUsers([.init(
+                compositeKey: "g:u", discordUserId: "u", guildId: "g",
+                facts: ["keep"], reputation: 0.5, interactionCount: 1, updatedAt: source
+            )], on: app.db)
+            for fact in [" keep ", "   "] {
+                try await MemoryRepository.appendFact(userId: "u", guildId: "g", fact: fact, on: app.db)
+            }
+            let local = try #require(try await UserMemory.query(on: app.db).first())
+            #expect(local.sourceUpdatedAt == source)
+            try await ServerSyncApply.applyUsers([.init(
+                compositeKey: "g:u", discordUserId: "u", guildId: "g",
+                facts: [], reputation: 0.5, interactionCount: 1, updatedAt: later, deletedAt: later
+            )], on: app.db)
+            #expect(try await UserMemory.query(on: app.db).count() == 0)
+        }
+    }
+
+    @Test func channelRemoteUpdatesAndTombstonesKeepUsingSourceClock() async throws {
+        try await withRuntime { app, _ in
+            for seconds in [1_000.0, 2_000.0] {
+                let stamp = Date(timeIntervalSince1970: seconds)
+                try await ServerSyncApply.applyChannels([.init(
+                    compositeKey: "g:c", channelId: "c", guildId: "g",
+                    summary: "remote \(seconds)", messageCount: 4, updatedAt: stamp
+                )], on: app.db)
+                let row = try #require(try await ChannelContext.query(on: app.db).first())
+                #expect(row.sourceUpdatedAt == stamp)
+                #expect(row.summary == "remote \(seconds)")
+            }
+            let stamp = Date(timeIntervalSince1970: 3_000)
+            try await ServerSyncApply.applyChannels([.init(
+                compositeKey: "g:c", channelId: "c", guildId: "g",
+                summary: "", messageCount: 0, updatedAt: stamp, deletedAt: stamp
+            )], on: app.db)
+            #expect(try await ChannelContext.query(on: app.db).count() == 0)
+        }
+    }
+
     @Test func insertsMissingUserAndSkipsOlderRemote() async throws {
         try await withRuntime { app, _ in
             let inserted = try await ServerSyncApply.applyUsers(

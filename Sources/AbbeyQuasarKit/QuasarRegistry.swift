@@ -26,8 +26,22 @@ public actor QuasarRegistry {
             close(descriptor)
             throw QuasarError.registryLocked
         }
+        do {
+            var recovered = try Self.loadRecovering(home: self.home, registryURL: self.registryURL)
+            if recovered.contains(where: { $0.status == .generating }) {
+                for index in recovered.indices where recovered[index].status == .generating {
+                    recovered[index].status = .error
+                    recovered[index].lastError = "generation interrupted by restart; prepare and approve a new plan"
+                }
+                try Self.persist(recovered, home: self.home, registryURL: self.registryURL)
+            }
+            self.sites = recovered
+        } catch {
+            flock(descriptor, LOCK_UN)
+            close(descriptor)
+            throw error
+        }
         self.lockDescriptor = descriptor
-        self.sites = try Self.loadRecovering(home: self.home, registryURL: self.registryURL)
     }
 
     deinit {
@@ -144,14 +158,14 @@ public actor QuasarRegistry {
         let previous = sites
         sites = updated
         do {
-            try persist()
+            try Self.persist(sites, home: home, registryURL: registryURL)
         } catch {
             sites = previous
             throw error
         }
     }
 
-    private func persist() throws {
+    private static func persist(_ sites: [Site], home: URL, registryURL: URL) throws {
         try Self.validateSites(sites)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

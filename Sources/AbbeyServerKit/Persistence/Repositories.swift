@@ -48,6 +48,7 @@ public enum MemoryRepository {
         guard !trimmed.isEmpty else { return }
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         if let existing = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() {
+            guard existing.deletedAt != nil || !existing.facts.contains(trimmed) else { return }
             // A remember after soft-delete resurrects the row so sync can ship a live update.
             if existing.deletedAt != nil {
                 existing.deletedAt = nil
@@ -55,6 +56,7 @@ public enum MemoryRepository {
             if !existing.facts.contains(trimmed) {
                 existing.facts.append(trimmed)
             }
+            existing.sourceUpdatedAt = nil
             try await existing.save(on: db)
         } else {
             let record = UserMemory(discordUserId: userId, guildId: guildId, facts: [trimmed])
@@ -69,11 +71,15 @@ public enum MemoryRepository {
         else {
             throw MemoryForgetError.noMemory
         }
+        guard index > 0 else {
+            throw MemoryForgetError.invalidIndex
+        }
         let idx = index - 1
         guard memory.facts.indices.contains(idx) else {
             throw MemoryForgetError.invalidIndex
         }
         memory.facts.remove(at: idx)
+        memory.sourceUpdatedAt = nil
         try await memory.save(on: db)
     }
 
@@ -87,6 +93,7 @@ public enum MemoryRepository {
             throw MemoryTombstoneError.noMemory
         }
         memory.deletedAt = Date()
+        memory.sourceUpdatedAt = nil
         try await memory.save(on: db)
     }
 
@@ -151,6 +158,7 @@ public enum ChannelRepository {
                 existing.deletedAt = nil
             }
             existing.messageCount += 1
+            existing.sourceUpdatedAt = nil
             try await existing.save(on: db)
         } else {
             let row = ChannelContext(channelId: channelId, guildId: guildId, messageCount: 1)
@@ -186,6 +194,7 @@ public enum ChannelRepository {
             throw ChannelTombstoneError.noChannel
         }
         channel.deletedAt = Date()
+        channel.sourceUpdatedAt = nil
         try await channel.save(on: db)
     }
 

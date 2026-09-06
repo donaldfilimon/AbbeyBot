@@ -173,6 +173,103 @@ struct SelfLearnWDBXTests {
         #expect(abs(accelerated - naive) < 1e-5)
     }
 
+    @Test func wdbxEncodingFailureDoesNotPublishOrConsumeSegmentSlots() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-encode-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try WDBXStore(root: dir, dimension: 1, maxRecordsPerSegment: 100)
+        try store.upsert(WDBXRecord(id: "same", vector: [1], payload: ["guildId": "g"]))
+        let before = store.recent()
+        let manifest = store.manifestSnapshot
+        for id in ["same", "new"] {
+            #expect(throws: EncodingError.self) {
+                try store.upsert(WDBXRecord(id: id, vector: [.nan], payload: ["guildId": "g"]))
+            }
+        }
+        #expect(store.recent() == before)
+        #expect(store.manifestSnapshot == manifest)
+        for _ in 1..<100 {
+            try store.upsert(WDBXRecord(id: "same", vector: [1], payload: ["guildId": "g"]))
+        }
+        #expect(store.manifestSnapshot.segmentCount == 1)
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(reopened.recent().map(\.id) == ["same"])
+    }
+
+    @Test func wdbxSegmentWriteFailurePreservesCacheAndManifest() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-wdbx-write-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try WDBXStore(root: dir, dimension: 1, maxRecordsPerSegment: 100)
+        for _ in 0..<100 {
+            try store.upsert(WDBXRecord(id: "same", vector: [1], payload: [:]))
+        }
+        let before = store.recent()
+        let manifest = store.manifestSnapshot
+        let blockedSegment = dir.appendingPathComponent("segments/seg-0001.jsonl")
+        try FileManager.default.createDirectory(at: blockedSegment, withIntermediateDirectories: false)
+        #expect(throws: (any Error).self) {
+            try store.upsert(WDBXRecord(id: "same", vector: [2], payload: [:]))
+        }
+        #expect(store.recent() == before)
+        #expect(store.manifestSnapshot == manifest)
+        try FileManager.default.removeItem(at: blockedSegment)
+        try store.upsert(WDBXRecord(id: "same", vector: [3], payload: [:]))
+        let reopened = try WDBXStore(root: dir, dimension: 1)
+        #expect(reopened.recent().first?.vector == [3])
+        #expect(reopened.manifestSnapshot.segmentCount == 2)
+    }
+
+    @Test func dqnRejectsInvalidLiveAndReplayedExperiences() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("abbey-dqn-invalid-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let journalURL = dir.appendingPathComponent("experience.jsonl")
+        let journal = ExperienceJournal(url: journalURL)
+        let agent = DQNAgent(topology: [2, 4], epsilon: 0, seed: 7, experienceJournalURL: journalURL)
+        let valid = Experience(state: [0.5, 1], action: 0, reward: 1, nextState: [1, 0.5], done: false)
+        let invalid = [
+            Experience(state: [0.5, 1], action: -1, reward: 1, nextState: [1, 0.5], done: false),
+            Experience(state: [0.5, 1], action: 4, reward: 1, nextState: [1, 0.5], done: false),
+            Experience(state: [1], action: 0, reward: 1, nextState: [1, 0.5], done: false),
+            Experience(state: [1, 2, 3], action: 0, reward: 1, nextState: [1, 0.5], done: false),
+            Experience(state: [0.5, 1], action: 0, reward: 1, nextState: [1], done: true),
+            Experience(state: [0.5, 1], action: 0, reward: 1, nextState: [1, 2, 3], done: false),
+        ]
+        let before = await agent.online
+        for experience in invalid {
+            await agent.remember(experience)
+            try journal.append(experience)
+        }
+        for scalar in [Float.nan, .infinity, -.infinity] {
+            await agent.remember(Experience(state: [scalar, 1], action: 0, reward: 1, nextState: [1, 1], done: false))
+            await agent.remember(Experience(state: [1, 1], action: 0, reward: scalar, nextState: [1, 1], done: false))
+            await agent.remember(Experience(state: [1, 1], action: 0, reward: 1, nextState: [scalar, 1], done: true))
+        }
+        #expect(await agent.bufferCount() == 0)
+        let journalBytes = try Data(contentsOf: journalURL)
+        try await agent.loadExperienceJournalIfPresent()
+        #expect(await agent.bufferCount() == 0)
+        #expect(try Data(contentsOf: journalURL) == journalBytes)
+        await agent.learn(batchSize: 0)
+        await agent.learn(batchSize: -1)
+        await agent.learn(batchSize: 1)
+        #expect(await agent.stepCount == 0)
+        #expect(await agent.online.weights == before.weights)
+        #expect(await agent.online.biases == before.biases)
+
+        await agent.remember(valid)
+        #expect(try journal.loadRecent().count == invalid.count + 1)
+        let control = DQNAgent(topology: [2, 4], epsilon: 0, seed: 7)
+        await control.remember(valid)
+        await agent.learn(batchSize: 1)
+        await control.learn(batchSize: 1)
+        let expected = await control.online
+        #expect(await agent.online.weights == expected.weights)
+        #expect(await agent.online.biases == expected.biases)
+        #expect(await agent.stepCount == 1)
+    }
+
     @Test func dqnSelectsAndRemembersWithFourActions() async {
         let agent = DQNAgent(topology: DQNAgent.defaultTopology, epsilon: 0, seed: 1)
         await agent.setEpsilonForTesting(0)

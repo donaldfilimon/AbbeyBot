@@ -60,6 +60,7 @@ public actor FluentSocialBrain {
             {
                 existing.reputation = newValue
                 existing.interactionCount += 1
+                existing.sourceUpdatedAt = nil
                 try await existing.save(on: db)
             } else {
                 let record = UserMemory(
