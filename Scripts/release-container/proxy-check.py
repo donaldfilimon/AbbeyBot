@@ -2,7 +2,7 @@
 """Real HTTP/WebSocket traffic through Caddy with a deterministic auth fixture."""
 import base64
 import hashlib
-import http.client
+from http.client import HTTPConnection
 import json
 import os
 import socket
@@ -24,8 +24,13 @@ SENSITIVE = {
 }
 
 
+# The module is imported as `HTTPConnection` on purpose: this helper is named
+# `http`, so `import http.client` would leave `http` bound to this function and
+# `http.client` would resolve against it. Stage 7 never ran until now, so that
+# shadowing failed on its first execution with
+# `AttributeError: 'function' object has no attribute 'client'`.
 def http(port, host, path, headers=None):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    connection = HTTPConnection("127.0.0.1", port, timeout=10)
     try:
         connection.request("GET", path, headers={"Host": host, **(headers or {})})
         response = connection.getresponse()

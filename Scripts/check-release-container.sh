@@ -245,12 +245,17 @@ docker rm -f "$PREVIEW_CONTAINER" >/dev/null
 echo "======== 7/7 validate production Caddy routing and proxy traffic ========"
 docker run --rm --entrypoint caddy "$ABBEY_CADDY_RELEASE_IMAGE" list-modules \
     | grep -Fqx 'dns.providers.cloudflare'
+# `adapt --validate` provisions the adapted config, so caddy-dns/cloudflare
+# regex-checks the token against ^[A-Za-z0-9_-]{35,50}$ (or a cf(ut|at)_ prefix).
+# That is a format check only -- nothing is sent to Cloudflare -- but the
+# previous placeholder was 29 characters and failed it, aborting the whole stage
+# before a single route was inspected. This value is still entirely fake.
 docker run --rm \
     --env ABBEY_API_DOMAIN=api.example.test \
     --env ABBEY_QUASAR_PREVIEW_DOMAIN=preview.example.test \
     --env ABBEY_QUASAR_PREVIEW_INTERNAL_TOKEN=abbey-release-gate-internal-token \
     --env ACME_EMAIL=operator@example.test \
-    --env CLOUDFLARE_API_TOKEN=cloudflare-release-gate-token \
+    --env CLOUDFLARE_API_TOKEN=cloudflare-release-gate-token-not-real \
     --entrypoint caddy \
     "$ABBEY_CADDY_RELEASE_IMAGE" \
     adapt --config /etc/caddy/Caddyfile --adapter caddyfile --pretty --validate \
