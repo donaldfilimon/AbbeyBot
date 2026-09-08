@@ -29,6 +29,7 @@ the older Quasar ledger; dated failures remain historical evidence.
 | Focused active-preview replacement at `f287cdd` | Passed with both actual child commands started and retired. |
 | `deploy/production/tests/run.sh` on the PR #84 tree | All 30 tests passed; deployment shell scripts also passed `bash -n`. This is local control-flow coverage with test doubles. |
 | Native gate with compiler workaround `83ba63d` | `NATIVE_MEDIA_SMOKE_GREEN`, including fresh pinned bootstrap, debug/release native suites, output-secrecy checks and static/security. The release suite passed 102 tests in 9 suites. Later Core/Quasar fixture changes are not an additional native gate run. |
+| Fresh ordinary and native gates at `86738fc` | Both exited 0: `VERIFY-ALL GREEN` and `NATIVE_MEDIA_SMOKE_GREEN`. Native debug and release each passed 102 tests in 9 suites; fresh bootstrap, versions, rerun safety and runtime output-secrecy checks passed. This candidate includes the PR #85 fixture correction and the initial documentation update. |
 | Linux CI at merged `77ea1c0` | [Run 34214616421](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34214616421) passed. |
 | PR #84 container gate | [Run 34213985781](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34213985781) passed. This is the PR image test, not proof of production deployment. |
 | Release publication at `77ea1c0` | [Run 34214616577](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34214616577) was still running at this observation. |
@@ -67,7 +68,7 @@ must be configured privately. Their values must never enter this ledger.
 | Required outcome | Remaining evidence |
 | --- | --- |
 | Clean canonical main equals live remote main | Integrate remaining review branches; fetch, strict fast-forward and verify clean status and exact SHA. |
-| Final ordinary and native gates | Ordinary gate above is green; record native verification scope against the final candidate. |
+| Final ordinary and native gates | Both gates passed at `86738fc` as recorded above. Reconcile that exact tested source/test tree with the eventual merged candidate. |
 | Commit-specific Linux CI and release images | Await remaining workflows and verify the final main commit's results. |
 | Immutable GHCR and running-image identity | Obtain registry read access, inspect both private packages and compare deployed image identities. |
 | Hostinger health and persistent restart | SSH access, host/workload inventory, guarded bootstrap or maintenance upgrade, container/host restart and all three stores. |
