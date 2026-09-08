@@ -1,6 +1,17 @@
 # Discord Voice Architecture
 
-Status: **in progress**. AbbeyBot currently has Discord gateway voice presence only. It does not yet send or receive voice audio, and no UI or command may claim otherwise until the release criteria below pass.
+Status: **live qualification blocked**. Gateway voice presence and local native
+audio capture/send/receive/playback composition exist. Default media availability
+remains `.locallyComposed` when both source and sink are present; an explicit,
+one-use consent qualification lease admits the canary. No live-call completion
+claim is supported yet. See the [current integration ledger](verification/product-integration-2026-09-08.md).
+
+Video still requires a consented metadata-only observation of Discord's selected
+codec, its typed wire decoder and final production composition. The negotiation
+probe cannot authorize transmission. Camera and Go Live promotion require their
+own successful outcomes in `LiveMediaQualificationReceipt`, alongside audio,
+reconnect, source switching, interruption recovery, emergency stop, participant
+change re-consent and clean leave.
 
 ## Production boundary
 
@@ -11,7 +22,7 @@ Discord voice is a separate real-time subsystem from the bot gateway:
 3. A UDP transport performs IP discovery and carries RTP packets protected with Discord's negotiated AEAD transport mode.
 4. Opus converts 48 kHz PCM frames to and from Discord audio payloads.
 5. DAVE encrypts and decrypts the encoded media frames end to end. Transport encryption alone is not sufficient for current Discord voice channels.
-6. A platform audio adapter captures and plays PCM. The macOS desktop adapter will use Apple audio APIs; server and CLI targets must remain buildable without a physical audio device.
+6. A platform audio adapter captures and plays PCM. The macOS desktop adapter uses Apple audio APIs; server and CLI targets remain buildable without a physical audio device.
 
 The voice server token, session ID, endpoint, transport secret, and DAVE epoch keys are ephemeral secrets. They must remain in actor-owned memory, must not be encoded into SwiftData/Fluent/WDBX/checkpoints, and must not appear in logs, errors, metrics, or UI.
 
@@ -21,7 +32,9 @@ capability containing its generation, audio SSRC, typed AEAD mode, 32-byte trans
 effective DAVE version. It installs that capability into a session-owned media plane and resolves
 only secret-free readiness booleans to the controller. The raw Session Description is not retained.
 Reset preserves a generation high-water mark, preventing late tasks from reinstalling retired key
-material. This is bootstrap proof, not a packet pump or shipped-audio claim.
+material. The native factory additionally composes capture and receive loops
+around that plane when a source and sink are injected. Bootstrap and local
+composition tests do not prove a participant-consented live Discord call.
 
 ## State model
 

@@ -2,6 +2,11 @@
 
 This is an implementation/rollout ledger, not a release certification. Pending rows remain pending until backed by an observed result.
 
+**September 8 update:** repository integration and local verification advanced
+after this entry. The [current integration ledger](product-integration-2026-09-08.md)
+supersedes the pending Git/PR/local-gate claims below. This dated snapshot remains
+as historical evidence; live rollout and provider acceptance are still open.
+
 ## Scope and integration
 
 - Approved plan: [Quasar completion](../plans/2026-09-06-quasar-completion.md).
