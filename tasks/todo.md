@@ -2,6 +2,22 @@
 
 Granular steps under `tasks/goals.md`. Coarse intentions live there, not here.
 
+## September 8 integration closeout
+
+See the [current evidence and completion audit](../docs/verification/product-integration-2026-09-08.md)
+for commit-specific results. Dated entries below retain their original scope.
+
+- [x] Strictly fast-forward the original baseline and merge the WebKit delegate
+      and native compiler/DAVE test corrections through PRs #83 and #84.
+- [x] Pass the complete ordinary gate at `f287cdd`, including the active-preview
+      replacement fixture correction in PR #85; pass 30 deployment tests.
+- [ ] Complete PR #85 hosted checks/integration and synchronize canonical main.
+- [ ] Record final release image identities and native qualification scope.
+- [ ] Complete SSH/domain/registry/R2 prerequisites and production recovery drills.
+- [ ] Prove deployed real-model Quasar, Discord proposal denial and Twitch delivery.
+- [ ] Observe consented Discord codec negotiation, complete the observed media
+      composition, and collect the required content-free qualification receipt.
+
 ## Apply strict code-quality findings from PR #53's merged diff — done
 
 - [x] Dedupe `ServerSyncClient.makeRequest` / `AbbeyServerClient.makeRequest` behind a shared

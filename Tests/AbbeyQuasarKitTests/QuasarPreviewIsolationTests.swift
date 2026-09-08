@@ -225,18 +225,30 @@ struct QuasarPreviewIsolationTests {
     @Test func startingAnotherSiteStopsTheOnlyActivePreview() async throws {
         let firstRoot = try fixtureSite()
         let secondRoot = try fixtureSite()
+        let firstReady = firstRoot.appendingPathComponent("preview-ready")
+        let secondReady = secondRoot.appendingPathComponent("preview-ready")
         defer {
             try? FileManager.default.removeItem(at: firstRoot)
             try? FileManager.default.removeItem(at: secondRoot)
         }
         let manager = QuasarPreviewManager(
-            readinessAttempts: 2,
+            readinessAttempts: 100,
             pollInterval: .milliseconds(10),
             command: .init(
-                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-                arguments: { _ in ["sleep", "30"] }
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: { port in
+                    ["-c", "printf ready > \"$1\"; exec sleep 30", "preview-fixture",
+                     (port == 4_710 ? firstReady : secondReady).path]
+                }
             ),
-            readinessProbe: { _ in true }
+            // Like production HTTP readiness, this proves the child command
+            // has started. An unconditional true races supervisor startup and
+            // tests cancellation during launch instead of active replacement.
+            readinessProbe: { url in
+                FileManager.default.fileExists(
+                    atPath: (url.port == 4_710 ? firstReady : secondReady).path
+                )
+            }
         )
 
         #expect(await manager.start(

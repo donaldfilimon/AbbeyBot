@@ -64,11 +64,16 @@ bash Scripts/run-cli-smoke.sh
 bash Scripts/verify-all.sh         # complete local release gate
 ```
 
-CI (`.github/workflows/abbey-ci.yml`) runs the static/security check, lints/tests/builds the dashboard SPA, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyCLITests`/`AbbeyServerKitTests`/`AbbeyServerTests` on Linux on every push/PR. Desktop (`AbbeyBotApp`) has no hosted CI yet — it needs a macOS 27 host, which GitHub-hosted runners don't provide; that job is present but disabled pending a self-hosted runner.
+CI (`.github/workflows/abbey-ci.yml`) runs the static/security check, lints/tests/builds the dashboard SPA, then builds product `AbbeyBot` with `ABBEY_PACKAGE_ROLE=server` and runs `AbbeyCoreTests`/`AbbeyQuasarKitTests`/`AbbeyCLITests`/`AbbeyServerKitTests`/`AbbeyServerTests` on Linux for main and review-branch pushes and pull requests into main. The workflow has no desktop job; desktop verification uses the local Xcode gate.
 
 Hosted Linux CI is operational; the latest documented PR runs passed. Treat
 those runs as evidence for their exact commits, not as a substitute for the
 local gate or for macOS desktop and live-service validation.
+
+Current completion evidence and unresolved deployment/media requirements are in
+[the September 8 integration ledger](docs/verification/product-integration-2026-09-08.md).
+It records commit-specific local and hosted results; production rollout and live
+Quasar, Twitch and Discord acceptance remain open.
 
 ## Discord
 

@@ -1,9 +1,21 @@
 # Goals
 
+## Full Swift product integration and release
+status: in_progress
+- Current evidence: [2026-09-08 integration ledger](../docs/verification/product-integration-2026-09-08.md).
+- Repository integration and gates continue through review branches. Production
+  rollout is blocked on Hostinger SSH access, domain registration/delegation,
+  private registry access and privately configured provider/backup credentials.
+- Live service acceptance and participant-consented audio/video qualification
+  remain separate requirements; video promotion also needs the observed codec's
+  typed negotiation and final production composition.
+
 ## Complete Discord application and real Discord Voice audio
 status: blocked
-blocked-on: a rotated Discord bot token + an authorized DAVE-enabled test guild. Only Donald can
-supply these; nothing in the code is waiting on more code.
+blocked-on: a rotated Swift Discord application token, an authorized DAVE-enabled
+test guild and participant consent for live qualification. Final video negotiation
+and composition additionally depend on the observed codec; local tests do not
+remove that implementation or acceptance requirement.
 - Gateway voice presence is shipped today; real Discord audio is not. Completion requires a
   confirmed main-gateway voice handshake, Voice Gateway v8, UDP discovery, mandatory transport
   AEAD, DAVE end-to-end encryption, RTP/Opus send and receive, capture/playback, reconnect/resume,
