@@ -11,8 +11,15 @@ for commit-specific results. Dated entries below retain their original scope.
       and native compiler/DAVE test corrections through PRs #83 and #84.
 - [x] Pass the complete ordinary gate at `f287cdd`, including the active-preview
       replacement fixture correction in PR #85; pass 30 deployment tests.
-- [ ] Complete PR #85 hosted checks/integration and synchronize canonical main.
-- [ ] Record final release image identities and native qualification scope.
+- [x] Complete PR #85 follow-on integration and synchronize canonical `main`:
+      `main`, `origin/main`, and remote `main` were observed equal at
+      `a9b6c1712178b664d217eab03b55e0c2475f66d3`; CI run 34217866364 and release
+      run 34217866428 succeeded on that SHA.
+- [x] Record the selected CI-published release image identities and native
+      qualification scope: app digest `sha256:6a7d9ea4b8a0b428c063ef87664d121ac4926f5bca4602a4048fbb1554722440`,
+      Caddy digest `sha256:31698e48b2971c0e3332508f05bf3c59f28530077305b6cc81d012c8430ca8b1`;
+      native debug/release each passed 102 tests in 9 suites. Registry inspection,
+      deployment, live media qualification, and wire codec selection remain open.
 - [ ] Complete SSH/domain/registry/R2 prerequisites and production recovery drills.
 - [ ] Prove deployed real-model Quasar, Discord proposal denial and Twitch delivery.
 - [ ] Observe consented Discord codec negotiation, complete the observed media

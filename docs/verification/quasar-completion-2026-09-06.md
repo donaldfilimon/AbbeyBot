@@ -2,10 +2,14 @@
 
 This is an implementation/rollout ledger, not a release certification. Pending rows remain pending until backed by an observed result.
 
-**September 8 update:** repository integration and local verification advanced
-after this entry. The [current integration ledger](product-integration-2026-09-08.md)
-supersedes the pending Git/PR/local-gate claims below. This dated snapshot remains
-as historical evidence; live rollout and provider acceptance are still open.
+**September 8 update:** canonical `main`, `origin/main`, and remote `main` were
+observed equal at `a9b6c1712178b664d217eab03b55e0c2475f66d3`. On that exact
+commit, `VERIFY-ALL GREEN` covered 874 ordinary Swift tests and 17 web tests,
+and `NATIVE_MEDIA_SMOKE_GREEN` covered 102 tests in 9 suites in both debug and
+release. Hosted CI run 34217866364 and release run 34217866428 also succeeded.
+The [current integration ledger](product-integration-2026-09-08.md) supersedes
+the pending Git/PR/local-gate claims below. This dated snapshot remains as
+historical evidence; live rollout and provider acceptance are still open.
 
 ## Scope and integration
 

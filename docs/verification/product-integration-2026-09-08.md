@@ -5,6 +5,30 @@ service acceptance, and participant-consented media qualification have separate
 acceptance requirements. This entry supersedes undated current-status claims in
 the older Quasar ledger; dated failures remain historical evidence.
 
+## Exact merged-commit closeout
+
+Canonical `main`, `origin/main`, and live remote `main` were observed equal to
+`a9b6c1712178b664d217eab03b55e0c2475f66d3`; branch/worktree cleanup was
+complete at that observation. On that exact commit, `verify-all` exited 0 with
+`VERIFY-ALL GREEN` (874 ordinary Swift tests, 17 web tests, signed desktop and
+SQLite server/CLI smokes), while the fresh pinned native gate exited 0 with
+`NATIVE_MEDIA_SMOKE_GREEN` (102 tests in 9 suites in both debug and release).
+[CI run 34217866364](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34217866364)
+and [release run 34217866428](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34217866428)
+also succeeded on the same SHA.
+
+The release workflow published the selected deployment candidates:
+
+```text
+ghcr.io/donaldfilimon/abbeybot@sha256:6a7d9ea4b8a0b428c063ef87664d121ac4926f5bca4602a4048fbb1554722440
+ghcr.io/donaldfilimon/abbeybot-caddy@sha256:31698e48b2971c0e3332508f05bf3c59f28530077305b6cc81d012c8430ca8b1
+```
+
+These are CI-published identities, not registry-inspected or running-image
+evidence: direct package lookup returned HTTP 403 and requires `read:packages`.
+The older `3a762cb` digests retained below are historical, not the current
+candidate. Documentation-only commits do not select different images.
+
 ## Repository and local verification
 
 - The original clean checkout at `efb5047` was strictly fast-forwarded to the
@@ -20,8 +44,9 @@ the older Quasar ledger; dated failures remain historical evidence.
   fixture. Its unconditional readiness probe raced child startup. The fixture
   now waits for a marker from each child; production process ownership checks
   are unchanged. [PR #85](https://github.com/donaldfilimon/AbbeyBot/pull/85), head
-  `f287cdd6d6f14dd688ef014e33793b3378a8b859`, is awaiting hosted checks/integration
-  at this observation.
+  `f287cdd6d6f14dd688ef014e33793b3378a8b859`, was awaiting hosted
+  checks/integration at that historical observation; the exact-commit closeout
+  above supersedes that pending state.
 
 | Verification | Observed result and scope |
 | --- | --- |
@@ -42,11 +67,18 @@ SSH to `root@2.25.160.8` still returns `Permission denied (publickey,password)`.
 The deployment public key must be attached through Hostinger management before
 host modification, as required by the approved plan. Host processes, Docker,
 volumes, firewall behavior and persistence have not been inspected over SSH.
+On September 8, Hostinger public-key record `573580` was confirmed to match the
+local deployment public key. An authorized attachment retry returned only an
+empty action (`id: 0`, empty name/state); subsequent root SSH remained denied,
+and attached-key inventory returned `[VPS:2002] Route is not found`. This is not
+evidence that key attachment succeeded.
 
 Hostinger reports `xfoss.dev` available for registration. Neither `xfoss.dev` nor
 `api.xfoss.dev` returned a DNS address. Registration through the existing free
 entitlement, authoritative Cloudflare delegation and public TLS remain open. No
 purchase, domain delegation, host installation or restart was performed.
+The availability check still returned true, but the filtered `.dev` WHOIS
+contact-profile list was empty, so the free registration flow was not attempted.
 
 The current GitHub credential has no `read:packages` scope. Direct verification
 of private GHCR package visibility, registry digests and revision labels remains
@@ -58,8 +90,9 @@ ghcr.io/donaldfilimon/abbeybot@sha256:5f24afdffbf594dbfcc0fae310ea08a582230d6ffa
 ghcr.io/donaldfilimon/abbeybot-caddy@sha256:1b73a5779584de2180f4e8c5c8cfadfe644326e19a3cb84b3a23f9e863c24d7b
 ```
 
-These belong to baseline `3a762cb`; later main commits require a fresh release
-identity decision and registry inspection before deployment. Inference, Swift
+These belong to baseline `3a762cb` and are historical rather than the selected
+candidate recorded above. Registry inspection remains required before
+deployment. Inference, Swift
 Discord application, operator/Quasar, database, DNS, R2 and restic credentials
 must be configured privately. Their values must never enter this ledger.
 
@@ -67,9 +100,9 @@ must be configured privately. Their values must never enter this ledger.
 
 | Required outcome | Remaining evidence |
 | --- | --- |
-| Clean canonical main equals live remote main | Integrate remaining review branches; fetch, strict fast-forward and verify clean status and exact SHA. |
-| Final ordinary and native gates | Both gates passed at `86738fc` as recorded above. Reconcile that exact tested source/test tree with the eventual merged candidate. |
-| Commit-specific Linux CI and release images | Await remaining workflows and verify the final main commit's results. |
+| Clean canonical main equals live remote main | Complete at observation: all three equal `a9b6c1712178b664d217eab03b55e0c2475f66d3`; cleanup completed. |
+| Final ordinary and native gates | Complete on the exact merged SHA: 874 ordinary Swift + 17 web; native 102 tests/9 suites in debug and release. |
+| Commit-specific Linux CI and release images | CI 34217866364 and release 34217866428 succeeded on the exact merged SHA; selected digests recorded above. |
 | Immutable GHCR and running-image identity | Obtain registry read access, inspect both private packages and compare deployed image identities. |
 | Hostinger health and persistent restart | SSH access, host/workload inventory, guarded bootstrap or maintenance upgrade, container/host restart and all three stores. |
 | Cloudflare DNS and public TLS | Register/delegate the domain without an unapproved charge; validate API/preview host and HTTP/WebSocket authorization policy. |
