@@ -2099,17 +2099,7 @@ private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
         sendStartWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters { waiter.resume() }
         try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            if !released {
-                try await withCheckedThrowingContinuation { continuation in
-                    if cancelled {
-                        continuation.resume(throwing: CancellationError())
-                    } else {
-                        sendContinuation = continuation
-                    }
-                }
-            }
-            try Task.checkCancellation()
+            try await waitUntilReleased()
         } onCancel: {
             Task { await self.cancelSend() }
         }
@@ -2145,6 +2135,21 @@ private actor SuspendableDatagramDouble: DiscordVoiceMediaDatagramTransport {
         cancelled = true
         sendContinuation?.resume(throwing: CancellationError())
         sendContinuation = nil
+    }
+
+    private func waitUntilReleased() async throws {
+        try Task.checkCancellation()
+        if !released {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, any Error>) in
+                if cancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    sendContinuation = continuation
+                }
+            }
+        }
+        try Task.checkCancellation()
     }
 
     private func expire() {

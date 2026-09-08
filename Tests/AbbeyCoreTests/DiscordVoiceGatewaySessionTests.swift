@@ -1011,6 +1011,10 @@ struct DiscordVoiceGatewaySessionTests {
             0x01, 0xBB,
         ]))
         try await eventually { await handler.receivedOpcodes() == [.externalSenderPackage] }
+        // The handler records the opcode before the session commits the binary
+        // frame's sequence. Wait until the receive loop asks for its next frame
+        // so advancing the manual clock cannot race that commit.
+        try await eventually { await harness.waitingForInboundFrame() }
 
         try await eventually { await manualClock.hasPendingSleep() }
         await manualClock.advance(to: 100)
@@ -1700,6 +1704,7 @@ private actor DiscordVoiceGatewaySessionHarness {
     func sentDAVERepresentations() async -> [VoiceGatewayDAVEWireRepresentation] {
         await socket.sentDAVERepresentations()
     }
+    func waitingForInboundFrame() async -> Bool { await socket.waitingForFrame() }
     func waitUntilSelectSendStarted() async { await socket.waitUntilSelectSendStarted() }
     func releaseSelectSend() async { await socket.releaseSelectSend() }
 
@@ -1851,6 +1856,7 @@ private actor DiscordVoiceGatewaySessionSocket {
     }
 
     func closeCodes() -> [Int] { closes }
+    func waitingForFrame() -> Bool { !waiters.isEmpty }
 
     func sentOpcodes() -> [Int] {
         sent.compactMap { frame in
