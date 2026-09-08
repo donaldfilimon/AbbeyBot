@@ -13,6 +13,12 @@ own successful outcomes in `LiveMediaQualificationReceipt`, alongside audio,
 reconnect, source switching, interruption recovery, emergency stop, participant
 change re-consent and clean leave.
 
+The exact merged release candidate `a9b6c1712178b664d217eab03b55e0c2475f66d3`
+passed the fresh pinned native gate with 102 tests in 9 suites in both debug and
+release. That proves local native composition and secrecy/static constraints;
+it does not qualify live media, and it does not identify Discord's selected
+video wire codec.
+
 ## Production boundary
 
 Discord voice is a separate real-time subsystem from the bot gateway:

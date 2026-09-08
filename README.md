@@ -70,6 +70,16 @@ Hosted Linux CI is operational; the latest documented PR runs passed. Treat
 those runs as evidence for their exact commits, not as a substitute for the
 local gate or for macOS desktop and live-service validation.
 
+The selected deployment candidate is the observed canonical `main` commit
+`a9b6c1712178b664d217eab03b55e0c2475f66d3`. On that exact commit the ordinary
+gate passed 874 Swift tests and 17 web tests, including signed desktop and
+SQLite server/CLI smokes; the native gate passed 102 tests in 9 suites in both
+debug and release after a fresh pinned bootstrap. Hosted
+[CI run 34217866364](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34217866364)
+and [release run 34217866428](https://github.com/donaldfilimon/AbbeyBot/actions/runs/34217866428)
+also succeeded on that SHA. This is repository and publication evidence, not
+production deployment or live-service acceptance.
+
 Current completion evidence and unresolved deployment/media requirements are in
 [the September 8 integration ledger](docs/verification/product-integration-2026-09-08.md).
 It records commit-specific local and hosted results; production rollout and live
@@ -129,6 +139,11 @@ The provider-neutral production runbook is in
 [`deploy/production/README.md`](deploy/production/README.md). Release images
 are built on GitHub Actions from `main`; the server host consumes the recorded
 SHA-256 image references and does not build Swift, Bun, or Caddy locally.
+For the selected `a9b6c17` candidate, CI published
+`ghcr.io/donaldfilimon/abbeybot@sha256:6a7d9ea4b8a0b428c063ef87664d121ac4926f5bca4602a4048fbb1554722440`
+and
+`ghcr.io/donaldfilimon/abbeybot-caddy@sha256:31698e48b2971c0e3332508f05bf3c59f28530077305b6cc81d012c8430ca8b1`.
+They have not been registry-inspected with package-read access or deployed.
 
 ## API (server)
 
@@ -163,14 +178,18 @@ transmitted until the live media qualification boundary is actually cleared.
 Still deferred:
 true CRDT multi-writer merge (LWW + tombstones remains the sync story).
 
-Local source evidence was refreshed on 2026-08-27: debug and release desktop
+Current source evidence was refreshed on 2026-09-08 at exact merged commit
+`a9b6c1712178b664d217eab03b55e0c2475f66d3`: `verify-all` completed with
+`VERIFY-ALL GREEN` (874 ordinary Swift tests and 17 web tests), and the native
+gate completed with `NATIVE_MEDIA_SMOKE_GREEN` (102 tests in 9 suites in both
+debug and release). Local composition remains separate from a
+participant-consented live Discord call; the selected video wire codec is still
+unknown until an allowed metadata-only protocol observation occurs.
+
+Historical 2026-08-27 evidence remains relevant: debug and release desktop
 builds completed, the focused `AbbeyCoreTests` rerun passed 449 tests after one
-full-suite run exposed a non-reproducible test-target failure, and
-`bash Scripts/verify-all.sh` completed with `VERIFY-ALL GREEN`. That gate covers
-static/security hygiene, package graphs, the signed knowledge snapshot, all 17
-web tests plus its production build, the complete Swift test and signed-app
-smoke, and the server and CLI executable smokes. Local composition remains
-separate from a participant-consented live Discord call.
+full-suite run exposed a non-reproducible test-target failure, and `verify-all`
+subsequently completed with `VERIFY-ALL GREEN`.
 
 ## Related implementation
 

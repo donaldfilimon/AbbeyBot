@@ -3,8 +3,10 @@
 ## Full Swift product integration and release
 status: in_progress
 - Current evidence: [2026-09-08 integration ledger](../docs/verification/product-integration-2026-09-08.md).
-- Repository integration and gates continue through review branches. Production
-  rollout is blocked on Hostinger SSH access, domain registration/delegation,
+- Canonical `main`, `origin/main`, and remote `main` were observed equal at
+  `a9b6c1712178b664d217eab03b55e0c2475f66d3`; ordinary and native release gates
+  and hosted CI/release workflows passed on that exact SHA. Production rollout
+  remains blocked on Hostinger SSH access, domain registration/delegation,
   private registry access and privately configured provider/backup credentials.
 - Live service acceptance and participant-consented audio/video qualification
   remain separate requirements; video promotion also needs the observed codec's
