@@ -181,12 +181,28 @@ private struct QuasarPreviewWebView: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: WKWebView, context: Context) {}
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let origin: URL
-        init(origin: URL) { self.origin = origin }
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            guard let url = navigationAction.request.url, QuasarEndpointPolicy.sameOrigin(origin, url) else { decisionHandler(.cancel); return }
-            decisionHandler(.allow)
-        }
+    typealias Coordinator = QuasarPreviewNavigationDelegate
+}
+
+@MainActor final class QuasarPreviewNavigationDelegate: NSObject {
+    private let origin: URL
+
+    init(origin: URL) {
+        self.origin = origin
+    }
+
+    func policy(for url: URL?) -> WKNavigationActionPolicy {
+        guard let url, QuasarEndpointPolicy.sameOrigin(origin, url) else { return .cancel }
+        return .allow
+    }
+}
+
+extension QuasarPreviewNavigationDelegate: WKNavigationDelegate {
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
+    ) {
+        decisionHandler(policy(for: navigationAction.request.url))
     }
 }
