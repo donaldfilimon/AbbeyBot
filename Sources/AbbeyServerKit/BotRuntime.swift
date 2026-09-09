@@ -457,9 +457,31 @@ public actor BotRuntime {
         )
     }
 
+    /// A memory read that *failed* is not the same as a user who has no memories, and Abbey
+    /// must not answer as a stranger without the operator hearing about it. Every persistence
+    /// read that degrades to an empty result funnels through here so it emits the same
+    /// `OperatorFacingError` line the ingest path already uses, at `warning` because the reply
+    /// still goes out — just with less context than the user actually has stored.
+    private func degradingRead<T>(
+        _ operation: String,
+        fallback: T,
+        _ read: () async throws -> T
+    ) async -> T {
+        do {
+            return try await read()
+        } catch {
+            app.logger.warning("\(operation) failed: \(OperatorFacingError.message(error))")
+            return fallback
+        }
+    }
+
     func personaContext(authorId: String, guildId: String, channelId: String) async -> PersonaContext {
-        let summary = (try? await ChannelRepository.summary(channelId: channelId, guildId: guildId, on: app.db)) ?? ""
-        let facts = (try? await MemoryRepository.facts(userId: authorId, guildId: guildId, on: app.db)) ?? []
+        let summary = await degradingRead("persona channel-summary read", fallback: "") {
+            try await ChannelRepository.summary(channelId: channelId, guildId: guildId, on: app.db)
+        }
+        let facts = await degradingRead("persona user-facts read", fallback: []) {
+            try await MemoryRepository.facts(userId: authorId, guildId: guildId, on: app.db)
+        }
         let reputation = await socialBrain.reputation(userId: authorId, guildId: guildId)
         return PersonaContext(
             channelSummary: summary,
@@ -535,7 +557,9 @@ public actor BotRuntime {
     /// Keyed read of a user's shared state — used by the desktop app's sync client
     /// (and anything else that needs facts/reputation without a channel in hand).
     public func userState(userId: String, guildId: String) async -> UserStateDTO {
-        let facts = (try? await MemoryRepository.facts(userId: userId, guildId: guildId, on: app.db)) ?? []
+        let facts = await degradingRead("user-state facts read", fallback: []) {
+            try await MemoryRepository.facts(userId: userId, guildId: guildId, on: app.db)
+        }
         let reputation = await socialBrain.reputation(userId: userId, guildId: guildId)
         return UserStateDTO(facts: facts, reputation: reputation)
     }
@@ -543,7 +567,9 @@ public actor BotRuntime {
     /// Keyed read of a channel's shared state (summary only — message count is
     /// available via `/api/channels`).
     public func channelState(channelId: String, guildId: String) async -> ChannelStateDTO {
-        let summary = (try? await ChannelRepository.summary(channelId: channelId, guildId: guildId, on: app.db)) ?? ""
+        let summary = await degradingRead("channel-state summary read", fallback: "") {
+            try await ChannelRepository.summary(channelId: channelId, guildId: guildId, on: app.db)
+        }
         return ChannelStateDTO(summary: summary)
     }
 
@@ -701,11 +727,16 @@ public actor BotRuntime {
             },
             context: { [weak self] channelId, guildId in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                let summary = (try? await ChannelRepository.summary(
-                    channelId: channelId,
-                    guildId: guildId,
-                    on: self.app.db
-                )) ?? ""
+                let summary = await self.degradingRead(
+                    "/context channel-summary read",
+                    fallback: ""
+                ) {
+                    try await ChannelRepository.summary(
+                        channelId: channelId,
+                        guildId: guildId,
+                        on: self.app.db
+                    )
+                }
                 return summary.isEmpty ? DiscordCopy.noChannelSummary : summary
             },
             persona: { [weak self] name in
@@ -772,11 +803,13 @@ public actor BotRuntime {
             },
             facts: { [weak self] userId, guildId in
                 guard let self else { return DiscordCopy.engineUnavailable }
-                let facts = (try? await MemoryRepository.facts(
-                    userId: userId,
-                    guildId: guildId,
-                    on: self.app.db
-                )) ?? []
+                let facts = await self.degradingRead("/facts user-facts read", fallback: []) {
+                    try await MemoryRepository.facts(
+                        userId: userId,
+                        guildId: guildId,
+                        on: self.app.db
+                    )
+                }
                 return DiscordSlashLogic.formatFacts(userId: userId, facts: facts)
             },
             ping: {
