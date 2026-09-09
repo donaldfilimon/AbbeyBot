@@ -26,6 +26,10 @@ final class AbbeyEngine {
     let inferenceRouter: InferenceRouter
     let knowledgeIndex: KnowledgeIndex
     let knowledgeInitializationError: String?
+    /// Operator-facing startup configuration problem, or nil when the config validated.
+    /// Recorded rather than trapped: the only place to correct these values is Settings
+    /// inside this app, so a launch-time trap would make the problem unfixable.
+    let startupConfigError: String?
     private(set) var knowledgeSnapshotStatus: KnowledgeSnapshotOperatorStatus?
     private(set) var knowledgeRefreshCandidate: KnowledgeRefreshCandidate?
     private(set) var knowledgeRefreshError: String?
@@ -93,8 +97,11 @@ final class AbbeyEngine {
         self.config = config
         do {
             try config.validateForStartup()
+            self.startupConfigError = nil
         } catch {
-            print("[config] validateForStartup: \(OperatorFacingError.message(error))")
+            let message = OperatorFacingError.message(error)
+            print("[config] validateForStartup: \(message)")
+            self.startupConfigError = message
         }
         self.socialBrain = SocialBrain(modelContainer: modelContainer, eventBus: bus, decay: { config.reputationDecay })
         let checkpointURL = try? DQNCheckpointStore.defaultURL()
@@ -219,8 +226,7 @@ final class AbbeyEngine {
             Task { await self.pullFromServer() }
         }
 
-        if config.operatingMode == .liveDiscord, config.autoConnectOnLaunch,
-           config.dryRun || !config.discordBotToken.isEmpty {
+        if config.shouldAutoConnectDiscord {
             Task { await self.connectDiscord() }
         }
     }

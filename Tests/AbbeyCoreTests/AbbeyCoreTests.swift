@@ -332,6 +332,62 @@ struct AbbeyCoreTests {
         try config.validateForStartup(scope: .headless)
     }
 
+    /// A desktop `liveDiscord`-without-token config is the one startup failure the operator
+    /// can only fix from Settings *inside* the app. `AbbeyBotApp.init` used to `fatalError`
+    /// on it, which made it unfixable: the app SIGTRAPped before the window existed. The app
+    /// now records the message and keeps running, so the message must be non-empty and must
+    /// name what is missing — that string is what the startup banner renders.
+    @Test func liveDiscordMissingTokenIsRecoverableAndOperatorFacing() throws {
+        let suite = "AbbeyCoreTests.recoverable.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let config = AppConfig(defaults: defaults)
+        config.operatingMode = .liveDiscord
+        config.dryRun = false
+        config.discordBotToken = ""
+
+        var captured: (any Error)?
+        do {
+            try config.validateForStartup()
+        } catch {
+            captured = error
+        }
+        let error = try #require(captured)
+        // `AppConfigValidationError` is not `Equatable`; match the case instead.
+        guard case .liveDiscordMissingToken = try #require(error as? AppConfigValidationError) else {
+            Issue.record("expected .liveDiscordMissingToken, got \(error)")
+            return
+        }
+
+        let message = OperatorFacingError.message(error)
+        #expect(!message.isEmpty)
+        #expect(message.contains("DISCORD_BOT_TOKEN"))
+
+        // The engine's own live-connect guard is what keeps this safe once the trap is gone:
+        // `AbbeyEngine.init` calls `shouldAutoConnectDiscord`, so assert that function, not a
+        // copy of its shape. With an empty token Abbey must not attempt a live connection.
+        config.autoConnectOnLaunch = true
+        #expect(!config.shouldAutoConnectDiscord)
+
+        // A whitespace-only token is not a token — this is why the predicate trims.
+        config.discordBotToken = "   "
+        #expect(!config.shouldAutoConnectDiscord)
+
+        // The two ways it legitimately connects: a real token, or a dry run that never
+        // reaches the network.
+        config.discordBotToken = "token"
+        #expect(config.shouldAutoConnectDiscord)
+        config.discordBotToken = ""
+        config.dryRun = true
+        #expect(config.shouldAutoConnectDiscord)
+
+        // Auto-connect off means no connection regardless of token.
+        config.dryRun = false
+        config.discordBotToken = "token"
+        config.autoConnectOnLaunch = false
+        #expect(!config.shouldAutoConnectDiscord)
+    }
+
     @Test func appConfigValidateRemoteEndpoint() throws {
         let suite = "AbbeyCoreTests.remote.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
