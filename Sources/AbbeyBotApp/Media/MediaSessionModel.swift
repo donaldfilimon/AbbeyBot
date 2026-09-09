@@ -523,12 +523,7 @@ final class MediaSessionModel {
     }
 
     convenience init(discordBridge: DiscordBridge) {
-        let configuration: DiscordVoiceControllerConfiguration
-        do {
-            configuration = try DiscordVoiceControllerConfiguration(requiresConsentEpoch: true)
-        } catch {
-            preconditionFailure("Static voice-controller configuration is invalid")
-        }
+        let configuration = DiscordVoiceControllerConfiguration.standard(requiresConsentEpoch: true)
         let controller: DiscordVoiceController
         let videoNegotiationProbe = DiscordVideoNegotiationProbe()
         // One shared audio engine boundary: the platform's device selection,
@@ -560,7 +555,14 @@ final class MediaSessionModel {
                 configuration: configuration
             )
         } catch {
-            preconditionFailure("Static voice-controller queue configuration is invalid")
+            // Unreachable today: `configuration` is `.standard(…)`, so its queue capacities
+            // are the validated defaults, and `DiscordVoiceController.init` throws only for a
+            // non-positive capacity. It stays a trap rather than a silent fallback because a
+            // bad capacity means the media plane drops frames invisibly. Deleting this branch
+            // outright needs the capacity invariant carried in the type rather than re-checked
+            // by `DiscordVoiceBoundedQueue.init`. The error is interpolated so that if the
+            // impossible does happen, the crash says which value was wrong.
+            preconditionFailure("Voice controller rejected the standard configuration: \(error)")
         }
         self.init(
             controller: controller,
