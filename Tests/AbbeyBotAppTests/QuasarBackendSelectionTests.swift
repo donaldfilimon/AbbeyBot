@@ -14,7 +14,7 @@ import Testing
             "ABBEY_QUASAR_BACKEND": "remote", "ABBEY_QUASAR_ENDPOINT": "https://api.example.test",
             "ABBEY_QUASAR_API_TOKEN": "test-token", "ABBEY_DRY_RUN": "1",
             "ABBEY_INFERENCE_MODE": "deterministicFloor"
-        ])
+        ], tokens: InMemoryTokenStore())
         let schema = Schema([GuildMessage.self, UserMemory.self, ChannelContext.self,
             ReputationEvent.self, InteractionLog.self, EquityIdea.self])
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])

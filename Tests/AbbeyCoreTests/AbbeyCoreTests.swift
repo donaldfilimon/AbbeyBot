@@ -317,7 +317,7 @@ struct AbbeyCoreTests {
         let suite = "AbbeyCoreTests.validate.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
-        let config = AppConfig(defaults: defaults)
+        let config = AppConfig(defaults: defaults, tokens: InMemoryTokenStore())
         config.operatingMode = .liveDiscord
         config.dryRun = false
         config.discordBotToken = ""
@@ -341,7 +341,7 @@ struct AbbeyCoreTests {
         let suite = "AbbeyCoreTests.recoverable.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
-        let config = AppConfig(defaults: defaults)
+        let config = AppConfig(defaults: defaults, tokens: InMemoryTokenStore())
         config.operatingMode = .liveDiscord
         config.dryRun = false
         config.discordBotToken = ""
@@ -391,7 +391,7 @@ struct AbbeyCoreTests {
     @Test func appConfigValidateRemoteEndpoint() throws {
         let suite = "AbbeyCoreTests.remote.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
-        let config = AppConfig(defaults: defaults)
+        let config = AppConfig(defaults: defaults, tokens: InMemoryTokenStore())
         config.inferenceMode = .remoteCompatible
         config.remoteEndpoint = ""
         #expect(throws: AppConfigValidationError.self) {
@@ -412,7 +412,8 @@ struct AbbeyCoreTests {
             environment: [
                 "ABBEY_INFERENCE_MODE": "deterministicFloor",
                 "ABBEY_REMOTE_ENDPOINT": "https://env.example/v1",
-            ]
+            ],
+            tokens: InMemoryTokenStore()
         )
         #expect(config.inferenceMode == .deterministicFloor)
         #expect(config.remoteEndpoint == "https://env.example/v1")
