@@ -3,9 +3,7 @@ import Foundation
 /// Append-only durable DQN experience journal (Phase 2). Default `~/.abbey/dqn-experience.jsonl`.
 public enum ExperienceJournalStore: Sendable {
     public static func defaultURL() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".abbey", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try AbbeyDataDirectory.ensure()
         return dir.appendingPathComponent("dqn-experience.jsonl", isDirectory: false)
     }
 }

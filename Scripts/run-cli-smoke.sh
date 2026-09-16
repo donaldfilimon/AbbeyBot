@@ -11,6 +11,9 @@ SWIFT=(/usr/bin/xcrun --toolchain default swift)
 SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-cli-smoke.XXXXXX")"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 SQLITE_PATH="$SMOKE_DIR/abbey.sqlite"
+# Abbey's local data (DQN journal/checkpoint, WDBX, rollback, cursors) goes to a disposable
+# directory, never the operator's ~/.abbey. An inherited ABBEY_DATA_DIR is deliberately ignored.
+export ABBEY_DATA_DIR="$SMOKE_DIR/data"
 
 echo "======== 1/3 build AbbeyBot (server graph) ========"
 export ABBEY_PACKAGE_ROLE=server
@@ -66,7 +69,7 @@ OUT2="$SMOKE_DIR/cli-gate.log"
   if [[ "${ABBEY_CLI_USE_SERVER_DATABASE:-}" != "1" ]]; then
     unset DATABASE_URL || true
   fi
-  # Gate must leave DATABASE_URL unset (CLI would then use ~/.abbey/abbey.sqlite).
+  # Gate must leave DATABASE_URL unset (CLI would then use $ABBEY_DATA_DIR/abbey.sqlite).
   if [[ -n "${DATABASE_URL:-}" ]]; then
     echo "CLI_SMOKE_FAIL: gate did not clear DATABASE_URL" >&2
     exit 1

@@ -40,7 +40,7 @@ ABBEY_SWIFT=swiftly bash Scripts/run-abbey.sh
 
 Unset `DATABASE_URL` falls back to sqlite under `$TMPDIR` when Postgres is down. Full stack: `docker compose up --build`.
 
-Local SQLite state lives at `~/.abbey/abbey.sqlite` (directory auto-created); override with `DATABASE_URL` same as the server (`postgres://…`, `sqlite://memory`, `sqlite://<path>`). Set `DISCORD_BOT_TOKEN` (and optional `DISCORD_DEV_GUILD_ID`) to connect live to Discord, otherwise it runs local-only with a warning logged.
+Local SQLite state lives at `~/.abbey/abbey.sqlite` (directory auto-created; `ABBEY_DATA_DIR` relocates the whole `~/.abbey` data directory, including the DQN journal/checkpoint, WDBX and rollback snapshots); override with `DATABASE_URL` same as the server (`postgres://…`, `sqlite://memory`, `sqlite://<path>`). Set `DISCORD_BOT_TOKEN` (and optional `DISCORD_DEV_GUILD_ID`) to connect live to Discord, otherwise it runs local-only with a warning logged.
 
 Commands:
 

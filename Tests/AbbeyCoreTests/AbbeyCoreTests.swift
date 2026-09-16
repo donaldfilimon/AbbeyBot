@@ -498,6 +498,8 @@ struct AbbeyCoreTests {
         try Data("v1".utf8).write(to: live)
         defer { try? FileManager.default.removeItem(at: live) }
         let snapName = "test-\(UUID().uuidString)"
+        let snapDir = try RollbackStore.rollbackRoot().appendingPathComponent(snapName, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: snapDir) }
         _ = try RollbackStore.snapshot(file: live, as: snapName)
         try Data("v2".utf8).write(to: live)
         try RollbackStore.restore(file: live, fromSnapshot: snapName)

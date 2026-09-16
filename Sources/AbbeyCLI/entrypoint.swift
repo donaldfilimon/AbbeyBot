@@ -9,11 +9,9 @@ public enum AbbeyCLIMain {
         var env = try Environment.detect(arguments: arguments)
         try LoggingSystem.bootstrap(from: &env)
 
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let dir = "\(home)/.abbey"
         // The sqlite driver will not create this directory for us — do it before Fluent
         // tries to open a file inside it. Let failures propagate as a clear startup error.
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let dir = try AbbeyDataDirectory.ensure().path
         let defaultDatabaseURL = "sqlite://\(dir)/abbey.sqlite"
 
         let app = try await Application.make(env)
