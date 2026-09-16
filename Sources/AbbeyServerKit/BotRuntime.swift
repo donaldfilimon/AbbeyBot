@@ -108,7 +108,7 @@ public actor BotRuntime {
     let socialBrain: FluentSocialBrain
     let dqnAgent: DQNAgent
     /// Links Discord replies to the DQN sample that chose their strategy (reaction rewards).
-    let rewardLedger = DelayedRewardLedger()
+    let rewardLedger: DelayedRewardLedger
     let scheduler: FluentScheduler
     let personaRouter: ABIRouter
     public let inferenceRouter: InferenceRouter
@@ -147,6 +147,7 @@ public actor BotRuntime {
         self.app = app
         let config = AppConfig.shared
         self.config = config
+        self.rewardLedger = DelayedRewardLedger(isEnabled: config.delayedRewardsEnabled)
         let metrics = EngineMetrics()
         self.metrics = metrics
         let bus = EventBus()
@@ -785,7 +786,9 @@ public actor BotRuntime {
                     lastInferenceError: snap.lastInferenceError,
                     industry: AppConfig.shared.industryProfile.rawValue,
                     equityEnabled: AppConfig.shared.equityModuleEnabled,
-                    dryRun: AppConfig.shared.dryRun
+                    dryRun: AppConfig.shared.dryRun,
+                    delayedRewards: self.rewardLedger.isEnabled,
+                    replayBufferCount: await self.dqnAgent.bufferCount()
                 )
             },
             model: { raw in

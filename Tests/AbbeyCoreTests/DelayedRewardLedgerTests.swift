@@ -94,6 +94,36 @@ struct DelayedRewardLedgerTests {
         #expect(await ledger.bind(sourceMessageId: "m2", replyMessageId: "r2", now: Self.t0) == true)
     }
 
+    @Test func switchParsingIsDefaultOn() {
+        for off in ["0", "false", "NO", " off "] {
+            #expect(AppConfig.parseDefaultOnSwitch(off) == false)
+        }
+        for on in ["1", "true", "yes", "", "maybe"] {
+            #expect(AppConfig.parseDefaultOnSwitch(on) == true)
+        }
+    }
+
+    @Test func appConfigReadsDelayedRewardsSwitch() {
+        func config(_ environment: [String: String]) -> AppConfig {
+            let suite = "DelayedRewardLedgerTests.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            return AppConfig(defaults: defaults, environment: environment, tokens: InMemoryTokenStore())
+        }
+        #expect(config([:]).delayedRewardsEnabled == true)
+        #expect(config(["ABBEY_DELAYED_REWARDS": "0"]).delayedRewardsEnabled == false)
+        #expect(config(["ABBEY_DELAYED_REWARDS": "on"]).delayedRewardsEnabled == true)
+    }
+
+    @Test func disabledLedgerStagesNothing() async {
+        let ledger = DelayedRewardLedger(isEnabled: false)
+        await ledger.stage(sourceMessageId: "m1", authorId: "u1", state: Self.state, action: 0, now: Self.t0)
+        #expect(await ledger.stagedCount == 0)
+        #expect(await ledger.bind(sourceMessageId: "m1", replyMessageId: "r1", now: Self.t0) == false)
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "u1", botUserId: nil,
+                                    emojiName: "👍", isCustomEmoji: false, now: Self.t0) == nil)
+    }
+
     @Test func gatewayReactionTrainsTheAgent() async throws {
         // `apply` reads the wall clock, so the fixed test epoch needs an unbounded lifetime.
         let ledger = await boundLedger(action: 1, timeToLive: .greatestFiniteMagnitude)

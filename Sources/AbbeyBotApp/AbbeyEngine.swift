@@ -21,7 +21,7 @@ final class AbbeyEngine {
     let socialBrain: SocialBrain
     let dqnAgent: DQNAgent
     /// Links Discord replies to the DQN sample that chose their strategy (reaction rewards).
-    let rewardLedger = DelayedRewardLedger()
+    let rewardLedger: DelayedRewardLedger
     let scheduler: AbbeyScheduler
     let confirmationGate: ConfirmationGate
     let personaRouter: ABIRouter
@@ -97,6 +97,7 @@ final class AbbeyEngine {
         self.eventBus = bus
 
         self.config = config
+        self.rewardLedger = DelayedRewardLedger(isEnabled: config.delayedRewardsEnabled)
         do {
             try config.validateForStartup()
             self.startupConfigError = nil
@@ -889,7 +890,9 @@ final class AbbeyEngine {
                     lastInferenceError: self.metrics.lastInferenceFailureMessage ?? "",
                     industry: AppConfig.shared.industryProfile.rawValue,
                     equityEnabled: AppConfig.shared.equityModuleEnabled,
-                    dryRun: AppConfig.shared.dryRun
+                    dryRun: AppConfig.shared.dryRun,
+                    delayedRewards: self.rewardLedger.isEnabled,
+                    replayBufferCount: await self.dqnAgent.bufferCount()
                 )
             },
             model: { raw in

@@ -40,13 +40,17 @@ public actor DelayedRewardLedger {
 
     public let capacity: Int
     public let timeToLive: TimeInterval
+    /// Fixed at init from `AppConfig.delayedRewardsEnabled`. When false nothing is staged,
+    /// so every signal is a no-op and re-enabling never replays earlier traffic.
+    public nonisolated let isEnabled: Bool
 
     private var staged: [String: Pending] = [:]
     private var bound: [String: Pending] = [:]
 
-    public init(capacity: Int = 512, timeToLive: TimeInterval = 24 * 60 * 60) {
+    public init(capacity: Int = 512, timeToLive: TimeInterval = 24 * 60 * 60, isEnabled: Bool = true) {
         self.capacity = max(1, capacity)
         self.timeToLive = max(0, timeToLive)
+        self.isEnabled = isEnabled
     }
 
     public var stagedCount: Int { staged.count }
@@ -59,7 +63,7 @@ public actor DelayedRewardLedger {
         action: Int,
         now: Date = .now
     ) {
-        guard !sourceMessageId.isEmpty, !authorId.isEmpty else { return }
+        guard isEnabled, !sourceMessageId.isEmpty, !authorId.isEmpty else { return }
         Self.insert(
             Pending(authorId: authorId, state: state, action: action, stagedAt: now),
             key: sourceMessageId,

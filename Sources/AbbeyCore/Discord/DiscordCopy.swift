@@ -121,7 +121,9 @@ public enum DiscordCopy: Sendable {
         lastInferenceError: String,
         industry: String,
         equityEnabled: Bool,
-        dryRun: Bool
+        dryRun: Bool,
+        delayedRewards: Bool = true,
+        replayBufferCount: Int? = nil
     ) -> String {
         var lines = [
             "**AbbeyBot status**",
@@ -139,6 +141,10 @@ public enum DiscordCopy: Sendable {
         }
         lines.append("Backends: Foundation Models · remote OpenAI-compatible · deterministic floor · Fluent/SwiftData · optional Twitch")
         lines.append("Self-learn: DQN \(DQNAgent.defaultTopology) · \(NeuralMath.accelerationBackend) · local WDBX `~/.abbey/wdbx/`")
+        lines.append("Delayed rewards: \(delayedRewards ? "on" : "off")")
+        if let replayBufferCount {
+            lines.append("Replay buffer: \(replayBufferCount)")
+        }
         return lines.joined(separator: "\n")
     }
 }
