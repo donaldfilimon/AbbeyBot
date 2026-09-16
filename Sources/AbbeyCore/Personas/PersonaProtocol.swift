@@ -43,7 +43,10 @@ public protocol Persona: Sendable {
 public extension Persona {
     func respond(to input: String, context: PersonaContext, inference: InferenceRouter) async -> PersonaResponse {
         let industry = AppConfig.shared.industryProfile.promptSuffix
-        let system = industry.isEmpty ? systemPrompt : systemPrompt + "\n" + industry
+        // The persona sets the register; the manifest bounds the claims.
+        // Without it, a "what can you do" answer is unconstrained invention.
+        var system = systemPrompt + "\n" + CommandSpec.capabilityManifest
+        if !industry.isEmpty { system += "\n" + industry }
         let evidence: [String]
         if let index = context.knowledgeIndex {
             let hits = await index.search(.init(

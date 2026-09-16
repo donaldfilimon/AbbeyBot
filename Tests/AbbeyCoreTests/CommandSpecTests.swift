@@ -76,3 +76,48 @@ struct CommandSpecTests {
         }
     }
 }
+
+/// `/help` is the sixth list that once duplicated command identity. These bind
+/// it to `CommandSpec.all` so the duplication cannot come back by hand.
+@Suite("Help text is derived from the registry")
+struct HelpTextRegistryTests {
+    @Test func helpAdvertisesEveryRegisteredCommand() {
+        let help = DiscordSlashLogic.helpText()
+        for spec in CommandSpec.all {
+            #expect(help.contains("`/\(spec.name)`"), "/help omits /\(spec.name)")
+        }
+    }
+
+    @Test func helpAdvertisesNothingTheRouterWouldReject() {
+        let registered = Set(CommandSpec.all.map(\.name))
+        for line in DiscordSlashLogic.helpText().split(separator: "\n") {
+            guard line.hasPrefix("`/") else { continue }
+            let name = String(line.dropFirst(2).prefix { $0 != "`" })
+            #expect(registered.contains(name), "/help advertises unregistered /\(name)")
+        }
+    }
+
+    @Test func helpUsesTheDescriptionDiscordRegisters() {
+        let help = DiscordSlashLogic.helpText()
+        for spec in CommandSpec.all {
+            #expect(help.contains(spec.description), "/help drifted from /\(spec.name)'s description")
+        }
+    }
+
+    @Test func helpMarksOperatorOnlyAndPrivateCommands() {
+        // `/persona` and `/model` require administrator and reply privately;
+        // the hand-written literal said neither, so operators and members read
+        // the same list and only found out by being refused.
+        let persona = CommandSpec.named("persona")
+        #expect(persona?.helpLine.contains("operator only") == true)
+        #expect(persona?.helpLine.contains("private reply") == true)
+        // `/ask` is open and public, so it must carry no marker at all.
+        #expect(CommandSpec.named("ask")?.helpLine.contains("·") == false)
+    }
+
+    @Test func helpFitsInsideTheRouterReplyClip() {
+        // InteractionRouter truncates replies past 1900 characters. A silently
+        // clipped `/help` would drop the last commands registered.
+        #expect(DiscordSlashLogic.helpText().count <= 1900)
+    }
+}

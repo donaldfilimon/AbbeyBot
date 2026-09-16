@@ -209,28 +209,11 @@ public enum DiscordSlashLogic: Sendable {
         }
     }
 
+    /// Derived from `CommandSpec.all` rather than re-listed here; see
+    /// `CommandSpec.helpText` for why the literal this replaced was a defect
+    /// waiting to happen.
     public static func helpText() -> String {
-        """
-        **AbbeyBot commands**
-        `/ask` — question (Foundation Models / remote / floor via `/model`)
-        `/explain` — deeper explanation of a topic
-        `/summarize` — summarize this channel’s memory
-        `/rep` — reputation score
-        `/facts` — list remembered facts for a user
-        `/remember` / `/forget` — store or drop a fact
-        `/context` — channel memory summary
-        `/persona` — abbey | aviva | abi
-        `/model` — show or set inference backend
-        `/status` — bot + backend connections
-        `/industry` — industry prompt profile
-        `/equity` — synthetic factor screen (not financial advice)
-        `/mod` — moderation *advice* only (Abi; does not kick/ban)
-        `/voice join|leave` — voice **presence** only (no audio)
-        `/knowledge` — search the signed ecosystem corpus with citations
-        `/quasar` — list/status or create a short-lived operator proposal
-        `/ping` — latency check
-        `/help` — this list
-        """
+        CommandSpec.helpText
     }
 
     /// Deterministic synthetic factors from a ticker symbol (not market data).
