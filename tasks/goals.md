@@ -937,6 +937,23 @@ status: in_progress
 - Open, unverified claim needing a decision rather than a guess: `/ask` registers as "Ask Abbey" but always routes `.question` to Aviva. "Abbey" may mean the product (the status embed says "AbbeyBot"), so this may be correct copy rather than a defect. Not touched.
 - Open: the REST surface (`POST /api/state/remember|forget`) takes `userId`/`guildId` from the request body behind a single shared bearer token, with no per-user check — an operator-trust model, unlike the Discord slash path which is properly self-or-moderator gated. Worth naming as a deliberate difference or closing it.
 
+- Slice 2026-09-16 13:2x EDT, `ConfirmationGate` bypass branch (still no decision taken on
+  whether the bypass should exist): with confirmation off, `request` published
+  `.destructiveActionRequested` and approved, but never `.destructiveActionConfirmed`. The kick,
+  ban or purge still ran, yet `AbbeyEngine.handle` never counted it in
+  `metrics.recordDestructiveAction` and the delayed-reward design's moderation reward never
+  applied. The bypass now also publishes `.destructiveActionConfirmed`. Pinned by
+  `ConfirmationGateTests` (event sequence for both branches, empty queue on bypass) and
+  `AbbeyEngineModerationRewardTests.unconfirmedKickStillRewardsTheTargetsSamples`.
+  Mutation-tested: removing the new publish fails both, exit 1; source restored from a
+  pre-mutation copy. The design doc's "no confirmation event, no reward" note was updated.
+- Same slice, a claim-honesty fix: Settings labelled six keys "Env:" that `AppConfig` reads
+  only from UserDefaults (`ABBEY_OPERATING_MODE`, `ABBEY_REPLY_COOLDOWN_SECONDS`,
+  `ABBEY_MEMORY_CONSOLIDATION_INTERVAL_MIN`, `ABBEY_REPUTATION_DECAY`,
+  `ABBEY_CONFIRMATION_REQUIRED`, `ABBEY_EQUITY_MODULE_ENABLED`). They now read
+  "UserDefaults key:", pinned by `AppConfigEnvironmentScopeTests`. Making any of them honour the
+  environment was deliberately not done: for `ABBEY_CONFIRMATION_REQUIRED` it would widen the
+  bypass, which is the open decision above.
 ## Merge the open review branches into main and finish their worktrees
 status: done
 - Captured 2026-09-16 12:28 EDT from "merge all branches into main and delete the branches not
@@ -978,4 +995,8 @@ status: done
   against `origin/main` (identical). `gh pr merge --delete-branch` removed the reaction-reward
   worktree and local branch itself, after its last commit was pushed. Local state afterwards:
   one worktree, `main` the only local branch, no stashes. Hosted Actions were not relied on.
+- Correction 2026-09-16 13:2x EDT: the "fixed-name `TokenBucketRateLimiter.plist`" residual
+  above is not AbbeyBot's. `plutil -p` shows an `SKDUserDefaultsRoot` map of Spotlight
+  embedding token buckets; nothing in `Sources/` or `Tests/` names it. No test leak remains
+  from that measurement.
 

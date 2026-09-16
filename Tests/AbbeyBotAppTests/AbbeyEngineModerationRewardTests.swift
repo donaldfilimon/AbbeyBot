@@ -10,7 +10,7 @@ struct AbbeyEngineModerationRewardTests {
     private static let state: [Float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
     /// The caller owns `scratch` and removes it with `defer` (see `ScratchDefaults`).
-    private func makeEngine(_ scratch: ScratchDefaults) throws -> AbbeyEngine {
+    private func makeEngine(_ scratch: ScratchDefaults, requireConfirmation: Bool = true) throws -> AbbeyEngine {
         let schema = Schema([
             GuildMessage.self,
             UserMemory.self,
@@ -24,7 +24,7 @@ struct AbbeyEngineModerationRewardTests {
             configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
         )
         let config = AppConfig(defaults: scratch.defaults, environment: [:], tokens: InMemoryTokenStore())
-        config.confirmationRequiredForDestructiveActions = true
+        config.confirmationRequiredForDestructiveActions = requireConfirmation
         // An injected agent with no checkpoint and no journal keeps `~/.abbey` untouched.
         return AbbeyEngine(
             modelContainer: container,
@@ -84,6 +84,21 @@ struct AbbeyEngineModerationRewardTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(await engine.rewardLedger.stagedCount == 1)
         #expect(await engine.dqnAgent.bufferCount() == before)
+        await engine.shutdown()
+    }
+
+    /// With confirmation off the kick goes ahead without a sheet; it must still be rewarded.
+    @Test func unconfirmedKickStillRewardsTheTargetsSamples() async throws {
+        let scratch = try ScratchDefaults("AbbeyEngineModerationRewardTests")
+        defer { scratch.remove() }
+        let engine = try makeEngine(scratch, requireConfirmation: false)
+        let before = await engine.dqnAgent.bufferCount()
+        await engine.rewardLedger.stage(sourceMessageId: "m1", authorId: "bad", guildId: "g",
+                                        state: Self.state, action: StrategyAction.answer.rawValue)
+
+        #expect(await engine.confirmationGate.request(kind: .kick, targetUserId: "bad", guildId: "g", reason: "test"))
+        #expect(await waitUntil { await engine.rewardLedger.stagedCount == 0 })
+        #expect(await engine.dqnAgent.bufferCount() == before + 1)
         await engine.shutdown()
     }
 }

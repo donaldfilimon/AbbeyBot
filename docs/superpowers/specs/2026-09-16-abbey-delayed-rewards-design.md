@@ -70,9 +70,11 @@ signals, then is removed.
 On `.destructiveActionConfirmed(kind, targetUserId, guildId)` from the existing
 `EventBus`, call `consumeModeration` and feed each sample to the agent.
 `.destructiveActionCancelled` produces nothing. `ConfirmationGate` publishes
-`.destructiveActionConfirmed` only when confirmation is required
-(`ABBEY_CONFIRMATION_REQUIRED`, default on); with confirmation disabled there is no
-confirmation event and therefore no moderation reward. `BotRuntime` has no `ConfirmationGate`, so
+`.destructiveActionConfirmed` for every approved action, including the immediate approval
+when confirmation is disabled (UserDefaults key `ABBEY_CONFIRMATION_REQUIRED`, default on;
+not read from the environment), so a kick that goes ahead is rewarded either way. (Before
+2026-09-16 the disabled path published no confirmation event, so it produced no reward and
+went uncounted in the desktop metrics.) `BotRuntime` has no `ConfirmationGate`, so
 the server graph has no moderation signal; that asymmetry is documented, not hidden.
 
 ### Configuration — slice 2

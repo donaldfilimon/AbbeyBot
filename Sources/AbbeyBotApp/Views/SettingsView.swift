@@ -14,8 +14,8 @@ struct SettingsView: View {
                     Text("Live Discord").tag(OperatingMode.liveDiscord)
                 }
                 Text(config.operatingMode == .standalone
-                     ? "Local SwiftData only — no Discord gateway. Env: ABBEY_OPERATING_MODE"
-                     : "Live Discord via DiscordBM gateway when connected from the Discord tab. Env: ABBEY_OPERATING_MODE")
+                     ? "Local SwiftData only — no Discord gateway. UserDefaults key: ABBEY_OPERATING_MODE"
+                     : "Live Discord via DiscordBM gateway when connected from the Discord tab. UserDefaults key: ABBEY_OPERATING_MODE")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
@@ -64,7 +64,7 @@ struct SettingsView: View {
                         Text("\(Int(config.replyCooldownSeconds)) s")
                     }
                 }
-                Text("Env: ABBEY_REPLY_COOLDOWN_SECONDS")
+                Text("UserDefaults key: ABBEY_REPLY_COOLDOWN_SECONDS")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 LabeledContent("Memory consolidation") {
@@ -72,7 +72,7 @@ struct SettingsView: View {
                         Text("\(Int(config.memoryConsolidationIntervalMinutes)) min")
                     }
                 }
-                Text("Env: ABBEY_MEMORY_CONSOLIDATION_INTERVAL_MIN")
+                Text("UserDefaults key: ABBEY_MEMORY_CONSOLIDATION_INTERVAL_MIN")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Button("Restart consolidation loop with current interval") {
@@ -86,21 +86,21 @@ struct SettingsView: View {
                         Text("Decay")
                     }
                 }
-                Text("EMA weight on the existing score — higher means reputation moves more slowly. Current: \(String(format: "%.2f", config.reputationDecay)). Env: ABBEY_REPUTATION_DECAY")
+                Text("EMA weight on the existing score — higher means reputation moves more slowly. Current: \(String(format: "%.2f", config.reputationDecay)). UserDefaults key: ABBEY_REPUTATION_DECAY")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Safety") {
                 Toggle("Require confirmation for destructive actions", isOn: $config.confirmationRequiredForDestructiveActions)
-                Text("Gates purge/kick/ban behind an explicit confirmation sheet. Env: ABBEY_CONFIRMATION_REQUIRED")
+                Text("Gates purge/kick/ban behind an explicit confirmation sheet. UserDefaults key: ABBEY_CONFIRMATION_REQUIRED")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Modules") {
                 Toggle("Equity research module", isOn: $config.equityModuleEnabled)
-                Text("Synthetic-instrument idea generation. Not investment advice — see the Equity Research tab. Env: ABBEY_EQUITY_MODULE_ENABLED")
+                Text("Synthetic-instrument idea generation. Not investment advice — see the Equity Research tab. UserDefaults key: ABBEY_EQUITY_MODULE_ENABLED")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
