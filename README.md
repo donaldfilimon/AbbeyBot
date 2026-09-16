@@ -124,11 +124,17 @@ for a real guild.
 ```
 Sources/AbbeyCore/      # shared library (no SwiftData)
 Sources/AbbeyQuasarKit/ # bounded site generation/mutation/preview/archive library
-Sources/AbbeyEntry/     # sole @main → desktop | serve | cli
+Sources/AbbeyEntry/     # sole @main → desktop | serve | quasar serve | cli
 Sources/AbbeyBotApp/    # SwiftUI + SwiftData desktop (via bare `swift run`)
 Sources/AbbeyServer/    # Vapor HTTP + Discord (via `swift run -- serve`)
 Sources/AbbeyServerKit/ # shared Fluent-backed engine (BotRuntime, Models, Persistence)
 Sources/AbbeyCLI/       # abbey terminal REPL (via `swift run -- cli`)
+Sources/AbbeyMediaMacOS/  # AVFoundation capture/playback; dropped by ABBEY_PACKAGE_ROLE=server
+Sources/AbbeyMediaNative/ # DAVE/Opus/libsodium paths; added only by ABBEY_NATIVE_MEDIA=1
+Sources/{CLibDave,COpus,CSodium}/  # C shims for the native-media opt-in
+Contracts/Abbey/        # vendored corpus, also packaged by AbbeyCore
+web/                    # dashboard SPA (bun/Biome/Vitest/Vite → AbbeyServer Resources/Public)
+functions/              # optional Browserbase Bun package, outside CI and verify-all
 Scripts/                # run.sh, run-smoke.sh, run-server-smoke.sh
 deploy/abbeybot.service
 Dockerfile / docker-compose.yml

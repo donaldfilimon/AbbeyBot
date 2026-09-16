@@ -650,6 +650,42 @@ status: done
 - Verified via a dedicated build/test agent: server-role build exit 0, desktop build exit 0,
   241 + 36 = 277 tests green, no fixes needed beyond what was applied.
 
+## Align every agent-guidance mirror with disk
+status: done
+- Successor to the CLAUDE.md alignment goal below, widened to the four mirrors named in
+  `AGENTS.md` -> Workflow. Verified 2026-09-16 that all twelve paths `CLAUDE.md` routes to exist,
+  that its gate ordering matches `Scripts/verify-all.sh` line for line, and that the
+  `ABBEY_PACKAGE_ROLE` / `ABBEY_NATIVE_MEDIA` / `ABBEY_HAS_DESKTOP` knobs match `Package.swift`.
+  `CLAUDE.md` stays a routing index; no gate list was duplicated into it.
+- Three defects found and fixed, each verified against the tree rather than inferred:
+  1. `.codex/agents/abbey.toml` located the package at `~/Desktop/AbbeyBot`, **a path that does
+     not exist**; every absolute instruction in that mirror was dead. Now `~/dev/active/AbbeyBot`,
+     matching the `.cursor` mirror. Its build-path rule lost the stale Desktop/iCloud framing too.
+  2. `.agents/skills/abbey-verify/SKILL.md` step 6 read "`AGENTS.md`, `AGENTS.md`" — a find/replace
+     artifact that erased `CLAUDE.md` from the drift-correction list, so the `.agents` mirror told
+     agents to skip the one file the `.claude` mirror told them to fix. The two skill copies are
+     now byte-identical.
+  3. Both agent mirrors said "Swift 6.4 language mode". `Package.swift` pins tools 6.4 with
+     `.swiftLanguageMode(.v6)` on every target; corrected in both.
+- Three gaps closed: `Scripts/check-release-container.sh` (a seven-stage Docker gate) and `.github/workflows/release-images.yml`
+  were undocumented everywhere (the script is invoked only from that workflow, which also runs
+  `deploy/production/tests/run.sh` and is the sole source of GHCR image evidence) and are now in
+  `AGENTS.md` -> Additional Gates plus the `CLAUDE.md` deployment row; `AbbeyQuasarKit` was absent
+  from both agent mirrors despite owning a separate `ABBEY_QUASAR_API_TOKEN` policy, the bounded
+  path guard, the single-writer registry, and rollback integrity; and the mirrors' gate menus were
+  missing package-graph, knowledge-snapshot, Linux-parity, native-media, and release-container.
+- README's Layout block claimed the entry dispatches `desktop | serve | cli`;
+  `Sources/AbbeyEntry/main.swift:22` also dispatches `quasar [serve]`. Layout now also names the
+  two media targets, the three C shims, `Contracts/`, `web/`, and `functions/`.
+- Verified: `bash Scripts/check-static-security.sh` exit 0 with in-log `STATIC_SECURITY_GREEN`
+  (exit code read from the command, not a pipeline tail). Documentation-only change touching no
+  Swift, web, or deploy source, so no smoke or `verify-all.sh` run is claimed. Branch protection on
+  this private repo is not readable with the available token, so "required check" is asserted
+  nowhere; `release-images.yml` is described only by its `on:` triggers.
+- Committed on `cursor/command-surface-truth-20260916`, not on `main`: this repository routes
+  changes through `cursor/*` or `codex/*` review branches, never a direct commit on `main`. Not
+  pushed and no PR opened.
+
 ## Align CLAUDE.md with what the build actually requires
 status: done
 - Added the five test targets and which three Linux CI runs, the `ABBEY_PACKAGE_ROLE=server`
@@ -806,14 +842,94 @@ re-run of identical code; `c423426` failed on a different DAVE-heartbeat test
 with `.conditionTimedOut` and also passed on re-run. A different test each time,
 all timeout-based, unrelated to any change here.
 
+## Improve the Discord command surface and the macOS UI
+status: in_progress
+- Captured 2026-09-16 from a pasted capability blurb: "perform broad automation like creating
+  roles, custom slash commands, or sending DMs … remembering facts … switching my persona …
+  looking up specific information … head over to help commands".
+- **The blurb is not this repository's copy, and three of its claims have no implementation
+  here.** It appears nowhere in `Sources/`, `Contracts/`, or `web/`. Searched for the capability,
+  not the wording: there is no `createRole` / `addRole` / role-permission call, no
+  `createDM` / DM-channel send, and no runtime command creation — `CommandSpec.all` is a compiled
+  constant that `CommandRegistry.register` pushes to Discord, so a user cannot author a slash
+  command. The other three claims are real: `/remember` `/forget` `/facts`, `/persona`, and
+  `/knowledge`. Do not adopt that blurb as `/help` copy; three lines of it would be overclaims of
+  exactly the kind this goal's sibling above exists to remove.
+- Slice delivered: **`/help` was the sixth uncrosschecked list of command identity.**
+  `CommandSpec`'s own doc comment calls `all` the single source of truth "rather than re-listed
+  per call site", while `DiscordSlashLogic.helpText()` re-listed all nineteen commands as a
+  hand-maintained string literal with nothing binding the two. They happened to agree when
+  measured, so this is a latent defect closed, not a bug fixed — say so rather than claiming a
+  user-visible repair. Failure modes it removes: register a command and forget the literal, and it
+  is invisible to everyone who runs `/help`; delete one and forget the literal, and `/help`
+  advertises something that answers "Unknown command".
+- `/help` is now derived from `CommandSpec.all` via `CommandSpec.helpText`, so its descriptions are
+  by construction the same strings Discord registers and shows in its own command picker.
+- Genuinely new information for users, not just a refactor: `helpLine` derives its markers from the
+  same `visibility` and `defaultMemberPermissions` that authorization reads, so `/persona` and
+  `/model` now render "operator only, private reply". The literal said neither, so a member read
+  the same list as an operator and learned the difference only by being refused.
+- Verified: five new `HelpTextRegistryTests` (every registered command advertised; nothing
+  unregistered advertised; descriptions match; the operator/private markers present on `/persona`
+  and absent on the open `/ask`; the rendered text fits inside the router's 1900-character reply
+  clip, which a derived list can now overflow as commands are added). **Mutation-tested rather
+  than trusted**: dropping one command from the derived list fails the suite with "/help omits
+  /voice", exit 1, and the source was restored from a pre-mutation copy. Full `AbbeyCoreTests`
+  491 tests in 44 suites, exit 0 read from the command, not a pipeline tail.
+- **Fixed: the macOS UI stated the wrong command set, and it
+  states it next to the button that performs registration.** `DiscordView.swift:141` renders
+  `Text("Commands: ask, rep, remember, forget, context, persona, voice")` under "Register slash
+  commands". `CommandSpec.all` registers **nineteen**; that caption names **seven**. Missing:
+  equity, explain, facts, help, industry, knowledge, mod, model, ping, quasar, status, summarize.
+  Unlike the `/help` literal, this one is not latent — it is wrong today, and an operator pressing
+  that button cannot see from the UI what is about to be published to their guild. It was the
+  seventh copy of command identity. The caption is now a `DisclosureGroup` over `CommandSpec.all`
+  showing each command's name, its registered description, and its audience markers. The marker
+  logic moved to a shared `CommandSpec.audienceNotes` rather than being written a second time in
+  the view, which would have recreated the exact drift this slice removes.
+- **Fixed: almost nothing grounded the model's own description of what it can do.** The
+  pasted blurb is first-person model output, and its three false claims are unconstrained
+  invention rather than stale copy. `PersonaProtocol.respond` assembles the prompt from
+  `systemPrompt` + industry suffix + channel summary + user facts + retrieved evidence, and injects
+  **no capability manifest and no command list**. Each persona carries exactly one narrow
+  anti-overclaim rule — Abbey "do not invent compliance certifications", Aviva "do not claim
+  external engines or throughput metrics you do not have", Abi "do not invent legal
+  certifications" — and none of them constrains capability claims. **Correction to an earlier
+  reading in this same session: "nothing grounds it" was too broad.** `BotRuntime.modAdvice`
+  already prepends "Moderation advice only — do not claim you executed kicks, bans, or purges",
+  but only for `/mod`. `/ask`, `/explain` and ordinary ingest all take the ungrounded path, which
+  is the one a "what can you do" question lands on.
+- Fix: `CommandSpec.capabilityManifest` is derived from `all` and injected by
+  `PersonaProtocol.respond`, so it cannot fall behind the commands it describes and every persona
+  inherits it. Each denial was checked against the tree first rather than assumed: no role call,
+  no DM-channel creation, and `all` is a compiled constant `CommandRegistry.register` pushes. The
+  kick/ban clause is deliberately the weaker "do not claim you executed", mirroring `modAdvice`,
+  because `ModerationClient.kick`/`ban` **do** exist behind `ConfirmationGate` — writing "cannot
+  kick" would have replaced one false claim with another.
+- Verified: four `CapabilityManifestTests`, including an end-to-end assertion that drives
+  `AbbeyPersona`/`AvivaPersona`/`AbiPersona` through an `InferenceRouter` with a capturing
+  provider and reads the manifest out of the prompt the model was actually handed. Mutation-tested:
+  removing the injection fails with "Abbey is ungrounded", "Aviva is ungrounded", "Abi is
+  ungrounded" and "manifest did not reach the model", exit 1; source restored from a pre-mutation
+  copy.
+- The macOS half is addressed only for the command panel. `Sources/AbbeyBotApp/Views/` holds
+  thirteen views; no broader UI work was done and none is claimed.
+- Committed on `cursor/command-surface-truth-20260916`: code in `92dcf5c`, documentation and this
+  ledger in the commit that follows it. Not pushed and no PR opened. **This bullet and its sibling
+  above previously said "uncommitted, on `main`" — true when written, false once the branch
+  landed, which is the same defect corrected earlier in this file for four slices that stayed
+  marked "(uncommitted)" after landing in `e679011`.** A status line about where work lives is
+  stale the moment the work moves; re-read it before committing the file that carries it.
+
 ## Redesign the Discord command, persona, and floor surfaces for claim honesty
 status: in_progress
 - Scope: the Discord-facing contracts in `AbbeyCore` — command registration/authorization/visibility, intent classification, persona routing copy, and the deterministic floor. Acceptance bar is this repo's own claims discipline: a name, description, or mode must match what the code does.
-- Command-contract slice implemented 2026-09-09 (uncommitted): command identity was a bare `String` replicated across five uncrosschecked lists — `CommandRegistry.all`, the router's ephemerality switch, the router's `mutatesGlobalState` chain, the router's dispatch switch, and the access policy's user-scoped switch. Omissions failed silently in the unsafe direction: a missing mutation entry leaves a guild-mutating command runnable by anyone; a missing ephemerality entry publishes stored personal facts into the channel. New `CommandSpec` declares name, options, scope, and visibility together; the registry derives its payloads from it and the router/policy read it. `/model` keeps a `globalStateWhenOptionPresent("mode")` scope so the bare read form stays available to everyone. `VERIFY-ALL GREEN`, 885 tests / 89 suites, exit 0.
+- Command-contract slice implemented 2026-09-09, **landed** in `e679011` via PR #88 (`3b1c281`): command identity was a bare `String` replicated across five uncrosschecked lists — `CommandRegistry.all`, the router's ephemerality switch, the router's `mutatesGlobalState` chain, the router's dispatch switch, and the access policy's user-scoped switch. Omissions failed silently in the unsafe direction: a missing mutation entry leaves a guild-mutating command runnable by anyone; a missing ephemerality entry publishes stored personal facts into the channel. New `CommandSpec` declares name, options, scope, and visibility together; the registry derives its payloads from it and the router/policy read it. `/model` keeps a `globalStateWhenOptionPresent("mode")` scope so the bare read form stays available to everyone. `VERIFY-ALL GREEN`, 885 tests / 89 suites, exit 0.
 - Worth keeping from that slice: the first attempt added `isUserScoped` as a caller-supplied field defaulting to `false`, which recreated the same drift risk one layer up. The pre-existing `commandAccessScopesMemoryAndGlobalMutations` test failed and was right to. Scope is a property of the command, not of the request, so `DiscordCommandAccessPolicy` now reads it from `CommandSpec` and no caller can forget it.
-- Intent-classifier slice implemented (uncommitted): `classifyLoose` matched keywords with bare `contains`, so "reply", "report", "prepare" and "represent" classified as `.repQuery`, and "banana", "kickoff", "urban" and "abandon" as `.modRequest`. This corrupted state rather than only picking a wrong reply: `Intent.quality` feeds `recordInteraction` and the DQN reward, so "that is a banana" wrote moderation-grade 0.8 quality into reputation and the replay buffer. Fixed with whole-word matching, following the `\b`-anchored persona rule three lines below it. Verified by mutation: reverting to `contains` fails all five new regression tests on those literal strings.
-- Floor-provider slice implemented (uncommitted): `DeterministicFloorProvider` — named deterministic, reporting `mode: .deterministicFloor` — selected acknowledgements with `randomElement()`, the only `randomElement()` in `Sources/`. Same input, different reply, on the path that holds when every model is unavailable; the existing test covered only the fixed greeting branch, which is why it survived. Now derived from the request with FNV-1a. Deliberately not `hashValue`: Swift seeds `Hasher` per process, so that fix would pass in-process and fail across runs. Its doc comment claimed template banks "keyed by persona register"; the banks are keyed by intent and `generate` never reads `systemPrompt`, so all three personas emit byte-identical floor text. That limitation is now documented and pinned by a test rather than smoothed over. `VERIFY-ALL GREEN`, 486 tests, exit 0.
-- Persona-panel copy corrected (uncommitted): `PersonaSwitcherView` told operators its test prompt "uses the active persona and the same reply-cooldown rules as live Discord". The cooldown half was true; the persona half was not — the panel calls `currentPersona()` while live Discord calls `route(intent:userText:)` per message, so the two disagree for every question, greeting, mod request, and small talk. Copy now states which persona it uses and that live Discord may differ. Behaviour deliberately unchanged: testing the selected persona is a reasonable intent for a persona switcher, so the claim was the defect, not the call.
+- Intent-classifier slice implemented, **landed** in `e679011`: `classifyLoose` matched keywords with bare `contains`, so "reply", "report", "prepare" and "represent" classified as `.repQuery`, and "banana", "kickoff", "urban" and "abandon" as `.modRequest`. This corrupted state rather than only picking a wrong reply: `Intent.quality` feeds `recordInteraction` and the DQN reward, so "that is a banana" wrote moderation-grade 0.8 quality into reputation and the replay buffer. Fixed with whole-word matching, following the `\b`-anchored persona rule three lines below it. Verified by mutation: reverting to `contains` fails all five new regression tests on those literal strings.
+- Floor-provider slice implemented, **landed** in `e679011`: `DeterministicFloorProvider` — named deterministic, reporting `mode: .deterministicFloor` — selected acknowledgements with `randomElement()`, the only `randomElement()` in `Sources/`. Same input, different reply, on the path that holds when every model is unavailable; the existing test covered only the fixed greeting branch, which is why it survived. Now derived from the request with FNV-1a. Deliberately not `hashValue`: Swift seeds `Hasher` per process, so that fix would pass in-process and fail across runs. Its doc comment claimed template banks "keyed by persona register"; the banks are keyed by intent and `generate` never reads `systemPrompt`, so all three personas emit byte-identical floor text. That limitation is now documented and pinned by a test rather than smoothed over. `VERIFY-ALL GREEN`, 486 tests, exit 0.
+- Persona-panel copy corrected, **landed** in `e679011`: `PersonaSwitcherView` told operators its test prompt "uses the active persona and the same reply-cooldown rules as live Discord". The cooldown half was true; the persona half was not — the panel calls `currentPersona()` while live Discord calls `route(intent:userText:)` per message, so the two disagree for every question, greeting, mod request, and small talk. Copy now states which persona it uses and that live Discord may differ. Behaviour deliberately unchanged: testing the selected persona is a reasonable intent for a persona switcher, so the claim was the defect, not the call.
+- Ledger drift corrected 2026-09-16: the four slices above were still marked "(uncommitted)" long after they landed. Re-verified against `HEAD`, not against this file: `Sources/AbbeyCore/Discord/CommandSpec.swift` exists; `IntentClassifier.classifyLoose` now matches through `containsWord` rather than bare `contains`; `DeterministicFloorProvider` derives its acknowledgement with FNV-1a and the only remaining `randomElement` token in `Sources/` is the doc comment recording what was replaced; `PersonaSwitcherView` states that live Discord picks a persona per message. All four are in `e679011`, merged as PR #88. The goal stays `in_progress` because the four items below are open by decision, not by omission.
 - Open, and NOT changed because they are Donald's decisions rather than cleanups: `ConfirmationGate.request` is `guard requireConfirmation() else { return true }`, so `ABBEY_CONFIRMATION_REQUIRED=false` turns the human gate into a pass-through on the only path that can kick or ban (no test covers that branch); and the `facts: [String]` store has no count cap, length cap, TTL, or eviction — the one unbounded store in a codebase that bounds its DQN replay buffer to 10,000.
 - Open, unverified claim needing a decision rather than a guess: `/ask` registers as "Ask Abbey" but always routes `.question` to Aviva. "Abbey" may mean the product (the status embed says "AbbeyBot"), so this may be correct copy rather than a defect. Not touched.
 - Open: the REST surface (`POST /api/state/remember|forget`) takes `userId`/`guildId` from the request body behind a single shared bearer token, with no per-user check — an operator-trust model, unlike the Discord slash path which is properly self-or-moderator gated. Worth naming as a deliberate difference or closing it.
