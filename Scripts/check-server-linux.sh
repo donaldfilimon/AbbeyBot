@@ -55,8 +55,12 @@
 # snapshot toolchain for desktop work (SwiftData macros break). The toolchain is
 # selected per-invocation via swiftly's `+toolchain` selector only.
 #
-# Overrides: ABBEY_LINUX_TOOLCHAIN, ABBEY_LINUX_SWIFT_SDK, ABBEY_LINUX_SDK_BUNDLE,
-#            ABBEY_LINUX_BUILD_DIR, ABBEY_LINUX_LOG_DIR.
+# Overrides: ABBEY_LINUX_TOOLCHAIN, ABBEY_LINUX_SDK_BUNDLE, ABBEY_LINUX_TRIPLE,
+#            ABBEY_LINUX_SWIFT_SDK, ABBEY_LINUX_BUILD_DIR, ABBEY_LINUX_LOG_DIR.
+# The SDK is selected by BUNDLE NAME plus `--triple`, never by triple alone: two
+# installed static-Linux bundles share `x86_64-swift-linux-musl`, and SwiftPM
+# refuses an ambiguous query either way (learned 2026-09-16 with the 07-11 and
+# 08-21 bundles both present). ABBEY_LINUX_SWIFT_SDK still overrides the query.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -70,8 +74,9 @@ unset TOOLCHAINS || true
 # main-snapshot-2026-08-11 with the 2026-07-11 SDK, and the version mismatch
 # surfaces as a confusing build error rather than an install error.
 TOOLCHAIN="${ABBEY_LINUX_TOOLCHAIN:-main-snapshot-2026-07-11}"
-SWIFT_SDK="${ABBEY_LINUX_SWIFT_SDK:-x86_64-swift-linux-musl}"
 SDK_BUNDLE="${ABBEY_LINUX_SDK_BUNDLE:-swift-DEVELOPMENT-SNAPSHOT-2026-07-11-a_static-linux-0.1.0}"
+TRIPLE="${ABBEY_LINUX_TRIPLE:-x86_64-swift-linux-musl}"
+SWIFT_SDK="${ABBEY_LINUX_SWIFT_SDK:-$SDK_BUNDLE}"
 
 command -v swiftly >/dev/null 2>&1 || {
     echo "SERVER_LINUX_FAIL: swiftly not found on PATH." >&2
@@ -102,7 +107,7 @@ SCRATCH="${ABBEY_LINUX_BUILD_DIR:-${TMPDIR:-/tmp}/AbbeyBot.server-linux.build}"
 mkdir -p "$LOG_DIR"
 
 echo "SERVER_LINUX toolchain:  $TOOLCHAIN"
-echo "SERVER_LINUX swift-sdk:  $SWIFT_SDK  (bundle: $SDK_BUNDLE)"
+echo "SERVER_LINUX swift-sdk:  $SWIFT_SDK  (bundle: $SDK_BUNDLE, triple: $TRIPLE)"
 echo "SERVER_LINUX libc:       musl  (CI is glibc/bookworm — see glibc-divergence gate)"
 echo "SERVER_LINUX scratch:    $SCRATCH"
 echo "SERVER_LINUX logs:       $LOG_DIR"
@@ -122,6 +127,7 @@ run_gate() {
     env -u DATABASE_URL ABBEY_PACKAGE_ROLE=server \
         swiftly run swift "$@" \
         --swift-sdk "$SWIFT_SDK" \
+        --triple "$TRIPLE" \
         --scratch-path "$SCRATCH" \
         "+$TOOLCHAIN" \
         >"$log" 2>&1

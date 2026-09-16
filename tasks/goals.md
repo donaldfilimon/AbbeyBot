@@ -2,7 +2,8 @@
 
 ## Full Swift product integration and release
 status: in_progress
-- Current evidence: [2026-09-08 integration ledger](../docs/verification/product-integration-2026-09-08.md).
+- Current evidence: [2026-09-16 integration ledger](../docs/verification/product-integration-2026-09-16.md);
+  the [2026-09-08 ledger](../docs/verification/product-integration-2026-09-08.md) is history.
 - Canonical `main`, `origin/main`, and remote `main` were observed equal at
   `a9b6c1712178b664d217eab03b55e0c2475f66d3`; ordinary and native release gates
   and hosted CI/release workflows passed on that exact SHA. Production rollout
@@ -11,6 +12,16 @@ status: in_progress
 - Live service acceptance and participant-consented audio/video qualification
   remain separate requirements; video promotion also needs the observed codec's
   typed negotiation and final production composition.
+- Re-certified 2026-09-16 13:3x EDT at `2143a64` (seven PRs past `a9b6c17`): all five local
+  gates green with exit codes read from their logs (`verify-all` 520 desktop tests / 49 suites;
+  native 102 / 9 in debug and release; deployment control flow 30; server snapshot Core 520,
+  Quasar 84, CLI 30, ServerKit 122, Server 34; Linux musl cross-compile plus glibc lint).
+  Hosted CI and release have not run since 09-08: every push shows a `startup_failure` with
+  zero jobs, which is the account billing lock, so no image exists for this candidate. SSH is
+  still denied, `xfoss.dev` is unregistered, and the CLI token lacks `read:packages`; each was
+  re-measured, not assumed. `check-server-linux.sh` gained bundle-plus-`--triple` SDK selection
+  because two installed static-Linux SDKs made the old triple query ambiguous. Status stays
+  `in_progress`: every remaining row is an operator action or live evidence.
 
 ## Complete Discord application and real Discord Voice audio
 status: blocked
