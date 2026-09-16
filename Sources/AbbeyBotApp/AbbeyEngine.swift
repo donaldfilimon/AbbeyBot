@@ -20,6 +20,8 @@ final class AbbeyEngine {
     let eventBus: EventBus
     let socialBrain: SocialBrain
     let dqnAgent: DQNAgent
+    /// Links Discord replies to the DQN sample that chose their strategy (reaction rewards).
+    let rewardLedger: DelayedRewardLedger
     let scheduler: AbbeyScheduler
     let confirmationGate: ConfirmationGate
     let personaRouter: ABIRouter
@@ -71,6 +73,7 @@ final class AbbeyEngine {
         modelContainer: ModelContainer,
         config: AppConfig = .shared,
         storeDegraded: Bool = false,
+        dqnAgent injectedDQNAgent: DQNAgent? = nil,
         saveModelContext: @escaping ModelContextSaver = { try $0.save() },
         scheduleRememberPush: @escaping RememberPushScheduler = { guildId, userId, fact in
             Task.detached(priority: .utility) {
@@ -95,6 +98,7 @@ final class AbbeyEngine {
         self.eventBus = bus
 
         self.config = config
+        self.rewardLedger = DelayedRewardLedger(isEnabled: config.delayedRewardsEnabled)
         do {
             try config.validateForStartup()
             self.startupConfigError = nil
@@ -115,7 +119,8 @@ final class AbbeyEngine {
         } else {
             experiencePersistence = nil
         }
-        self.dqnAgent = DQNAgent(
+        // Tests inject an in-memory agent so they never read or append to `~/.abbey`.
+        self.dqnAgent = injectedDQNAgent ?? DQNAgent(
             topology: DQNAgent.defaultTopology,
             checkpointURL: checkpointURL,
             experiencePersistence: experiencePersistence
@@ -382,8 +387,14 @@ final class AbbeyEngine {
             metrics.recordMessageIngested()
         case .reputationChanged:
             metrics.recordReputationEvent()
-        case .destructiveActionConfirmed:
+        case .destructiveActionConfirmed(_, let targetUserId, let guildId):
             metrics.recordDestructiveAction(confirmed: true)
+            await ModerationRewardIngress.apply(
+                targetUserId: targetUserId,
+                guildId: guildId,
+                ledger: rewardLedger,
+                dqnAgent: dqnAgent
+            )
         case .destructiveActionCancelled:
             metrics.recordDestructiveAction(confirmed: false)
         case .inferenceProviderFailed(_, let message):
@@ -482,6 +493,15 @@ final class AbbeyEngine {
         )
         lastDQNAction = scored.action
         lastStrategy = scored.strategy
+        if let discordMessageId {
+            await rewardLedger.stage(
+                sourceMessageId: discordMessageId,
+                authorId: authorId,
+                guildId: guildId,
+                state: scored.state,
+                action: scored.action
+            )
+        }
         await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
 
         logInteraction(
@@ -637,6 +657,8 @@ final class AbbeyEngine {
         let ingress = makeMessageIngress()
         let interactions = makeInteractionRouter()
         let bridge = discordBridge
+        let rewardLedger = rewardLedger
+        let dqnAgent = dqnAgent
 
         let hooks = DiscordEventHooks(
             onReady: { [weak self] userId in
@@ -652,6 +674,20 @@ final class AbbeyEngine {
             onInteractionCreate: { interaction in
                 guard let client = await bridge.client else { return }
                 await interactions.handle(interaction, client: client)
+            },
+            onMessageReactionAdd: { reaction in
+                await ReactionRewardIngress.apply(
+                    reaction,
+                    botUserId: await bridge.botUserId,
+                    ledger: rewardLedger,
+                    dqnAgent: dqnAgent
+                )
+            },
+            onMessageDelete: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
+            },
+            onMessageDeleteBulk: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
             }
         )
 
@@ -805,6 +841,9 @@ final class AbbeyEngine {
                 guard let self else { return }
                 await self.scheduler.markReplied(userId: userId, guildId: guildId)
             },
+            noteReply: { [rewardLedger] sourceMessageId, replyMessageId in
+                await rewardLedger.bind(sourceMessageId: sourceMessageId, replyMessageId: replyMessageId)
+            },
             botUserId: { [weak self] in
                 await self?.discordBridge.botUserId
             }
@@ -866,7 +905,9 @@ final class AbbeyEngine {
                     lastInferenceError: self.metrics.lastInferenceFailureMessage ?? "",
                     industry: AppConfig.shared.industryProfile.rawValue,
                     equityEnabled: AppConfig.shared.equityModuleEnabled,
-                    dryRun: AppConfig.shared.dryRun
+                    dryRun: AppConfig.shared.dryRun,
+                    delayedRewards: self.rewardLedger.isEnabled,
+                    replayBufferCount: await self.dqnAgent.bufferCount()
                 )
             },
             model: { raw in

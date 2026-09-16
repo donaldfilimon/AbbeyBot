@@ -107,6 +107,8 @@ public actor BotRuntime {
     public let eventBus: EventBus
     let socialBrain: FluentSocialBrain
     let dqnAgent: DQNAgent
+    /// Links Discord replies to the DQN sample that chose their strategy (reaction rewards).
+    let rewardLedger: DelayedRewardLedger
     let scheduler: FluentScheduler
     let personaRouter: ABIRouter
     public let inferenceRouter: InferenceRouter
@@ -145,6 +147,7 @@ public actor BotRuntime {
         self.app = app
         let config = AppConfig.shared
         self.config = config
+        self.rewardLedger = DelayedRewardLedger(isEnabled: config.delayedRewardsEnabled)
         let metrics = EngineMetrics()
         self.metrics = metrics
         let bus = EventBus()
@@ -281,6 +284,8 @@ public actor BotRuntime {
         let ingress = makeMessageIngress()
         let interactions = makeInteractionRouter()
         let bridge = discordBridge
+        let rewardLedger = rewardLedger
+        let dqnAgent = dqnAgent
 
         let hooks = DiscordEventHooks(
             onReady: { [weak self] userId in
@@ -294,6 +299,20 @@ public actor BotRuntime {
             onInteractionCreate: { interaction in
                 guard let client = await bridge.client else { return }
                 await interactions.handle(interaction, client: client)
+            },
+            onMessageReactionAdd: { reaction in
+                await ReactionRewardIngress.apply(
+                    reaction,
+                    botUserId: await bridge.botUserId,
+                    ledger: rewardLedger,
+                    dqnAgent: dqnAgent
+                )
+            },
+            onMessageDelete: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
+            },
+            onMessageDeleteBulk: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
             }
         )
 
@@ -407,6 +426,13 @@ public actor BotRuntime {
             channelId: channelId
         )
         lastStrategy = scored.strategy
+        await rewardLedger.stage(
+            sourceMessageId: discordMessageId,
+            authorId: authorId,
+            guildId: guildId,
+            state: scored.state,
+            action: scored.action
+        )
         await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
 
         do {
@@ -679,6 +705,9 @@ public actor BotRuntime {
                 guard let self else { return }
                 await self.scheduler.markReplied(userId: userId, guildId: guildId)
             },
+            noteReply: { [rewardLedger] sourceMessageId, replyMessageId in
+                await rewardLedger.bind(sourceMessageId: sourceMessageId, replyMessageId: replyMessageId)
+            },
             botUserId: { [weak self] in
                 await self?.discordBridge.botUserId
             }
@@ -764,7 +793,9 @@ public actor BotRuntime {
                     lastInferenceError: snap.lastInferenceError,
                     industry: AppConfig.shared.industryProfile.rawValue,
                     equityEnabled: AppConfig.shared.equityModuleEnabled,
-                    dryRun: AppConfig.shared.dryRun
+                    dryRun: AppConfig.shared.dryRun,
+                    delayedRewards: self.rewardLedger.isEnabled,
+                    replayBufferCount: await self.dqnAgent.bufferCount()
                 )
             },
             model: { raw in

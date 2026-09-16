@@ -1159,14 +1159,23 @@ public struct DiscordEventHooks: Sendable {
     public var onReady: @Sendable (_ userId: String) async -> Void
     public var onMessageCreate: @Sendable (_ message: Gateway.MessageCreate) async -> Void
     public var onInteractionCreate: @Sendable (_ interaction: Interaction) async -> Void
+    public var onMessageReactionAdd: @Sendable (_ reaction: Gateway.MessageReactionAdd) async -> Void
+    public var onMessageDelete: @Sendable (_ deleted: Gateway.MessageDelete) async -> Void
+    public var onMessageDeleteBulk: @Sendable (_ deleted: Gateway.MessageDeleteBulk) async -> Void
 
     public init(
         onReady: @escaping @Sendable (_ userId: String) async -> Void = { _ in },
         onMessageCreate: @escaping @Sendable (_ message: Gateway.MessageCreate) async -> Void = { _ in },
-        onInteractionCreate: @escaping @Sendable (_ interaction: Interaction) async -> Void = { _ in }
+        onInteractionCreate: @escaping @Sendable (_ interaction: Interaction) async -> Void = { _ in },
+        onMessageReactionAdd: @escaping @Sendable (_ reaction: Gateway.MessageReactionAdd) async -> Void = { _ in },
+        onMessageDelete: @escaping @Sendable (_ deleted: Gateway.MessageDelete) async -> Void = { _ in },
+        onMessageDeleteBulk: @escaping @Sendable (_ deleted: Gateway.MessageDeleteBulk) async -> Void = { _ in }
     ) {
         self.onReady = onReady
         self.onMessageCreate = onMessageCreate
         self.onInteractionCreate = onInteractionCreate
+        self.onMessageReactionAdd = onMessageReactionAdd
+        self.onMessageDelete = onMessageDelete
+        self.onMessageDeleteBulk = onMessageDeleteBulk
     }
 }

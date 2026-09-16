@@ -32,6 +32,10 @@ struct DiscordView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Auto-connect on launch (liveDiscord mode)", isOn: $config.autoConnectOnLaunch)
+                Toggle("Learn from reactions, deleted replies and moderation", isOn: $config.delayedRewardsEnabled)
+                Text("Env: ABBEY_DELAYED_REWARDS — applies on next launch (currently \(engine.rewardLedger.isEnabled ? "on" : "off")).")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
 
             Section("Session") {

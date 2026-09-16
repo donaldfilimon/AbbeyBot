@@ -28,9 +28,10 @@ public enum DQNExperiencePersistence: Sendable {
 /// `remember`/`learn`, with durable checkpoint + experience journal.
 ///
 /// **Claim-honest:** the four-wide action head dispatches answer / clarify / retrieve /
-/// refuse. `IngestScorer` currently trains it as a terminal contextual bandit using an
-/// immediate, action-conditioned heuristic reward; it does not yet learn from delayed
-/// reactions or moderation outcomes. See AGENTS.md Learning & Safety Policy.
+/// refuse. `IngestScorer` trains it as a terminal contextual bandit using an immediate,
+/// action-conditioned heuristic reward. `DelayedRewardLedger` adds a second terminal sample
+/// when the addressed user reacts to Abbey's reply (unit-tested, not yet observed live);
+/// moderation outcomes are still not a reward source. See AGENTS.md Behavioral Boundaries.
 ///
 /// Two corrections versus the reference draft in brain.md, both mechanical:
 ///   1. `online`/`target` are plain (non-async) `NeuralNetwork` values, so calling their

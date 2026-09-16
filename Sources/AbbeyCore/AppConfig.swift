@@ -117,6 +117,18 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(decentralizationEnabled, forKey: Keys.decentralizationEnabled) }
     }
 
+    /// Delayed human rewards for the DQN (reactions, deleted replies, confirmed moderation).
+    /// Env `ABBEY_DELAYED_REWARDS`; default on. Read once when a runtime starts.
+    public var delayedRewardsEnabled: Bool {
+        didSet { defaults.set(delayedRewardsEnabled, forKey: Keys.delayedRewards) }
+    }
+
+    /// Default-on switch parsing: only a recognised false token disables it.
+    public static func parseDefaultOnSwitch(_ raw: String) -> Bool {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !["0", "false", "no", "off"].contains(normalized)
+    }
+
     private enum Keys {
         static let operatingMode = "ABBEY_OPERATING_MODE"
         static let inferenceMode = "ABBEY_INFERENCE_MODE"
@@ -131,6 +143,7 @@ public final class AppConfig: @unchecked Sendable {
         static let reputationDecay = "ABBEY_REPUTATION_DECAY"
         static let confirmationRequired = "ABBEY_CONFIRMATION_REQUIRED"
         static let equityModuleEnabled = "ABBEY_EQUITY_MODULE_ENABLED"
+        static let delayedRewards = "ABBEY_DELAYED_REWARDS"
         static let discordBotToken = "DISCORD_BOT_TOKEN"
         static let discordDevGuildId = "DISCORD_DEV_GUILD_ID"
         static let autoConnectOnLaunch = "ABBEY_DISCORD_AUTO_CONNECT"
@@ -225,6 +238,13 @@ public final class AppConfig: @unchecked Sendable {
         let industryRaw = defaults.string(forKey: Keys.industryProfile)
             ?? environment["ABBEY_INDUSTRY_PROFILE"]
         self.industryProfile = IndustryProfile.resolve(industryRaw)
+        if let envRewards = environment[Keys.delayedRewards] {
+            self.delayedRewardsEnabled = Self.parseDefaultOnSwitch(envRewards)
+        } else if let stored = defaults.object(forKey: Keys.delayedRewards) as? Bool {
+            self.delayedRewardsEnabled = stored
+        } else {
+            self.delayedRewardsEnabled = true
+        }
         if let envDec = environment["ABBEY_DECENTRALIZATION_ENABLED"] {
             let normalized = envDec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             self.decentralizationEnabled = ["1", "true", "yes", "on"].contains(normalized)
