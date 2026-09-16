@@ -1,6 +1,6 @@
 # Abbey delayed rewards: reactions, deleted replies, moderation confirmations
 
-Date: 2026-09-16. Status: approved design, not yet implemented beyond slice 1.
+Date: 2026-09-16. Status: approved design; slices 1-4 implemented and unit-tested, not live-proven.
 Owner: Donald (decisions), agent sessions (implementation).
 
 ## Problem
@@ -31,7 +31,7 @@ Every delayed reward is a **second terminal sample** for the same `(state, actio
 ingest already recorded: `Experience(state, action, reward, nextState: state, done: true)`.
 It is not an MDP transition and does not bootstrap. `IngestScorer` is not changed.
 
-A **staged sample** is `(authorId, state, action, stagedAt)`, keyed by the user's message
+A **staged sample** is `(authorId, guildId, state, action, stagedAt)`, keyed by the user's message
 id. It becomes **bound** when Abbey's reply to that message is delivered, keyed by the
 reply's message id. Every staged or bound sample pays out **at most once** across all
 signals, then is removed.
@@ -46,18 +46,22 @@ signals, then is removed.
   — reaction signal (slice 1).
 - `consumeReplyDeletion(replyMessageId:now:) -> Experience?` — slice 3.
 - `consumeModeration(targetUserId:guildId:now:) -> [Experience]` — slice 4.
-- Author index `(authorId, guildId) -> [message id]` covering staged and bound samples,
-  maintained on every insert, bind, payout and eviction (slice 4).
+- Samples carry `guildId`; `consumeModeration` scans both tables (at most 1,024 entries)
+  instead of keeping a secondary author index, so there is no index to keep consistent
+  (slice 4; changed from the approved in-chat design during implementation).
 - `isEnabled` fixed at init from config; when false, `stage` records nothing, so every
   signal is a no-op and re-enabling never replays history (slice 2).
 
 ### Ingress adapters (`AbbeyCore/Discord`)
 
 - `ReactionRewardIngress.apply` — MESSAGE_REACTION_ADD (slice 1).
-- `ReplyDeletionIngress.apply` — MESSAGE_DELETE, delivered on the existing
-  `.guildMessages` intent (slice 3).
-- `DiscordEventHooks` gains `onMessageReactionAdd` (slice 1) and `onMessageDelete`
-  (slice 3), each defaulted to a no-op; `AbbeyGatewayHandler` forwards both.
+- `ReplyDeletionIngress.apply` — MESSAGE_DELETE **and MESSAGE_DELETE_BULK**, both
+  delivered on the existing `.guildMessages` intent (slice 3). A purge arrives as a bulk
+  delete, so handling only the single event would let purged replies escape the signal.
+- `ModerationRewardIngress.apply` — shared adapter the desktop listener calls (slice 4).
+- `DiscordEventHooks` gains `onMessageReactionAdd` (slice 1), `onMessageDelete` and
+  `onMessageDeleteBulk` (slice 3), each defaulted to a no-op; `AbbeyGatewayHandler`
+  forwards all three.
 - `MessageIngress` reports `(sourceMessageId, replyMessageId)` through `noteReply` after
   a successful send; a reply body that fails to decode loses only that link (slice 1).
 
@@ -65,7 +69,10 @@ signals, then is removed.
 
 On `.destructiveActionConfirmed(kind, targetUserId, guildId)` from the existing
 `EventBus`, call `consumeModeration` and feed each sample to the agent.
-`.destructiveActionCancelled` produces nothing. `BotRuntime` has no `ConfirmationGate`, so
+`.destructiveActionCancelled` produces nothing. `ConfirmationGate` publishes
+`.destructiveActionConfirmed` only when confirmation is required
+(`ABBEY_CONFIRMATION_REQUIRED`, default on); with confirmation disabled there is no
+confirmation event and therefore no moderation reward. `BotRuntime` has no `ConfirmationGate`, so
 the server graph has no moderation signal; that asymmetry is documented, not hidden.
 
 ### Configuration — slice 2
@@ -103,7 +110,6 @@ negative 👎 ❌ 😕 😡 🙄.
 
 - Staged and bound tables: 512 entries each, 24-hour lifetime. On a full insert, expired
   entries are pruned first, then the oldest is evicted.
-- The author index is pruned with the tables and never holds an id absent from both.
 - One moderation confirmation pays out at most 20 samples, newest first, and only
   samples younger than 24 hours.
 - Non-Discord ingest (HTTP, social envelopes) stages samples that are never bound; they
@@ -112,7 +118,7 @@ negative 👎 ❌ 😕 😡 🙄.
 ## Error handling
 
 Every path fails closed, producing no reward rather than an invented one: unknown or
-expired ids, an empty author index, a disabled switch. Malformed samples are still
+expired ids, no matching samples for a moderated user, a disabled switch. Malformed samples are still
 rejected by `DQNAgent.remember`'s validity check. No new path writes to Discord, so there
 is no partial-failure state. A moderation confirmation while Discord is disconnected
 still applies; it needs only the ledger and the agent.
@@ -136,8 +142,9 @@ Swift Testing, `Tests/AbbeyCoreTests/DelayedRewardLedgerTests.swift` plus a desk
   MESSAGE_DELETE payload trains the agent once.
 - Slice 4: a target with answer, refuse and retrieve samples yields −1 and +1 and keeps
   retrieve; other users and other guilds untouched; 20-sample cap; 24-hour cutoff;
-  desktop test that a confirmed kick reaches `consumeModeration` and a cancelled one
-  does not.
+  desktop test (`AbbeyEngineModerationRewardTests`) that a confirmed kick through the
+  real `ConfirmationGate` consumes the sample and grows the agent's buffer, and a
+  cancelled one does neither.
 
 Gate for every slice: `unset TOOLCHAINS; bash Scripts/verify-all.sh`, exit code read
 from the log.
@@ -161,5 +168,16 @@ Until every step passes, docs say "unit-tested, not live-proven".
 3. Reply-deletion signal.
 4. Moderation-confirmation signal and author index.
 
-One commit per slice on the same `codex/*` branch and one pull request, per the
-repository's review-branch rule. Merging is Donald's call.
+Slices 1 and 2 are separate commits; slices 3 and 4 share one commit because both
+extend the same ledger file. All on the same `codex/*` branch and one pull request, per
+the repository's review-branch rule. Merging is Donald's call.
+
+## Test isolation
+
+`AbbeyEngine` builds its `DQNAgent` against the real `~/.abbey` checkpoint and experience
+store. Its init now accepts an injected agent, and the desktop moderation tests pass an
+in-memory one, so they neither read nor append to the operator's learning history.
+(Found when the first draft of that test appended one synthetic sample to
+`~/.abbey/dqn-experience.jsonl`; the line was removed.) Other existing suites still
+write under `~/.abbey` during `verify-all`; that pre-dates this work and is tracked
+separately.

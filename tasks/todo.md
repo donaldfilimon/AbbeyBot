@@ -656,6 +656,24 @@ Note: the three controller findings are one underlying shape — actor reentranc
 across the `await` in capture startup — and are being fixed as one mechanism
 rather than three patches.
 
+## Delayed rewards — live evidence (open, 2026-09-16)
+
+Design: `docs/superpowers/specs/2026-09-16-abbey-delayed-rewards-design.md`. Slices 1-4 are
+unit-tested and `verify-all` green on `codex/reaction-reward-learning-20260916`; none of this
+is live-proven. Needs a bot token and a private test guild from Donald.
+
+- [ ] Send a message; Abbey replies.
+- [ ] React 👍 as the author; `/status` "Replay buffer" rises by exactly 1.
+- [ ] On a second reply, delete it; the buffer rises by 1 and the journal shows reward −1.5.
+- [ ] Purge (bulk delete) a third reply; the buffer rises by 1.
+- [ ] From the desktop app, kick a throwaway account Abbey answered: on confirm the journal
+      shows −1; on cancel it shows nothing.
+- [ ] Set `ABBEY_DELAYED_REWARDS=0`, restart; `/status` shows "Delayed rewards: off" and a 👍
+      adds nothing.
+- [ ] Upstream: DiscordBM 1.16.2 (`b01d40b`, Gateway.swift:1385) decodes
+      `MessageReactionAdd.member` as required, so DM reactions never arrive. No issue exists
+      yet; filing it is Donald's call.
+
 ## Verification evidence
 
 - [x] Non-desktop, re-verified after the `.ignoreExisting()` fix: 255 tests green, exit 0

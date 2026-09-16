@@ -43,4 +43,12 @@ struct AbbeyGatewayHandler: GatewayEventHandler {
     func onMessageReactionAdd(_ payload: Gateway.MessageReactionAdd) async throws {
         await hooks.onMessageReactionAdd(payload)
     }
+
+    func onMessageDelete(_ payload: Gateway.MessageDelete) async throws {
+        await hooks.onMessageDelete(payload)
+    }
+
+    func onMessageDeleteBulk(_ payload: Gateway.MessageDeleteBulk) async throws {
+        await hooks.onMessageDeleteBulk(payload)
+    }
 }

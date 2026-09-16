@@ -18,25 +18,50 @@ public enum ReactionReward {
     }
 }
 
-/// Links a bot reply back to the (state, action) sample whose strategy produced it, so
-/// the addressed user's reaction on that reply can train the DQN.
+/// Rewards for the moderation-side signals.
+public enum ModerationReward {
+    /// Abbey's reply was deleted, by anyone, while its sample was still tracked.
+    public static let replyDeleted: Float = -1.5
+
+    /// A moderator confirmed a destructive action against the author of a tracked
+    /// message. `nil` means the strategy carries no signal for that outcome.
+    public static func value(forConfirmedActionAfter strategy: StrategyAction) -> Float? {
+        switch strategy {
+        case .answer, .clarify: return -1
+        case .refuse: return 1
+        case .retrieve: return nil
+        }
+    }
+}
+
+/// Links Abbey's strategy choices to the human outcomes that follow them, so those
+/// outcomes can train the DQN. See
+/// `docs/superpowers/specs/2026-09-16-abbey-delayed-rewards-design.md`.
 ///
 /// Flow: ingest `stage`s the sample under the user's message id; the reply path `bind`s it
-/// to the id of the message Abbey sent; a reaction on that reply is turned into an
-/// `Experience` by `reward`, at most once per reply.
+/// to the id of the message Abbey sent. Three signals then consume samples:
+/// a reaction from the addressed user on the reply, the reply's deletion, and a confirmed
+/// moderation action against the author. Every sample pays out at most once.
 ///
-/// **Claim-honest:** the resulting `Experience` is a second terminal contextual-bandit
+/// **Claim-honest:** each resulting `Experience` is a second terminal contextual-bandit
 /// sample for the same (state, action) that `IngestScorer` already recorded with its
-/// heuristic reward. It is not an MDP transition and does not bootstrap. Only the user
-/// Abbey replied to can reward a reply, which bounds brigading to that user's own
-/// conversation. Unit-tested; not yet observed against a live gateway.
+/// heuristic reward. It is not an MDP transition and does not bootstrap. Unit-tested; not
+/// yet observed against a live gateway.
 public actor DelayedRewardLedger {
     struct Pending: Sendable {
         let authorId: String
+        let guildId: String
         let state: [Float]
         let action: Int
         let stagedAt: Date
+
+        func experience(reward: Float) -> Experience {
+            Experience(state: state, action: action, reward: reward, nextState: state, done: true)
+        }
     }
+
+    /// Upper bound on samples one moderation confirmation can pay out.
+    public static let moderationPayoutLimit = 20
 
     public let capacity: Int
     public let timeToLive: TimeInterval
@@ -59,13 +84,14 @@ public actor DelayedRewardLedger {
     public func stage(
         sourceMessageId: String,
         authorId: String,
+        guildId: String = "",
         state: [Float],
         action: Int,
         now: Date = .now
     ) {
         guard isEnabled, !sourceMessageId.isEmpty, !authorId.isEmpty else { return }
         Self.insert(
-            Pending(authorId: authorId, state: state, action: action, stagedAt: now),
+            Pending(authorId: authorId, guildId: guildId, state: state, action: action, stagedAt: now),
             key: sourceMessageId,
             into: &staged,
             capacity: capacity,
@@ -92,8 +118,8 @@ public actor DelayedRewardLedger {
         return true
     }
 
-    /// Consumes the bound entry when the reaction carries a signal and comes from the user
-    /// Abbey replied to. A neutral emoji leaves the entry in place for a later reaction.
+    /// Reaction signal. Consumes the bound entry when the reaction carries a signal and
+    /// comes from the user Abbey replied to. A neutral emoji leaves the entry in place.
     public func reward(
         replyMessageId: String,
         reactorId: String,
@@ -103,26 +129,66 @@ public actor DelayedRewardLedger {
         now: Date = .now
     ) -> Experience? {
         if let botUserId, reactorId == botUserId { return nil }
+        guard let pending = liveBound(replyMessageId, now: now),
+              pending.authorId == reactorId,
+              let value = ReactionReward.value(emojiName: emojiName, isCustom: isCustomEmoji) else {
+            return nil
+        }
+        bound.removeValue(forKey: replyMessageId)
+        return pending.experience(reward: value)
+    }
+
+    /// Deletion signal: Abbey's reply was removed while its sample was still tracked.
+    public func consumeReplyDeletion(replyMessageId: String, now: Date = .now) -> Experience? {
+        guard let pending = liveBound(replyMessageId, now: now) else { return nil }
+        bound.removeValue(forKey: replyMessageId)
+        return pending.experience(reward: ModerationReward.replyDeleted)
+    }
+
+    /// Moderation signal: a destructive action against `targetUserId` in `guildId` was
+    /// confirmed. Pays out the target's live samples (staged or bound), newest first, up to
+    /// `moderationPayoutLimit`. Samples whose strategy carries no signal are kept.
+    public func consumeModeration(targetUserId: String, guildId: String, now: Date = .now) -> [Experience] {
+        guard !targetUserId.isEmpty else { return [] }
+        let matches = { (pending: Pending) in
+            pending.authorId == targetUserId
+                && pending.guildId == guildId
+                && !self.isExpired(pending, now: now)
+                && ModerationReward.value(forConfirmedActionAfter: StrategyAction.from(raw: pending.action)) != nil
+        }
+        // Tables hold at most `capacity` entries each, so a scan is cheap and needs no
+        // secondary index to keep consistent.
+        let candidates = (staged.filter { matches($0.value) }.map { (key: $0.key, isBound: false, pending: $0.value) }
+            + bound.filter { matches($0.value) }.map { (key: $0.key, isBound: true, pending: $0.value) })
+            .sorted { $0.pending.stagedAt > $1.pending.stagedAt }
+            .prefix(Self.moderationPayoutLimit)
+
+        var experiences: [Experience] = []
+        for candidate in candidates {
+            if candidate.isBound {
+                bound.removeValue(forKey: candidate.key)
+            } else {
+                staged.removeValue(forKey: candidate.key)
+            }
+            if let value = ModerationReward.value(
+                forConfirmedActionAfter: StrategyAction.from(raw: candidate.pending.action)
+            ) {
+                experiences.append(candidate.pending.experience(reward: value))
+            }
+        }
+        return experiences
+    }
+
+    private func liveBound(_ replyMessageId: String, now: Date) -> Pending? {
         guard let pending = bound[replyMessageId] else { return nil }
         if isExpired(pending, now: now) {
             bound.removeValue(forKey: replyMessageId)
             return nil
         }
-        guard pending.authorId == reactorId,
-              let value = ReactionReward.value(emojiName: emojiName, isCustom: isCustomEmoji) else {
-            return nil
-        }
-        bound.removeValue(forKey: replyMessageId)
-        return Experience(
-            state: pending.state,
-            action: pending.action,
-            reward: value,
-            nextState: pending.state,
-            done: true
-        )
+        return pending
     }
 
-    private func isExpired(_ pending: Pending, now: Date) -> Bool {
+    private nonisolated func isExpired(_ pending: Pending, now: Date) -> Bool {
         now.timeIntervalSince(pending.stagedAt) > timeToLive
     }
 

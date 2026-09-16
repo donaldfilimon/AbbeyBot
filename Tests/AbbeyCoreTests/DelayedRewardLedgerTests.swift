@@ -124,6 +124,96 @@ struct DelayedRewardLedgerTests {
                                     emojiName: "👍", isCustomEmoji: false, now: Self.t0) == nil)
     }
 
+    // MARK: - Deleted replies
+
+    @Test func deletedReplyYieldsPenaltyOnceAndExcludesReactions() async {
+        let ledger = await boundLedger()
+        let deleted = await ledger.consumeReplyDeletion(replyMessageId: "r1", now: Self.t0)
+        #expect(deleted?.reward == ModerationReward.replyDeleted)
+        #expect(deleted?.action == 2)
+        #expect(await ledger.consumeReplyDeletion(replyMessageId: "r1", now: Self.t0) == nil)
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "u1", botUserId: nil,
+                                    emojiName: "👍", isCustomEmoji: false, now: Self.t0) == nil)
+        #expect(await ledger.consumeReplyDeletion(replyMessageId: "unknown", now: Self.t0) == nil)
+
+        let reacted = await boundLedger()
+        #expect(await reacted.reward(replyMessageId: "r1", reactorId: "u1", botUserId: nil,
+                                     emojiName: "👍", isCustomEmoji: false, now: Self.t0) != nil)
+        #expect(await reacted.consumeReplyDeletion(replyMessageId: "r1", now: Self.t0) == nil)
+    }
+
+    @Test func gatewayDeletesTrainTheAgent() async throws {
+        let ledger = DelayedRewardLedger(timeToLive: .greatestFiniteMagnitude)
+        for index in 1...2 {
+            await ledger.stage(sourceMessageId: "m\(index)", authorId: "u1", state: Self.state, action: 0, now: Self.t0)
+            await ledger.bind(sourceMessageId: "m\(index)", replyMessageId: "r\(index)", now: Self.t0)
+        }
+        let agent = DQNAgent(seed: 7, experiencePersistence: nil)
+
+        let single = try JSONDecoder().decode(
+            Gateway.MessageDelete.self,
+            from: Data(#"{"id":"r1","channel_id":"10","guild_id":"20"}"#.utf8)
+        )
+        #expect(await ReplyDeletionIngress.apply(single, ledger: ledger, dqnAgent: agent) == 1)
+        #expect(await ReplyDeletionIngress.apply(single, ledger: ledger, dqnAgent: agent) == 0)
+
+        let bulk = try JSONDecoder().decode(
+            Gateway.MessageDeleteBulk.self,
+            from: Data(#"{"ids":["r1","r2","x"],"channel_id":"10","guild_id":"20"}"#.utf8)
+        )
+        #expect(await ReplyDeletionIngress.apply(bulk, ledger: ledger, dqnAgent: agent) == 1)
+        #expect(await agent.bufferCount() == 2)
+    }
+
+    // MARK: - Confirmed moderation
+
+    @Test func moderationRewardsTargetSamplesByStrategy() async {
+        let ledger = DelayedRewardLedger(timeToLive: 3_600)
+        let strategies: [StrategyAction] = [.answer, .refuse, .retrieve, .clarify]
+        for (index, strategy) in strategies.enumerated() {
+            await ledger.stage(sourceMessageId: "m\(index)", authorId: "bad", guildId: "g1",
+                               state: Self.state, action: strategy.rawValue,
+                               now: Self.t0.addingTimeInterval(Double(index)))
+        }
+        // One of the target's samples already has a delivered reply.
+        await ledger.bind(sourceMessageId: "m3", replyMessageId: "r3", now: Self.t0)
+        await ledger.stage(sourceMessageId: "o1", authorId: "bad", guildId: "g2", state: Self.state, action: 0, now: Self.t0)
+        await ledger.stage(sourceMessageId: "o2", authorId: "good", guildId: "g1", state: Self.state, action: 0, now: Self.t0)
+
+        let paid = await ledger.consumeModeration(targetUserId: "bad", guildId: "g1", now: Self.t0.addingTimeInterval(10))
+        #expect(paid.map(\.reward).sorted() == [-1, -1, 1])
+        #expect(paid.allSatisfy { $0.done && $0.nextState == $0.state })
+        // retrieve kept, other guild kept, other user kept; bound clarify consumed.
+        #expect(await ledger.stagedCount == 3)
+        #expect(await ledger.boundCount == 0)
+        #expect(await ledger.consumeModeration(targetUserId: "bad", guildId: "g1",
+                                               now: Self.t0.addingTimeInterval(10)).isEmpty)
+    }
+
+    @Test func moderationHonoursCapAndLifetime() async {
+        let ledger = DelayedRewardLedger(capacity: 64, timeToLive: 100)
+        for index in 0..<30 {
+            await ledger.stage(sourceMessageId: "m\(index)", authorId: "bad", guildId: "g",
+                               state: Self.state, action: StrategyAction.answer.rawValue,
+                               now: Self.t0.addingTimeInterval(Double(index)))
+        }
+        // At t0+105 the samples staged before t0+5 are expired.
+        let paid = await ledger.consumeModeration(targetUserId: "bad", guildId: "g", now: Self.t0.addingTimeInterval(105))
+        #expect(paid.count == DelayedRewardLedger.moderationPayoutLimit)
+        let rest = await ledger.consumeModeration(targetUserId: "bad", guildId: "g", now: Self.t0.addingTimeInterval(105))
+        #expect(rest.count == 25 - DelayedRewardLedger.moderationPayoutLimit)
+        #expect(await ledger.consumeModeration(targetUserId: "", guildId: "g").isEmpty)
+    }
+
+    @Test func moderationIngressTrainsTheAgent() async {
+        let ledger = DelayedRewardLedger(timeToLive: .greatestFiniteMagnitude)
+        await ledger.stage(sourceMessageId: "m1", authorId: "bad", guildId: "g", state: Self.state,
+                           action: StrategyAction.refuse.rawValue, now: Self.t0)
+        let agent = DQNAgent(seed: 7, experiencePersistence: nil)
+        #expect(await ModerationRewardIngress.apply(targetUserId: "bad", guildId: "g", ledger: ledger, dqnAgent: agent) == 1)
+        #expect(await agent.bufferCount() == 1)
+    }
+
     @Test func gatewayReactionTrainsTheAgent() async throws {
         // `apply` reads the wall clock, so the fixed test epoch needs an unbounded lifetime.
         let ledger = await boundLedger(action: 1, timeToLive: .greatestFiniteMagnitude)

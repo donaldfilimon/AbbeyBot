@@ -307,6 +307,12 @@ public actor BotRuntime {
                     ledger: rewardLedger,
                     dqnAgent: dqnAgent
                 )
+            },
+            onMessageDelete: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
+            },
+            onMessageDeleteBulk: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
             }
         )
 
@@ -423,6 +429,7 @@ public actor BotRuntime {
         await rewardLedger.stage(
             sourceMessageId: discordMessageId,
             authorId: authorId,
+            guildId: guildId,
             state: scored.state,
             action: scored.action
         )

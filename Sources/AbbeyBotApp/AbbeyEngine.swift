@@ -73,6 +73,7 @@ final class AbbeyEngine {
         modelContainer: ModelContainer,
         config: AppConfig = .shared,
         storeDegraded: Bool = false,
+        dqnAgent injectedDQNAgent: DQNAgent? = nil,
         saveModelContext: @escaping ModelContextSaver = { try $0.save() },
         scheduleRememberPush: @escaping RememberPushScheduler = { guildId, userId, fact in
             Task.detached(priority: .utility) {
@@ -118,7 +119,8 @@ final class AbbeyEngine {
         } else {
             experiencePersistence = nil
         }
-        self.dqnAgent = DQNAgent(
+        // Tests inject an in-memory agent so they never read or append to `~/.abbey`.
+        self.dqnAgent = injectedDQNAgent ?? DQNAgent(
             topology: DQNAgent.defaultTopology,
             checkpointURL: checkpointURL,
             experiencePersistence: experiencePersistence
@@ -385,8 +387,14 @@ final class AbbeyEngine {
             metrics.recordMessageIngested()
         case .reputationChanged:
             metrics.recordReputationEvent()
-        case .destructiveActionConfirmed:
+        case .destructiveActionConfirmed(_, let targetUserId, let guildId):
             metrics.recordDestructiveAction(confirmed: true)
+            await ModerationRewardIngress.apply(
+                targetUserId: targetUserId,
+                guildId: guildId,
+                ledger: rewardLedger,
+                dqnAgent: dqnAgent
+            )
         case .destructiveActionCancelled:
             metrics.recordDestructiveAction(confirmed: false)
         case .inferenceProviderFailed(_, let message):
@@ -489,6 +497,7 @@ final class AbbeyEngine {
             await rewardLedger.stage(
                 sourceMessageId: discordMessageId,
                 authorId: authorId,
+                guildId: guildId,
                 state: scored.state,
                 action: scored.action
             )
@@ -673,6 +682,12 @@ final class AbbeyEngine {
                     ledger: rewardLedger,
                     dqnAgent: dqnAgent
                 )
+            },
+            onMessageDelete: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
+            },
+            onMessageDeleteBulk: { deleted in
+                await ReplyDeletionIngress.apply(deleted, ledger: rewardLedger, dqnAgent: dqnAgent)
             }
         )
 
