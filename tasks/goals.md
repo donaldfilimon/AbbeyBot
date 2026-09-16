@@ -938,7 +938,7 @@ status: in_progress
 - Open: the REST surface (`POST /api/state/remember|forget`) takes `userId`/`guildId` from the request body behind a single shared bearer token, with no per-user check — an operator-trust model, unlike the Discord slash path which is properly self-or-moderator gated. Worth naming as a deliberate difference or closing it.
 
 ## Merge the open review branches into main and finish their worktrees
-status: in_progress
+status: done
 - Captured 2026-09-16 12:28 EDT from "merge all branches into main and delete the branches not
   needed after". Inventory after `git fetch --prune`: local `cursor/command-surface-truth-20260916`
   (2 commits, never pushed), `cursor/test-defaults-hygiene-20260916` (0 commits, equal to `main`;
@@ -969,4 +969,13 @@ status: in_progress
   does not reintroduce the leak #91 closed. `verify-all` on that tip: `VERIFY_ALL_EXIT=0` from the
   log (desktop 517 tests / 47 suites). Delayed rewards remain unit-tested only; the live checklist
   in `tasks/todo.md` is still open.
+- Outcome 2026-09-16 12:5x EDT: every review branch is on `main` = `origin/main` at `a603ad2`.
+  Merged #90 (command-surface, `76fd47e`), #91 (test scratch defaults, `04a7f5c`) and #92
+  (delayed rewards, `a603ad2`), each with a merge commit and each gated locally with
+  `verify-all` (exit 0 from the log). Removed: the test-data-isolation, reaction-reward and
+  `/private/tmp/.../rr-verify` worktrees (all clean), the superseded empty
+  `cursor/test-defaults-hygiene-20260916` branch, and `stash@{0}` after diffing its six files
+  against `origin/main` (identical). `gh pr merge --delete-branch` removed the reaction-reward
+  worktree and local branch itself, after its last commit was pushed. Local state afterwards:
+  one worktree, `main` the only local branch, no stashes. Hosted Actions were not relied on.
 
