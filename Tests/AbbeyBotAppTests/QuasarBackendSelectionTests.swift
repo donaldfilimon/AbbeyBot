@@ -7,9 +7,9 @@ import Testing
 
 @MainActor struct QuasarBackendSelectionTests {
     @Test func remoteStartupDoesNotOwnALocalServiceAndSettingsWaitForRestart() async throws {
-        let suite = "quasar-backend-test-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let scratch = try ScratchDefaults("quasar-backend-test")
+        defer { scratch.remove() }
+        let defaults = scratch.defaults
         let config = AppConfig(defaults: defaults, environment: [
             "ABBEY_QUASAR_BACKEND": "remote", "ABBEY_QUASAR_ENDPOINT": "https://api.example.test",
             "ABBEY_QUASAR_API_TOKEN": "test-token", "ABBEY_DRY_RUN": "1",

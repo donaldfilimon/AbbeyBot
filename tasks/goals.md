@@ -920,6 +920,9 @@ status: in_progress
   landed, which is the same defect corrected earlier in this file for four slices that stayed
   marked "(uncommitted)" after landing in `e679011`.** A status line about where work lives is
   stale the moment the work moves; re-read it before committing the file that carries it.
+- Correction 2026-09-16 12:3x EDT: the bullet above saying "Not pushed and no PR opened" is
+  stale. The branch was rebased cleanly onto `0de3c14` (PR #89) and opened as PR #90; it was
+  re-gated there together with the test-hygiene follow-up below rather than on its 03:36 green.
 
 ## Redesign the Discord command, persona, and floor surfaces for claim honesty
 status: in_progress
@@ -933,3 +936,31 @@ status: in_progress
 - Open, and NOT changed because they are Donald's decisions rather than cleanups: `ConfirmationGate.request` is `guard requireConfirmation() else { return true }`, so `ABBEY_CONFIRMATION_REQUIRED=false` turns the human gate into a pass-through on the only path that can kick or ban (no test covers that branch); and the `facts: [String]` store has no count cap, length cap, TTL, or eviction — the one unbounded store in a codebase that bounds its DQN replay buffer to 10,000.
 - Open, unverified claim needing a decision rather than a guess: `/ask` registers as "Ask Abbey" but always routes `.question` to Aviva. "Abbey" may mean the product (the status embed says "AbbeyBot"), so this may be correct copy rather than a defect. Not touched.
 - Open: the REST surface (`POST /api/state/remember|forget`) takes `userId`/`guildId` from the request body behind a single shared bearer token, with no per-user check — an operator-trust model, unlike the Discord slash path which is properly self-or-moderator gated. Worth naming as a deliberate difference or closing it.
+
+## Merge the open review branches into main and finish their worktrees
+status: in_progress
+- Captured 2026-09-16 12:28 EDT from "merge all branches into main and delete the branches not
+  needed after". Inventory after `git fetch --prune`: local `cursor/command-surface-truth-20260916`
+  (2 commits, never pushed), `cursor/test-defaults-hygiene-20260916` (0 commits, equal to `main`;
+  its work existed only as `stash@{0}`, made 12:26:35 by the pre-session branch switch),
+  `cursor/test-data-isolation-20260916` (merged as PR #89, upstream gone, clean worktree), and
+  `codex/reaction-reward-learning-20260916` (3 pushed commits, no PR, worktree holding 10 staged
+  uncommitted files / +421 lines, plus a detached `/private/tmp/.../rr-verify` worktree from
+  another session's scratchpad).
+- Done: removed the clean, merged `AbbeyBot-wt-test-data-isolation-20260916` worktree and deleted
+  its branch (`e71ef43`, an ancestor of `origin/main`).
+- The stash was re-applied onto `cursor/test-scratch-defaults-20260916`, stacked on the rebased
+  command-surface branch so one `verify-all` run covers the post-merge tree. Its `ScratchDefaults`
+  helper replaces UUID-named `UserDefaults` suites, which leave a plist in
+  `~/Library/Preferences` on every run (3,008 matching plists there before this run). The empty
+  `cursor/test-defaults-hygiene-20260916` ref is superseded by that branch.
+- Not merged, deliberately: `codex/reaction-reward-learning-20260916`. It is a Codex-owned,
+  default-on DQN reward change whose worktree holds staged work that is not on the branch; merging
+  the three pushed commits would ship the feature without its in-progress completion. Needs the
+  owner (or Donald) to commit or discard the staged work and open a PR.
+- Gate for the stacked tip (command-surface + test-hygiene): `bash Scripts/verify-all.sh`,
+  `VERIFY_ALL_EXIT=0` read from the log (desktop 502 tests / 46 suites; server, CLI and web smokes
+  green). `~/Library/Preferences` matching plists: 3,008 before and 3,008 after the full run, so
+  the converted suites no longer leak. Residual: a fixed-name `TokenBucketRateLimiter.plist` is
+  still written there by some test; it does not accumulate and was not changed.
+

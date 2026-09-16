@@ -314,9 +314,9 @@ struct AbbeyCoreTests {
     }
 
     @Test func appConfigValidateLiveDiscordRequiresToken() throws {
-        let suite = "AbbeyCoreTests.validate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+        let scratch = try ScratchDefaults("AbbeyCoreTests.validate")
+        defer { scratch.remove() }
+        let defaults = scratch.defaults
         let config = AppConfig(defaults: defaults, tokens: InMemoryTokenStore())
         config.operatingMode = .liveDiscord
         config.dryRun = false
@@ -338,9 +338,9 @@ struct AbbeyCoreTests {
     /// now records the message and keeps running, so the message must be non-empty and must
     /// name what is missing — that string is what the startup banner renders.
     @Test func liveDiscordMissingTokenIsRecoverableAndOperatorFacing() throws {
-        let suite = "AbbeyCoreTests.recoverable.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+        let scratch = try ScratchDefaults("AbbeyCoreTests.recoverable")
+        defer { scratch.remove() }
+        let defaults = scratch.defaults
         let config = AppConfig(defaults: defaults, tokens: InMemoryTokenStore())
         config.operatingMode = .liveDiscord
         config.dryRun = false
@@ -389,8 +389,9 @@ struct AbbeyCoreTests {
     }
 
     @Test func appConfigValidateRemoteEndpoint() throws {
-        let suite = "AbbeyCoreTests.remote.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let scratch = try ScratchDefaults("AbbeyCoreTests.remote")
+        defer { scratch.remove() }
+        let defaults = scratch.defaults
         let config = AppConfig(defaults: defaults, tokens: InMemoryTokenStore())
         config.inferenceMode = .remoteCompatible
         config.remoteEndpoint = ""
@@ -402,9 +403,9 @@ struct AbbeyCoreTests {
     }
 
     @Test func appConfigEnvOverridesUserDefaultsInference() throws {
-        let suite = "AbbeyCoreTests.envInference.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+        let scratch = try ScratchDefaults("AbbeyCoreTests.envInference")
+        defer { scratch.remove() }
+        let defaults = scratch.defaults
         defaults.set(InferenceMode.remoteCompatible.rawValue, forKey: "ABBEY_INFERENCE_MODE")
         defaults.set("", forKey: "ABBEY_REMOTE_ENDPOINT")
         let config = AppConfig(
