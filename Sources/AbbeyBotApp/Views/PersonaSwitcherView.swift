@@ -43,7 +43,17 @@ struct PersonaSwitcherView: View {
                 Divider()
 
                 Text("Test prompt").font(.headline)
-                Text("Uses the active persona and the same reply-cooldown rules as live Discord.")
+                // Accuracy note: this panel calls `currentPersona()` directly, while
+                // live Discord calls `route(intent:userText:)` per message. Saying it
+                // matched live Discord was true of the cooldown and false of the
+                // persona, which is the half an operator is here to check.
+                Text(
+                    """
+                    Uses the persona selected above, and the same reply-cooldown rules as \
+                    live Discord. Live Discord picks a persona per message by intent, so a \
+                    real reply may come from a different persona than the one selected here.
+                    """
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

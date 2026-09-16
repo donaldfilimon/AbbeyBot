@@ -30,10 +30,11 @@ public struct IntentClassifier {
     public static func classifyLoose(_ text: String) -> Intent {
         let lower = text.lowercased()
         if lower.hasPrefix("!") || lower.hasPrefix("/") { return .command }
-        if lower.contains("kick") || lower.contains("ban") || lower.contains("purge")
-            || lower.contains("timeout") || lower.contains("mod ") { return .modRequest }
-        if lower.contains("remember") || lower.contains("note that") { return .memoryStore }
-        if lower.contains("rep") || lower.contains("reputation") { return .repQuery }
+        if ["kick", "ban", "purge", "timeout", "mod"].contains(where: { containsWord($0, in: lower) }) {
+            return .modRequest
+        }
+        if containsWord("remember", in: lower) || lower.contains("note that") { return .memoryStore }
+        if containsWord("rep", in: lower) || containsWord("reputation", in: lower) { return .repQuery }
         // Align with PersonaName.resolve, but require an explicit switch phrase.
         // Ordinary questions about a programming-language `switch` are not persona commands.
         if lower.range(
@@ -45,6 +46,18 @@ public struct IntentClassifier {
         if lower.hasSuffix("?") || lower.hasPrefix("what") || lower.hasPrefix("how") { return .question }
         if ["hi", "hey", "yo", "sup", "hello"].contains(where: { lower.hasPrefix($0) }) { return .greeting }
         return .smallTalk
+    }
+
+    /// Whole-word containment.
+    ///
+    /// These rules previously used bare `contains`, which matches inside other
+    /// words: "report" and "reply" scored as reputation queries, and "banana"
+    /// and "kickoff" as moderation requests. That is worse than a wrong reply —
+    /// `Intent.quality` feeds `recordInteraction` and the DQN, so a
+    /// misclassification writes corrupted signal into reputation and learning.
+    /// The persona rule below was already `\b`-anchored for this exact reason.
+    private static func containsWord(_ word: String, in text: String) -> Bool {
+        text.range(of: #"\b\#(word)\b"#, options: .regularExpression) != nil
     }
 
     /// Alias of `classify` (strict small-talk gate).

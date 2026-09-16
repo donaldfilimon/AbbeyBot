@@ -86,14 +86,13 @@ public struct InteractionRouter: Sendable {
     /// Memory, channel-context, configuration, and status responses should not be published
     /// into the channel timeline.  Ephemerality is selected on the initial defer because
     /// Discord does not allow changing that flag on the later edit.
+    /// Whether a command's reply stays private to its invoker.
+    ///
+    /// Read from `CommandSpec`, so a new command declares its visibility once
+    /// where it is defined instead of being remembered here. An unregistered
+    /// name is treated as ephemeral: failing private is the safe direction.
     public static func shouldRespondEphemerally(for commandName: String) -> Bool {
-        switch commandName {
-        case "facts", "remember", "forget", "rep", "context", "summarize",
-             "persona", "model", "status", "voice", "knowledge", "quasar":
-            return true
-        default:
-            return false
-        }
+        CommandSpec.named(commandName)?.isEphemeral ?? true
     }
 
     /// Audit success means an authorized command completed its handler path
@@ -150,17 +149,19 @@ public struct InteractionRouter: Sendable {
             initialResponseSucceeded = false
         }
 
-        let targetUserId = (try? data.option(named: "user")?.requireString()) ?? userId
-        let requestedModel = try? data.option(named: "mode")?.requireString()
+        let targetUserId = data.string(named: "user") ?? userId
         let permissions = interaction.member?.permissions
         let isAdministrator = permissions?.contains(.administrator) == true
         let isModerator = isAdministrator
             || permissions?.contains(.manageGuild) == true
             || permissions?.contains(.moderateMembers) == true
-        let mutatesGlobalState = data.name == "persona"
-            || data.name == "voice"
-            || data.name == "quasar"
-            || (data.name == "model" && requestedModel != nil)
+        // Both facts come from the command's own spec rather than a string
+        // list maintained here, so an unlisted command can no longer default
+        // to "mutates nothing" and slip past the operator check.
+        let spec = CommandSpec.named(data.name)
+        let mutatesGlobalState = spec?.mutatesGlobalState { option in
+            data.string(named: option) != nil
+        } ?? true
         let authorized = accessPolicy.allows(.init(
             commandName: data.name,
             invokerUserId: userId,
@@ -175,10 +176,10 @@ public struct InteractionRouter: Sendable {
             result = DiscordCopy.notAuthorized
         } else { switch data.name {
         case "ask":
-            let question = (try? data.option(named: "question")?.requireString()) ?? ""
+            let question = data.string(named: "question") ?? ""
             result = await handlers.ask(question, userId, guildId, channelId)
         case "explain":
-            let topic = (try? data.option(named: "topic")?.requireString()) ?? ""
+            let topic = data.string(named: "topic") ?? ""
             result = await handlers.explain(topic, userId, guildId, channelId)
         case "summarize":
             result = await handlers.summarize(channelId, guildId, userId)
@@ -187,10 +188,10 @@ public struct InteractionRouter: Sendable {
         case "facts":
             result = await handlers.facts(targetUserId, guildId)
         case "remember":
-            let fact = (try? data.option(named: "fact")?.requireString()) ?? ""
+            let fact = data.string(named: "fact") ?? ""
             result = await handlers.remember(targetUserId, guildId, fact)
         case "forget":
-            let rawIndex = Int((try? data.option(named: "index")?.requireInt()) ?? 0)
+            let rawIndex = Int(data.int(named: "index") ?? 0)
             guard let index = Self.validatedForgetIndex(rawIndex) else {
                 result = DiscordCopy.invalidFactIndex
                 break
@@ -199,27 +200,27 @@ public struct InteractionRouter: Sendable {
         case "context":
             result = await handlers.context(channelId, guildId)
         case "persona":
-            let name = (try? data.option(named: "name")?.requireString()) ?? "abbey"
+            let name = data.string(named: "name") ?? "abbey"
             result = await handlers.persona(name)
         case "model":
-            let mode = try? data.option(named: "mode")?.requireString()
+            let mode = data.string(named: "mode")
             result = await handlers.model(mode)
         case "status":
             result = await handlers.status(guildId, channelId)
         case "industry":
             result = await handlers.industry()
         case "equity":
-            let symbol = (try? data.option(named: "symbol")?.requireString()) ?? ""
+            let symbol = data.string(named: "symbol") ?? ""
             result = await handlers.equity(symbol)
         case "mod":
-            let situation = (try? data.option(named: "situation")?.requireString()) ?? ""
+            let situation = data.string(named: "situation") ?? ""
             result = await handlers.modAdvice(situation, userId, guildId, channelId)
         case "ping":
             result = await handlers.ping()
         case "help":
             result = await handlers.help()
         case "knowledge":
-            let query = (try? data.option(named: "query")?.requireString()) ?? ""
+            let query = data.string(named: "query") ?? ""
             result = await handlers.knowledge(query, userId, guildId)
         case "quasar":
             result = await handleQuasar(
@@ -280,9 +281,9 @@ public struct InteractionRouter: Sendable {
         }
         return await handlers.quasar(.init(
             action: action,
-            siteID: try? sub.option(named: "site")?.requireString(),
-            name: try? sub.option(named: "name")?.requireString(),
-            prompt: try? sub.option(named: "prompt")?.requireString(),
+            siteID: sub.string(named: "site"),
+            name: sub.string(named: "name"),
+            prompt: sub.string(named: "prompt"),
             initiatorID: userId,
             guildID: guildId,
             managerAuthorized: managerAuthorized
@@ -298,7 +299,7 @@ public struct InteractionRouter: Sendable {
         }
         switch sub.name {
         case "join":
-            let channel = (try? sub.option(named: "channel")?.requireString()) ?? ""
+            let channel = sub.string(named: "channel") ?? ""
             return await handlers.voice(.join(channelId: channel), guildId)
         case "leave":
             return await handlers.voice(.leave, guildId)
@@ -333,5 +334,35 @@ public struct InteractionRouter: Sendable {
             token: interaction.token,
             payload: .autocompleteResult(.init(choices: Array(choices)))
         ).guardSuccess()
+    }
+}
+
+
+/// Option reads for slash-command payloads.
+///
+/// Every call site used to spell this out as
+/// `(try? data.option(named: "x")?.requireString()) ?? ""`, fifteen times. That is not only
+/// repetition: it collapses two different outcomes — the option was **absent**, and the
+/// option was **present but the wrong type** — into one empty string, so a malformed payload
+/// reaches a handler looking exactly like a user who typed nothing. These accessors preserve
+/// today's behaviour exactly (both cases still yield `nil`), but they put the distinction in
+/// one place, so deciding to reject malformed input later is a change to this file rather
+/// than to fifteen call sites.
+extension Interaction.ApplicationCommand {
+    /// The named option's string value, or `nil` when it is absent or not a string.
+    func string(named name: String) -> String? {
+        try? option(named: name)?.requireString()
+    }
+
+    /// The named option's integer value, or `nil` when it is absent or not an integer.
+    func int(named name: String) -> Int? {
+        try? option(named: name)?.requireInt()
+    }
+}
+
+extension Interaction.ApplicationCommand.Option {
+    /// The named sub-option's string value, or `nil` when it is absent or not a string.
+    func string(named name: String) -> String? {
+        try? option(named: name)?.requireString()
     }
 }

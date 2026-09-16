@@ -1,46 +1,13 @@
 import DiscordBM
 
 public enum CommandRegistry {
+    /// Registration payloads, derived from `CommandSpec.all`.
+    ///
+    /// Kept as a computed property so there is exactly one command list: the
+    /// specs. Authorization scope and reply visibility for these same commands
+    /// are read from the same specs by `InteractionRouter`.
     public static var all: [Payloads.ApplicationCommandCreate] {
-        [
-            .init(name: "ask", description: "Ask Abbey (Foundation Models / remote / floor)", options: [questionOption]),
-            .init(name: "explain", description: "Explain a topic in depth", options: [topicOption]),
-            .init(name: "summarize", description: "Summarize this channel’s memory with the active backend"),
-            .init(name: "rep", description: "Check a user's reputation", options: [userOptionOptional]),
-            .init(name: "facts", description: "List remembered facts for a user", options: [userOptionOptional]),
-            .init(name: "remember", description: "Store a fact (default: for yourself)", options: [userOptionOptional, factOption]),
-            .init(name: "forget", description: "Remove a stored fact (default: yours)", options: [userOptionOptional, factIndexOption]),
-            .init(name: "context", description: "Show channel memory summary"),
-            .init(
-                name: "persona", description: "Switch active persona", options: [personaOption],
-                default_member_permissions: [.administrator], dm_permission: false
-            ),
-            .init(
-                name: "model", description: "Show or set inference backend", options: [modelModeOption],
-                default_member_permissions: [.administrator], dm_permission: false
-            ),
-            .init(name: "status", description: "Bot + backend connection status"),
-            .init(name: "industry", description: "Show industry prompt profile"),
-            .init(name: "equity", description: "Synthetic equity factor screen (not advice)", options: [symbolOption]),
-            .init(name: "mod", description: "Moderation advice only (no actions)", options: [situationOption]),
-            .init(name: "ping", description: "Latency check"),
-            .init(name: "help", description: "List AbbeyBot slash commands"),
-            .init(name: "knowledge", description: "Search AbbeyBot's signed ecosystem corpus", options: [knowledgeQueryOption]),
-            .init(
-                name: "quasar",
-                description: "Inspect sites or create a desktop-approved Quasar proposal",
-                options: quasarSubcommands,
-                default_member_permissions: [.administrator],
-                dm_permission: false
-            ),
-            .init(
-                name: "voice",
-                description: "Join or leave voice (presence only — no audio)",
-                options: [voiceJoinSubcommand, voiceLeaveSubcommand],
-                default_member_permissions: [.administrator],
-                dm_permission: false
-            ),
-        ]
+        CommandSpec.all.map(\.registration)
     }
 
     public static let questionOption = ApplicationCommand.Option(
