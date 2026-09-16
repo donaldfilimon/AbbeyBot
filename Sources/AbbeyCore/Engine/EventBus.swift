@@ -58,6 +58,14 @@ public enum AbbeyEvent: Sendable {
 
 public enum DestructiveAction: String, Sendable, CaseIterable {
     case purge, kick, ban
+
+    /// Removing a member cannot be undone by the bot, so no setting may skip the sheet.
+    public var alwaysRequiresConfirmation: Bool {
+        switch self {
+        case .purge: return false
+        case .kick, .ban: return true
+        }
+    }
 }
 
 /// Actor-isolated publisher over `AsyncStream`. Multiple UI subscribers each get their

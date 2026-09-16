@@ -318,6 +318,9 @@ func routes(_ app: Application) throws {
         return await req.application.botRuntime.channelState(channelId: channelId, guildId: guildId)
     }
 
+    // Operator-trust boundary (decided 2026-09-16): `userId`/`guildId` come from the body and
+    // are not checked against the caller. The shared `ABBEY_API_TOKEN` already grants operator
+    // access; per-user authorization exists only on the Discord slash path.
     api.post("state", "remember") { req async throws -> OkDTO in
         let body = try req.content.decode(RememberRequestDTO.self)
         let fact = body.fact.trimmingCharacters(in: .whitespacesAndNewlines)

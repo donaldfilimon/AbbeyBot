@@ -43,24 +43,30 @@ public enum ChannelTombstoneError: Error, Equatable {
 }
 
 public enum MemoryRepository {
-    public static func appendFact(userId: String, guildId: String, fact: String, on db: any Database) async throws {
-        let trimmed = fact.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    /// Appends under `MemoryFactPolicy` (50 facts, 280 characters, oldest evicted). The
+    /// returned outcome says whether the row changed and what was truncated or evicted.
+    @discardableResult
+    public static func appendFact(
+        userId: String, guildId: String, fact: String, on db: any Database
+    ) async throws -> MemoryFactPolicy.Outcome {
         let composite = ReputationMath.cacheKey(userId: userId, guildId: guildId)
         if let existing = try await UserMemory.query(on: db).filter(\.$compositeKey == composite).first() {
-            guard existing.deletedAt != nil || !existing.facts.contains(trimmed) else { return }
+            let outcome = MemoryFactPolicy.appending(fact, to: existing.facts)
+            guard outcome.changed || existing.deletedAt != nil else { return outcome }
             // A remember after soft-delete resurrects the row so sync can ship a live update.
             if existing.deletedAt != nil {
                 existing.deletedAt = nil
             }
-            if !existing.facts.contains(trimmed) {
-                existing.facts.append(trimmed)
-            }
+            existing.facts = outcome.facts
             existing.sourceUpdatedAt = nil
             try await existing.save(on: db)
+            return outcome
         } else {
-            let record = UserMemory(discordUserId: userId, guildId: guildId, facts: [trimmed])
+            let outcome = MemoryFactPolicy.appending(fact, to: [])
+            guard outcome.changed else { return outcome }
+            let record = UserMemory(discordUserId: userId, guildId: guildId, facts: outcome.facts)
             try await record.create(on: db)
+            return outcome
         }
     }
 

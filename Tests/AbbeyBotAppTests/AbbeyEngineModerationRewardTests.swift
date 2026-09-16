@@ -87,8 +87,8 @@ struct AbbeyEngineModerationRewardTests {
         await engine.shutdown()
     }
 
-    /// With confirmation off the kick goes ahead without a sheet; it must still be rewarded.
-    @Test func unconfirmedKickStillRewardsTheTargetsSamples() async throws {
+    /// With confirmation off a purge goes ahead without a sheet; it must still be rewarded.
+    @Test func unconfirmedPurgeStillRewardsTheTargetsSamples() async throws {
         let scratch = try ScratchDefaults("AbbeyEngineModerationRewardTests")
         defer { scratch.remove() }
         let engine = try makeEngine(scratch, requireConfirmation: false)
@@ -96,7 +96,7 @@ struct AbbeyEngineModerationRewardTests {
         await engine.rewardLedger.stage(sourceMessageId: "m1", authorId: "bad", guildId: "g",
                                         state: Self.state, action: StrategyAction.answer.rawValue)
 
-        #expect(await engine.confirmationGate.request(kind: .kick, targetUserId: "bad", guildId: "g", reason: "test"))
+        #expect(await engine.confirmationGate.request(kind: .purge, targetUserId: "bad", guildId: "g", reason: "test"))
         #expect(await waitUntil { await engine.rewardLedger.stagedCount == 0 })
         #expect(await engine.dqnAgent.bufferCount() == before + 1)
         await engine.shutdown()

@@ -105,6 +105,8 @@ extension CommandSpec {
     /// registration payloads, authorization scope, and reply visibility are all
     /// read from here rather than re-listed per call site.
     public static let all: [CommandSpec] = [
+        // "Abbey" here is the product. Questions route to the Aviva persona by design
+        // (`ABIRouter`), so this is not a persona-name mismatch (decided 2026-09-16).
         .init(
             name: "ask",
             description: "Ask Abbey (Foundation Models / remote / floor)",

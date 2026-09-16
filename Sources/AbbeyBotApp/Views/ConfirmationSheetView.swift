@@ -35,7 +35,7 @@ struct ConfirmationSheetView: View {
                 }
             }
 
-            Text("Destructive actions need an explicit OK when confirmation is enabled in Settings. Cancel stops this from running.")
+            Text("Kick and ban always need an explicit OK; purge needs one while confirmation is enabled in Settings. Cancel stops this from running.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
