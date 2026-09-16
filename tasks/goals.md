@@ -963,4 +963,10 @@ status: in_progress
   green). `~/Library/Preferences` matching plists: 3,008 before and 3,008 after the full run, so
   the converted suites no longer leak. Residual: a fixed-name `TokenBucketRateLimiter.plist` is
   still written there by some test; it does not accumulate and was not changed.
+- Superseded 2026-09-16 12:4x EDT by Donald's "complete all": the reaction-reward staged set was
+  committed as-is in its worktree, the branch rebased onto `04a7f5c` (#90 + #91), and two of its
+  new tests were converted from UUID-named `UserDefaults` suites to `ScratchDefaults` so the branch
+  does not reintroduce the leak #91 closed. `verify-all` on that tip: `VERIFY_ALL_EXIT=0` from the
+  log (desktop 517 tests / 47 suites). Delayed rewards remain unit-tested only; the live checklist
+  in `tasks/todo.md` is still open.
 

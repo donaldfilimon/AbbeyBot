@@ -9,7 +9,8 @@ import Testing
 struct AbbeyEngineModerationRewardTests {
     private static let state: [Float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
-    private func makeEngine() throws -> AbbeyEngine {
+    /// The caller owns `scratch` and removes it with `defer` (see `ScratchDefaults`).
+    private func makeEngine(_ scratch: ScratchDefaults) throws -> AbbeyEngine {
         let schema = Schema([
             GuildMessage.self,
             UserMemory.self,
@@ -22,10 +23,7 @@ struct AbbeyEngineModerationRewardTests {
             for: schema,
             configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
         )
-        let suite = "AbbeyEngineModerationRewardTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
-        let config = AppConfig(defaults: defaults, environment: [:], tokens: InMemoryTokenStore())
+        let config = AppConfig(defaults: scratch.defaults, environment: [:], tokens: InMemoryTokenStore())
         config.confirmationRequiredForDestructiveActions = true
         // An injected agent with no checkpoint and no journal keeps `~/.abbey` untouched.
         return AbbeyEngine(
@@ -60,7 +58,9 @@ struct AbbeyEngineModerationRewardTests {
     }
 
     @Test func confirmedKickRewardsTheTargetsSamples() async throws {
-        let engine = try makeEngine()
+        let scratch = try ScratchDefaults("AbbeyEngineModerationRewardTests")
+        defer { scratch.remove() }
+        let engine = try makeEngine(scratch)
         let before = await engine.dqnAgent.bufferCount()
         await engine.rewardLedger.stage(sourceMessageId: "m1", authorId: "bad", guildId: "g",
                                         state: Self.state, action: StrategyAction.answer.rawValue)
@@ -72,7 +72,9 @@ struct AbbeyEngineModerationRewardTests {
     }
 
     @Test func cancelledKickLeavesSamplesAlone() async throws {
-        let engine = try makeEngine()
+        let scratch = try ScratchDefaults("AbbeyEngineModerationRewardTests")
+        defer { scratch.remove() }
+        let engine = try makeEngine(scratch)
         let before = await engine.dqnAgent.bufferCount()
         await engine.rewardLedger.stage(sourceMessageId: "m1", authorId: "bad", guildId: "g",
                                         state: Self.state, action: StrategyAction.answer.rawValue)

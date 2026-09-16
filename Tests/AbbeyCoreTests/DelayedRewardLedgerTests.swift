@@ -103,12 +103,11 @@ struct DelayedRewardLedgerTests {
         }
     }
 
-    @Test func appConfigReadsDelayedRewardsSwitch() {
+    @Test func appConfigReadsDelayedRewardsSwitch() throws {
+        let scratch = try ScratchDefaults("DelayedRewardLedgerTests")
+        defer { scratch.remove() }
         func config(_ environment: [String: String]) -> AppConfig {
-            let suite = "DelayedRewardLedgerTests.\(UUID().uuidString)"
-            let defaults = UserDefaults(suiteName: suite)!
-            defaults.removePersistentDomain(forName: suite)
-            return AppConfig(defaults: defaults, environment: environment, tokens: InMemoryTokenStore())
+            AppConfig(defaults: scratch.defaults, environment: environment, tokens: InMemoryTokenStore())
         }
         #expect(config([:]).delayedRewardsEnabled == true)
         #expect(config(["ABBEY_DELAYED_REWARDS": "0"]).delayedRewardsEnabled == false)
