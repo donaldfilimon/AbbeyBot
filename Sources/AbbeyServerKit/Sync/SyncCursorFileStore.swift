@@ -17,16 +17,12 @@ public struct SyncCursorFileStore: Sendable {
 
     /// Default pull cursor: `~/.abbey/cli-sync-cursor`.
     public static func defaultURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".abbey", isDirectory: true)
-            .appendingPathComponent("cli-sync-cursor", isDirectory: false)
+        AbbeyDataDirectory.file("cli-sync-cursor")
     }
 
     /// Default push cursor: `~/.abbey/cli-sync-push-cursor` (independent of the pull cursor).
     public static func defaultPushURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".abbey", isDirectory: true)
-            .appendingPathComponent("cli-sync-push-cursor", isDirectory: false)
+        AbbeyDataDirectory.file("cli-sync-push-cursor")
     }
 
     public static func namespacedPullURL(endpoint: String) -> URL {

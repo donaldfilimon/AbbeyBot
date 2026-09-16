@@ -7,6 +7,11 @@ unset ABBEY_NATIVE_MEDIA ABBEY_NATIVE_PREFIX ABBEY_NATIVE_CACHE || true
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.server.build"
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 COMPOSE=(docker compose)
+# Abbey's local data (DQN journal/checkpoint, WDBX, rollback, cursors) goes to a disposable
+# directory, never the operator's ~/.abbey. An inherited ABBEY_DATA_DIR is deliberately ignored.
+ABBEY_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-server-smoke-data.XXXXXX")"
+export ABBEY_DATA_DIR
+trap 'rm -rf "$ABBEY_DATA_DIR"' EXIT
 
 echo "======== 1/8 build AbbeyBot (server graph) ========"
 export ABBEY_PACKAGE_ROLE=server
@@ -58,6 +63,7 @@ PID=$!
 cleanup() {
   kill "$PID" 2>/dev/null || true
   wait "$PID" 2>/dev/null || true
+  rm -rf "$ABBEY_DATA_DIR"
 }
 trap cleanup EXIT
 

@@ -76,8 +76,7 @@ public final class WDBXStore: @unchecked Sendable {
     private var appendRepairFailure: String?
 
     public static func defaultRoot() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".abbey/wdbx", isDirectory: true)
+        let dir = AbbeyDataDirectory.url().appendingPathComponent("wdbx", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(
             at: dir.appendingPathComponent("segments", isDirectory: true),

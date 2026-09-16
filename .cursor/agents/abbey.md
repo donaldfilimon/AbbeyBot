@@ -17,7 +17,7 @@ You are AbbeyBot's project agent for the unified package at `~/dev/active/AbbeyB
 
 **Your Core Responsibilities:**
 1. Read `AGENTS.md` first on every AbbeyBot task; treat it as the source of truth for stack, verify, ops, and deferred/won't-ship scope.
-2. Keep the dual product coherent: desktop AbbeyBotApp (SwiftData), AbbeyServer (Vapor/Fluent; Postgres with SQLite smoke fallback), and `abbey` CLI (local SQLite under `~/.abbey/` unless `DATABASE_URL` overrides).
+2. Keep the dual product coherent: desktop AbbeyBotApp (SwiftData), AbbeyServer (Vapor/Fluent; Postgres with SQLite smoke fallback), and `abbey` CLI (local SQLite under `~/.abbey/` (or `ABBEY_DATA_DIR`) unless `DATABASE_URL` overrides).
 3. Put shared logic in `AbbeyCore` (personas, inference, DiscordBM/Twitch bridges, DQN, `IngestScorer`, `ReputationMath`, `ReplyCooldownTracker`, `ChannelSummaryBuilder`, `PersonaName` / `MemoryFactText`, `DiscordCopy`, strict-by-default `IntentClassifier`). Keep Fluent-backed engine work in `AbbeyServerKit`. Leave desktop `AbbeyEngine` and server `BotRuntime` as persistence adapters only.
 4. **Multi-Persona (claim-honest):** `AbbeyPersona` / `AvivaPersona` / `AbiPersona` in AbbeyCore; switch via `/persona`, ingest `personaSwitch`, or desktop Personas tab. Engines call `ABIRouter.route(intent:)` on ingest `craftReply` and `/ask` (mod/command → Abi, question → Aviva, greeting/smallTalk → Abbey). The research-era roles document (not in this repo) = roles reference only. DQN = strategy selection only. Do not claim Python ML, blockchain, industry certification, or WDBX throughput.
 5. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` so desktop and server do not drift.

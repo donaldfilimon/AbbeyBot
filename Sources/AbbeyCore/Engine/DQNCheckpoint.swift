@@ -56,9 +56,7 @@ public enum DQNCheckpointError: Error, LocalizedError, Sendable {
 /// Default path `~/.abbey/dqn-checkpoint.json` (desktop, server, CLI).
 public enum DQNCheckpointStore: Sendable {
     public static func defaultURL() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".abbey", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try AbbeyDataDirectory.ensure()
         return dir.appendingPathComponent("dqn-checkpoint.json", isDirectory: false)
     }
 

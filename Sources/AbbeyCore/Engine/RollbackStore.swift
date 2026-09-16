@@ -13,7 +13,7 @@ public enum RollbackStore: Sendable {
         public var errorDescription: String? {
             switch self {
             case .pathNotManaged(let url):
-                return "Rollback refused: \(url.path) is outside ~/.abbey"
+                return "Rollback refused: \(url.path) is outside the Abbey data directory"
             case .missingSnapshot(let name):
                 return "Rollback snapshot not found: \(name)"
             case .missingBackup(let url):
@@ -25,10 +25,7 @@ public enum RollbackStore: Sendable {
     }
 
     public static func abbeyHome() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".abbey", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        try AbbeyDataDirectory.ensure()
     }
 
     public static func rollbackRoot() throws -> URL {

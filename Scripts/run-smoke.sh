@@ -11,6 +11,11 @@ unset ABBEY_PACKAGE_ROLE || true
 unset ABBEY_NATIVE_MEDIA ABBEY_NATIVE_PREFIX ABBEY_NATIVE_CACHE || true
 # Build off Desktop to avoid iCloud/Finder xattrs breaking ad-hoc codesign.
 BUILD_PATH="${TMPDIR:-/tmp}/AbbeyBot.build"
+# Abbey's local data (DQN journal/checkpoint, WDBX, rollback, cursors) goes to a disposable
+# directory, never the operator's ~/.abbey. An inherited ABBEY_DATA_DIR is deliberately ignored.
+ABBEY_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abbey-smoke-data.XXXXXX")"
+export ABBEY_DATA_DIR
+trap 'rm -rf "$ABBEY_DATA_DIR"' EXIT
 SWIFT=(/usr/bin/xcrun --toolchain default swift)
 
 echo "======== 1/5 debug build (macOS 27) ========"
@@ -76,6 +81,7 @@ SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/abbey-smoke-home.XXXXXX")"
 mkdir -p "$SMOKE_HOME/Library/Preferences"
 HOME="$SMOKE_HOME" /usr/bin/open -n \
   --env HOME="$SMOKE_HOME" \
+  --env ABBEY_DATA_DIR="$ABBEY_DATA_DIR" \
   --env ABBEY_MEDIA_DISABLED=1 \
   --env ABBEY_DRY_RUN=1 \
   --env ABBEY_INFERENCE_MODE=deterministicFloor \
