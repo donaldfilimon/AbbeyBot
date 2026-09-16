@@ -85,7 +85,7 @@ struct SyncTransportPolicyTests {
         let suite = "AbbeyCoreTests.syncTransport.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let config = AppConfig(defaults: defaults, environment: [:])
+        let config = AppConfig(defaults: defaults, environment: [:], tokens: InMemoryTokenStore())
 
         for allowed in ["http://localhost:8080", "http://127.0.0.1", "http://[::1]:8080", "https://example.com"] {
             config.syncServerURL = allowed

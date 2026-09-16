@@ -80,4 +80,17 @@ extension AppConfig {
 
         try DecentralizationPolicy(enabled: decentralizationEnabled).validate()
     }
+
+    /// Whether launch may open a live Discord gateway connection.
+    ///
+    /// This is the guard that replaced `AbbeyBotApp.init`'s `fatalError` on a
+    /// `liveDiscord`-without-token config: the app now boots, shows the startup banner, and
+    /// simply does not connect. `dryRun` short-circuits the token requirement because a dry
+    /// run never reaches the network (`dry-run: would connect`), so an empty token is fine
+    /// there. The token is trimmed for the same reason `validateForStartup` trims it — a
+    /// whitespace-only token is not a token.
+    public var shouldAutoConnectDiscord: Bool {
+        guard operatingMode == .liveDiscord, autoConnectOnLaunch else { return false }
+        return dryRun || !discordBotToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }

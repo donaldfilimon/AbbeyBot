@@ -80,13 +80,12 @@ public struct DiscordCommandAccessPolicy: Sendable, Equatable {
             || request.hasAdministratorPermission
         if request.mutatesGlobalState { return isOperator }
 
-        switch request.commandName {
-        case "facts", "remember", "forget", "rep":
-            guard let target = request.targetUserId, !target.isEmpty else { return true }
-            return target == request.invokerUserId || isOperator || request.hasModerationPermission
-        default:
-            return true
-        }
+        // Scope is a property of the command, so it is read from the command's
+        // spec rather than passed in. A caller cannot forget to mark a memory
+        // command user-scoped and silently widen who may target whom.
+        guard CommandSpec.named(request.commandName)?.isUserScoped == true else { return true }
+        guard let target = request.targetUserId, !target.isEmpty else { return true }
+        return target == request.invokerUserId || isOperator || request.hasModerationPermission
     }
 }
 

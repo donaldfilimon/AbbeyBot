@@ -296,6 +296,23 @@ public struct DiscordVoiceControllerConfiguration: Equatable, Sendable {
     /// installed. Tests and portable fixtures may leave this false.
     public let requiresConsentEpoch: Bool
 
+    /// The all-defaults configuration, which cannot fail.
+    ///
+    /// Every guard in `init` validates a caller-supplied number, and the only production
+    /// caller supplies none of them — it varies `requiresConsentEpoch` and takes the defaults
+    /// for the rest. It still had to write `do { try … } catch { preconditionFailure(…) }`
+    /// around a branch that cannot be reached, in the desktop app, whose launch trap was
+    /// removed for exactly that reason. Tests that genuinely tune capacities keep using the
+    /// throwing initializer below, where the validation earns its keep.
+    public static func standard(requiresConsentEpoch: Bool = false) -> Self {
+        // Force-try is confined to this one line and is honest: the arguments are the
+        // literal defaults, which the guards below accept by construction. If a default is
+        // ever edited to something invalid, this traps in every test run rather than at a
+        // customer's launch.
+        // swiftlint:disable:next force_try
+        try! Self(requiresConsentEpoch: requiresConsentEpoch)
+    }
+
     public init(
         credentialTimeout: Duration = .seconds(10),
         snapshotBufferLimit: Int = 32,

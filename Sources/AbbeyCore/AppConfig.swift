@@ -29,6 +29,8 @@ public enum InferenceMode: String, CaseIterable, Codable, Identifiable, Sendable
 public final class AppConfig: @unchecked Sendable {
     public static let shared = AppConfig()
 
+    private let tokens: any TokenStoring
+
     private let defaults: UserDefaults
 
     public var operatingMode: OperatingMode {
@@ -48,13 +50,13 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(quasarEndpoint, forKey: Keys.quasarEndpoint) }
     }
     public var quasarAPIToken: String {
-        didSet { TokenStore.set(quasarAPIToken, account: Keys.quasarAPIToken) }
+        didSet { tokens.set(quasarAPIToken, account: Keys.quasarAPIToken) }
     }
     public var remoteModel: String {
         didSet { defaults.set(remoteModel, forKey: Keys.remoteModel) }
     }
     public var remoteAPIToken: String {
-        didSet { TokenStore.set(remoteAPIToken, account: Keys.remoteAPIToken) }
+        didSet { tokens.set(remoteAPIToken, account: Keys.remoteAPIToken) }
     }
     public var replyCooldownSeconds: Double {
         didSet { defaults.set(replyCooldownSeconds, forKey: Keys.replyCooldownSeconds) }
@@ -73,7 +75,7 @@ public final class AppConfig: @unchecked Sendable {
     }
 
     public var discordBotToken: String {
-        didSet { TokenStore.set(discordBotToken, account: Keys.discordBotToken) }
+        didSet { tokens.set(discordBotToken, account: Keys.discordBotToken) }
     }
     public var discordDevGuildId: String {
         didSet { defaults.set(discordDevGuildId, forKey: Keys.discordDevGuildId) }
@@ -86,7 +88,7 @@ public final class AppConfig: @unchecked Sendable {
         didSet { defaults.set(syncServerURL, forKey: Keys.syncServerURL) }
     }
     public var syncAPIToken: String {
-        didSet { TokenStore.set(syncAPIToken, account: Keys.syncAPIToken) }
+        didSet { tokens.set(syncAPIToken, account: Keys.syncAPIToken) }
     }
 
     /// When true, Discord gateway connect is skipped (`dry-run: would connect`).
@@ -96,7 +98,7 @@ public final class AppConfig: @unchecked Sendable {
 
     /// Twitch IRC OAuth token (env `TWITCH_OAUTH_TOKEN`); empty disables Twitch.
     public var twitchOAuthToken: String {
-        didSet { TokenStore.set(twitchOAuthToken, account: Keys.twitchOAuthToken) }
+        didSet { tokens.set(twitchOAuthToken, account: Keys.twitchOAuthToken) }
     }
     public var twitchBotLogin: String {
         didSet { defaults.set(twitchBotLogin, forKey: Keys.twitchBotLogin) }
@@ -145,10 +147,14 @@ public final class AppConfig: @unchecked Sendable {
     /// - Parameter environment: process env; when a key is present it wins over UserDefaults
     ///   for process knobs (`ABBEY_INFERENCE_MODE`, `ABBEY_REMOTE_ENDPOINT`, `ABBEY_DRY_RUN`, …)
     ///   so CLI/server smokes are not blocked by desktop GUI leftovers.
+    /// - Parameter tokens: where secrets are read and written. Defaults to the login Keychain;
+    ///   tests MUST pass `InMemoryTokenStore()` — see that type for what happens if they do not.
     public init(
         defaults: UserDefaults = .standard,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        tokens: any TokenStoring = KeychainTokenStore()
     ) {
+        self.tokens = tokens
         self.defaults = defaults
         let modeRaw = defaults.string(forKey: Keys.operatingMode) ?? ""
         if modeRaw == "mirror" {
@@ -175,9 +181,9 @@ public final class AppConfig: @unchecked Sendable {
         self.quasarBackend = QuasarBackend(rawValue: environment[Keys.quasarBackend]
             ?? defaults.string(forKey: Keys.quasarBackend) ?? "local") ?? .local
         self.quasarEndpoint = environment[Keys.quasarEndpoint] ?? defaults.string(forKey: Keys.quasarEndpoint) ?? "https://api.xfoss.dev"
-        self.quasarAPIToken = environment[Keys.quasarAPIToken] ?? TokenStore.get(account: Keys.quasarAPIToken) ?? ""
+        self.quasarAPIToken = environment[Keys.quasarAPIToken] ?? tokens.get(account: Keys.quasarAPIToken) ?? ""
         self.remoteModel = environment[Keys.remoteModel] ?? defaults.string(forKey: Keys.remoteModel) ?? "abbey-remote"
-        self.remoteAPIToken = environment[Keys.remoteAPIToken] ?? TokenStore.get(account: Keys.remoteAPIToken) ?? ""
+        self.remoteAPIToken = environment[Keys.remoteAPIToken] ?? tokens.get(account: Keys.remoteAPIToken) ?? ""
         let cooldown = defaults.double(forKey: Keys.replyCooldownSeconds)
         self.replyCooldownSeconds = cooldown > 0 ? cooldown : 8.0
         let interval = defaults.double(forKey: Keys.consolidationInterval)
@@ -186,7 +192,7 @@ public final class AppConfig: @unchecked Sendable {
         self.reputationDecay = decay > 0 ? decay : 0.95
         self.confirmationRequiredForDestructiveActions = defaults.object(forKey: Keys.confirmationRequired) as? Bool ?? true
         self.equityModuleEnabled = defaults.object(forKey: Keys.equityModuleEnabled) as? Bool ?? true
-        self.discordBotToken = TokenStore.get(account: Keys.discordBotToken)
+        self.discordBotToken = tokens.get(account: Keys.discordBotToken)
             ?? environment["DISCORD_BOT_TOKEN"]
             ?? ""
         self.discordDevGuildId = defaults.string(forKey: Keys.discordDevGuildId)
@@ -196,7 +202,7 @@ public final class AppConfig: @unchecked Sendable {
         self.syncServerURL = defaults.string(forKey: Keys.syncServerURL)
             ?? environment["ABBEY_SYNC_SERVER_URL"]
             ?? ""
-        self.syncAPIToken = TokenStore.get(account: Keys.syncAPIToken)
+        self.syncAPIToken = tokens.get(account: Keys.syncAPIToken)
             ?? environment["ABBEY_SYNC_API_TOKEN"]
             ?? ""
         if let envDry = environment["ABBEY_DRY_RUN"] {
@@ -207,7 +213,7 @@ public final class AppConfig: @unchecked Sendable {
         } else {
             self.dryRun = false
         }
-        self.twitchOAuthToken = TokenStore.get(account: Keys.twitchOAuthToken)
+        self.twitchOAuthToken = tokens.get(account: Keys.twitchOAuthToken)
             ?? environment["TWITCH_OAUTH_TOKEN"]
             ?? ""
         self.twitchBotLogin = defaults.string(forKey: Keys.twitchBotLogin)
@@ -227,6 +233,43 @@ public final class AppConfig: @unchecked Sendable {
         } else {
             self.decentralizationEnabled = false
         }
+    }
+}
+
+/// Where AppConfig's secrets live. Injectable because the alternative is a static that writes
+/// to whoever runs the process — see `InMemoryTokenStore`.
+public protocol TokenStoring: Sendable {
+    func get(account: String) -> String?
+    func set(_ value: String, account: String)
+}
+
+/// Production store: the login Keychain (env/UserDefaults off-Apple).
+public struct KeychainTokenStore: TokenStoring {
+    public init() {}
+    public func get(account: String) -> String? { TokenStore.get(account: account) }
+    public func set(_ value: String, account: String) { TokenStore.set(value, account: account) }
+}
+
+/// Test store. Not a convenience: `AppConfig`'s token `didSet` hooks write through on every
+/// assignment, so a test that mutates `discordBotToken` against the default store edits the
+/// *developer's* login Keychain. That is not hypothetical — `AbbeyCoreTests` assigning `""`
+/// deleted the real `DISCORD_BOT_TOKEN` item on every run, and one assigning a literal left
+/// `token` in its place (item created 2026-09-09 00:01 EDT, deleted by hand). An empty token
+/// under `liveDiscord` is exactly the startup state that used to SIGTRAP the app.
+public final class InMemoryTokenStore: TokenStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: String]
+
+    public init(_ initial: [String: String] = [:]) { self.values = initial }
+
+    public func get(account: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return values[account]
+    }
+
+    public func set(_ value: String, account: String) {
+        lock.lock(); defer { lock.unlock() }
+        if value.isEmpty { values.removeValue(forKey: account) } else { values[account] = value }
     }
 }
 

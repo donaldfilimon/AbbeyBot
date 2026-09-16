@@ -17,11 +17,11 @@ struct AbbeyBotApp: App {
     @State private var didActivate = false
 
     init() {
-        do {
-            try AppConfig.shared.validateForStartup()
-        } catch {
-            fatalError("AbbeyBot startup validation failed: \(error.localizedDescription)")
-        }
+        // Startup config is validated by `AbbeyEngine.init`, which records the problem on
+        // `engine.startupConfigError` for `ContentView` to surface. It is deliberately NOT
+        // validated (and trapped on) here: `operatingMode` and the Discord token are only
+        // editable from Settings inside this app, so trapping in `App.init` made a missing
+        // token unfixable — the app could not launch to reach the screen that fixes it.
         let boot = Self.makeModelContainer()
         _engine = State(initialValue: AbbeyEngine(modelContainer: boot.container, storeDegraded: boot.degraded))
     }

@@ -37,6 +37,15 @@ struct ContentView: View {
     @State private var pendingConfirmation: ConfirmationGate.PendingRequest?
 
     var body: some View {
+        VStack(spacing: 0) {
+            if let startupConfigError = engine.startupConfigError {
+                StartupConfigBanner(message: startupConfigError)
+            }
+            splitView
+        }
+    }
+
+    private var splitView: some View {
         NavigationSplitView {
             List(SidebarSection.allCases, selection: $selection) { section in
                 Label(section.rawValue, systemImage: section.systemImage)
@@ -93,5 +102,37 @@ struct ContentView: View {
                 break
             }
         }
+    }
+}
+
+/// Surfaces a startup configuration problem that would otherwise be invisible.
+/// Abbey keeps running in a reduced mode (it will not connect to Discord without a
+/// token) so the operator can reach Settings and correct the value.
+struct StartupConfigBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Startup configuration needs attention")
+                    .font(.headline)
+                Text(message)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                Text("Abbey started without connecting. Open Settings to correct this.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.12))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Startup configuration needs attention. \(message)")
     }
 }
