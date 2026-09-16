@@ -39,4 +39,8 @@ struct AbbeyGatewayHandler: GatewayEventHandler {
     func onInteractionCreate(_ payload: Interaction) async throws {
         await hooks.onInteractionCreate(payload)
     }
+
+    func onMessageReactionAdd(_ payload: Gateway.MessageReactionAdd) async throws {
+        await hooks.onMessageReactionAdd(payload)
+    }
 }

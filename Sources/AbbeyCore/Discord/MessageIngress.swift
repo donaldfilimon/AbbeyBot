@@ -39,11 +39,13 @@ public struct MessageIngress: Sendable {
 
     public typealias CooldownCheck = @Sendable (_ userId: String, _ guildId: String) async -> Bool
     public typealias MarkReplied = @Sendable (_ userId: String, _ guildId: String) async -> Void
+    public typealias NoteReply = @Sendable (_ sourceMessageId: String, _ replyMessageId: String) async -> Void
 
     private let ingest: IngestHandler
     private let craftReply: ReplyHandler
     private let isCoolingDown: CooldownCheck
     private let markReplied: MarkReplied
+    private let noteReply: NoteReply
     private let botUserId: @Sendable () async -> String?
 
     public init(
@@ -51,12 +53,14 @@ public struct MessageIngress: Sendable {
         craftReply: @escaping ReplyHandler,
         isCoolingDown: @escaping CooldownCheck,
         markReplied: @escaping MarkReplied,
+        noteReply: @escaping NoteReply = { _, _ in },
         botUserId: @escaping @Sendable () async -> String?
     ) {
         self.ingest = ingest
         self.craftReply = craftReply
         self.isCoolingDown = isCoolingDown
         self.markReplied = markReplied
+        self.noteReply = noteReply
         self.botUserId = botUserId
     }
 
@@ -78,14 +82,20 @@ public struct MessageIngress: Sendable {
         guard let reply = await craftReply(content, channelId, guildId, authorId, strategy), !reply.isEmpty else { return }
 
         do {
-            try await client.createMessage(
+            let response = try await client.createMessage(
                 channelId: message.channel_id,
                 payload: .init(
                     content: reply,
                     message_reference: .init(message_id: message.id)
                 )
-            ).guardSuccess()
+            )
+            try response.guardSuccess()
             await markReplied(authorId, guildId)
+            // The reply was delivered either way; a body that fails to decode only costs
+            // the delayed-reward link for this one message.
+            if let sent = try? response.decode() {
+                await noteReply(messageId, sent.id.rawValue)
+            }
         } catch {
             // Surface via client errors; ingest already succeeded.
         }

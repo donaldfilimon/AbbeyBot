@@ -20,6 +20,8 @@ final class AbbeyEngine {
     let eventBus: EventBus
     let socialBrain: SocialBrain
     let dqnAgent: DQNAgent
+    /// Links Discord replies to the DQN sample that chose their strategy (reaction rewards).
+    let rewardLedger = DelayedRewardLedger()
     let scheduler: AbbeyScheduler
     let confirmationGate: ConfirmationGate
     let personaRouter: ABIRouter
@@ -482,6 +484,14 @@ final class AbbeyEngine {
         )
         lastDQNAction = scored.action
         lastStrategy = scored.strategy
+        if let discordMessageId {
+            await rewardLedger.stage(
+                sourceMessageId: discordMessageId,
+                authorId: authorId,
+                state: scored.state,
+                action: scored.action
+            )
+        }
         await socialBrain.recordInteraction(userId: authorId, guildId: guildId, quality: scored.quality)
 
         logInteraction(
@@ -637,6 +647,8 @@ final class AbbeyEngine {
         let ingress = makeMessageIngress()
         let interactions = makeInteractionRouter()
         let bridge = discordBridge
+        let rewardLedger = rewardLedger
+        let dqnAgent = dqnAgent
 
         let hooks = DiscordEventHooks(
             onReady: { [weak self] userId in
@@ -652,6 +664,14 @@ final class AbbeyEngine {
             onInteractionCreate: { interaction in
                 guard let client = await bridge.client else { return }
                 await interactions.handle(interaction, client: client)
+            },
+            onMessageReactionAdd: { reaction in
+                await ReactionRewardIngress.apply(
+                    reaction,
+                    botUserId: await bridge.botUserId,
+                    ledger: rewardLedger,
+                    dqnAgent: dqnAgent
+                )
             }
         )
 
@@ -804,6 +824,9 @@ final class AbbeyEngine {
             markReplied: { [weak self] userId, guildId in
                 guard let self else { return }
                 await self.scheduler.markReplied(userId: userId, guildId: guildId)
+            },
+            noteReply: { [rewardLedger] sourceMessageId, replyMessageId in
+                await rewardLedger.bind(sourceMessageId: sourceMessageId, replyMessageId: replyMessageId)
             },
             botUserId: { [weak self] in
                 await self?.discordBridge.botUserId

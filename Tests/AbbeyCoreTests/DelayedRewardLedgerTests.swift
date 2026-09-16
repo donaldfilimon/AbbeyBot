@@ -1,0 +1,116 @@
+import DiscordBM
+import Foundation
+import Testing
+@testable import AbbeyCore
+
+@Suite("Delayed reaction rewards")
+struct DelayedRewardLedgerTests {
+    private static let state: [Float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    private static let t0 = Date(timeIntervalSince1970: 1_000_000)
+
+    private func boundLedger(
+        author: String = "u1",
+        action: Int = 2,
+        capacity: Int = 8,
+        timeToLive: TimeInterval = 60
+    ) async -> DelayedRewardLedger {
+        let ledger = DelayedRewardLedger(capacity: capacity, timeToLive: timeToLive)
+        await ledger.stage(sourceMessageId: "m1", authorId: author, state: Self.state, action: action, now: Self.t0)
+        let bound = await ledger.bind(sourceMessageId: "m1", replyMessageId: "r1", now: Self.t0)
+        #expect(bound)
+        return ledger
+    }
+
+    @Test func emojiTable() {
+        #expect(ReactionReward.value(emojiName: "👍", isCustom: false) == 1)
+        #expect(ReactionReward.value(emojiName: "❤️", isCustom: false) == 1)
+        #expect(ReactionReward.value(emojiName: "👎", isCustom: false) == -1)
+        #expect(ReactionReward.value(emojiName: "🦆", isCustom: false) == nil)
+        #expect(ReactionReward.value(emojiName: "👍", isCustom: true) == nil)
+        #expect(ReactionReward.value(emojiName: nil, isCustom: false) == nil)
+    }
+
+    @Test func authorReactionOnReplyYieldsTerminalSampleOnce() async {
+        let ledger = await boundLedger()
+        let experience = await ledger.reward(
+            replyMessageId: "r1", reactorId: "u1", botUserId: "bot",
+            emojiName: "👎", isCustomEmoji: false, now: Self.t0.addingTimeInterval(5)
+        )
+        #expect(experience?.state == Self.state)
+        #expect(experience?.action == 2)
+        #expect(experience?.reward == -1)
+        #expect(experience?.done == true)
+        #expect(experience?.nextState == Self.state)
+
+        let again = await ledger.reward(
+            replyMessageId: "r1", reactorId: "u1", botUserId: "bot",
+            emojiName: "👍", isCustomEmoji: false, now: Self.t0.addingTimeInterval(6)
+        )
+        #expect(again == nil)
+        #expect(await ledger.boundCount == 0)
+    }
+
+    @Test func unknownReplyOtherUserAndBotAreIgnored() async {
+        let ledger = await boundLedger()
+        #expect(await ledger.reward(replyMessageId: "r-other", reactorId: "u1", botUserId: "bot",
+                                    emojiName: "👍", isCustomEmoji: false, now: Self.t0) == nil)
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "u2", botUserId: "bot",
+                                    emojiName: "👍", isCustomEmoji: false, now: Self.t0) == nil)
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "bot", botUserId: "bot",
+                                    emojiName: "👍", isCustomEmoji: false, now: Self.t0) == nil)
+        #expect(await ledger.boundCount == 1)
+    }
+
+    @Test func neutralEmojiKeepsEntryForALaterSignal() async {
+        let ledger = await boundLedger()
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "u1", botUserId: nil,
+                                    emojiName: "🦆", isCustomEmoji: false, now: Self.t0) == nil)
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "u1", botUserId: nil,
+                                    emojiName: "👍", isCustomEmoji: false, now: Self.t0)?.reward == 1)
+    }
+
+    @Test func expiredEntriesAreDropped() async {
+        let ledger = await boundLedger(timeToLive: 60)
+        #expect(await ledger.reward(replyMessageId: "r1", reactorId: "u1", botUserId: nil,
+                                    emojiName: "👍", isCustomEmoji: false,
+                                    now: Self.t0.addingTimeInterval(61)) == nil)
+        #expect(await ledger.boundCount == 0)
+
+        let staleStage = DelayedRewardLedger(timeToLive: 60)
+        await staleStage.stage(sourceMessageId: "m1", authorId: "u1", state: Self.state, action: 0, now: Self.t0)
+        #expect(await staleStage.bind(sourceMessageId: "m1", replyMessageId: "r1",
+                                      now: Self.t0.addingTimeInterval(61)) == false)
+    }
+
+    @Test func bindWithoutStageFailsAndCapacityEvictsOldest() async {
+        let ledger = DelayedRewardLedger(capacity: 2, timeToLive: 600)
+        #expect(await ledger.bind(sourceMessageId: "missing", replyMessageId: "r") == false)
+        for index in 0..<3 {
+            await ledger.stage(sourceMessageId: "m\(index)", authorId: "u", state: Self.state, action: 0,
+                               now: Self.t0.addingTimeInterval(Double(index)))
+        }
+        #expect(await ledger.stagedCount == 2)
+        #expect(await ledger.bind(sourceMessageId: "m0", replyMessageId: "r0", now: Self.t0) == false)
+        #expect(await ledger.bind(sourceMessageId: "m2", replyMessageId: "r2", now: Self.t0) == true)
+    }
+
+    @Test func gatewayReactionTrainsTheAgent() async throws {
+        // `apply` reads the wall clock, so the fixed test epoch needs an unbounded lifetime.
+        let ledger = await boundLedger(action: 1, timeToLive: .greatestFiniteMagnitude)
+        let agent = DQNAgent(seed: 7, experiencePersistence: nil)
+        let before = await agent.bufferCount()
+
+        let json = """
+        {"type":0,"user_id":"u1","channel_id":"10","message_id":"r1","guild_id":"20",
+         "member":{"roles":[]},"emoji":{"id":null,"name":"🔥"}}
+        """
+        let payload = try JSONDecoder().decode(Gateway.MessageReactionAdd.self, from: Data(json.utf8))
+        let applied = await ReactionRewardIngress.apply(payload, botUserId: "bot", ledger: ledger, dqnAgent: agent)
+        #expect(applied)
+        #expect(await agent.bufferCount() == before + 1)
+
+        let replay = await ReactionRewardIngress.apply(payload, botUserId: "bot", ledger: ledger, dqnAgent: agent)
+        #expect(!replay)
+        #expect(await agent.bufferCount() == before + 1)
+    }
+}
