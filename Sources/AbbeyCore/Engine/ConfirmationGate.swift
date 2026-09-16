@@ -1,13 +1,14 @@
 import Foundation
 
 /// Human-in-the-loop gate for purge/kick/ban. Nothing in this app executes a
-/// destructive action directly — every call site routes through `request(_:target:guild:)`,
-/// which either resolves immediately (if `AppConfig.confirmationRequiredForDestructiveActions`
-/// is false, e.g. in a scripted test context) or suspends until a UI confirmation sheet
-/// resolves the pending request.
+/// destructive action directly — every call site routes through
+/// `request(kind:targetUserId:guildId:reason:)`, which either approves immediately (when
+/// `AppConfig.confirmationRequiredForDestructiveActions` is false) or suspends until a UI
+/// confirmation sheet resolves the pending request.
 ///
-/// This mirrors the same-named actor from the prior native macOS SwiftData architecture
-/// (2026-06-29 session) — see /areas/abbey-bot.md.
+/// Every approved request publishes `.destructiveActionConfirmed`, including an immediate
+/// approval: the action goes ahead either way, and subscribers (metrics, the moderation reward)
+/// key on that event.
 public actor ConfirmationGate {
     public struct PendingRequest: Identifiable, Sendable {
         public let id: UUID
@@ -37,6 +38,7 @@ public actor ConfirmationGate {
     public func request(kind: DestructiveAction, targetUserId: String, guildId: String, reason: String) async -> Bool {
         guard requireConfirmation() else {
             await eventBus.publish(.destructiveActionRequested(kind: kind, targetUserId: targetUserId, guildId: guildId))
+            await eventBus.publish(.destructiveActionConfirmed(kind: kind, targetUserId: targetUserId, guildId: guildId))
             return true
         }
 
