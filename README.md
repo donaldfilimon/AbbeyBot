@@ -81,7 +81,7 @@ also succeeded on that SHA. This is repository and publication evidence, not
 production deployment or live-service acceptance.
 
 Current completion evidence and unresolved deployment/media requirements are in
-[the September 8 integration ledger](docs/verification/product-integration-2026-09-08.md).
+[the September 16 integration ledger](docs/verification/product-integration-2026-09-16.md).
 It records commit-specific local and hosted results; production rollout and live
 Quasar, Twitch and Discord acceptance remain open.
 
