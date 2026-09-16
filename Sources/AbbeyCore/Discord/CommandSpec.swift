@@ -222,3 +222,65 @@ extension CommandSpec {
         all.first { $0.name == name }
     }
 }
+
+extension CommandSpec {
+    /// This command's `/help` line.
+    ///
+    /// The description is the same string Discord registers, so the help text
+    /// and the Discord command picker can never disagree about what a command
+    /// claims to do. The markers are derived from the same `visibility` and
+    /// `defaultMemberPermissions` that authorization reads, so `/help` cannot
+    /// advertise a command as open when the policy rejects it.
+    public var helpLine: String {
+        let suffix = audienceNotes.isEmpty ? "" : " · " + audienceNotes.joined(separator: ", ")
+        return "`/\(name)` — \(description)\(suffix)"
+    }
+
+    /// Who may run this command and who sees the reply, in operator-facing words.
+    ///
+    /// Derived from the same `defaultMemberPermissions` and `visibility` that
+    /// authorization and the router read, and shared by Discord `/help` and the
+    /// desktop registration panel so the two surfaces cannot describe one
+    /// command differently.
+    public var audienceNotes: [String] {
+        var notes: [String] = []
+        if let permissions = defaultMemberPermissions, !permissions.isEmpty {
+            notes.append("operator only")
+        }
+        if isEphemeral { notes.append("private reply") }
+        return notes
+    }
+
+    /// The `/help` body, derived from `all`.
+    ///
+    /// `all` is documented above as the single source of truth, but the help
+    /// text was a hand-maintained literal listing every command a second time.
+    /// Nothing cross-checked the two, so the failure mode was the same one
+    /// `CommandSpec` exists to prevent, one layer out: register a command and
+    /// forget the literal, and it is invisible to every user who runs `/help`;
+    /// delete a command and forget the literal, and `/help` advertises
+    /// something that answers "Unknown command".
+    public static var helpText: String {
+        (["**AbbeyBot commands**"] + all.map(\.helpLine)).joined(separator: "\n")
+    }
+
+    /// The capability statement injected into every persona prompt.
+    ///
+    /// A model asked what it can do answers from its priors unless something
+    /// constrains it, and it invents plausible Discord-bot features: creating
+    /// roles, sending DMs, authoring slash commands. None of those exist here —
+    /// there is no role call, no DM-channel creation, and `all` is a compiled
+    /// constant that `CommandRegistry.register` pushes, so a command cannot be
+    /// added at runtime. `modAdvice` already grounded `/mod` this way; this is
+    /// the same guard for the ordinary reply path, derived from the registry so
+    /// it cannot fall behind the commands it describes.
+    public static var capabilityManifest: String {
+        let names = all.map { "/\($0.name)" }.joined(separator: ", ")
+        return """
+        Your slash commands are exactly: \(names). You cannot create or edit roles, \
+        start a direct message, or add new slash commands, and must not offer to. \
+        Moderation commands give advice only — do not claim you executed a kick, ban, \
+        or purge. Do not describe any capability outside this list.
+        """
+    }
+}

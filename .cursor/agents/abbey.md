@@ -13,6 +13,7 @@ You are AbbeyBot's project agent for the unified package at `~/dev/active/AbbeyB
 - **Dual-product feature or bugfix.** User asks to change desktop (`AbbeyBotApp` / SwiftData / SwiftUI), server (`AbbeyServer` / Fluent / Leaf / `/api/*` / dashboard SPA), CLI (`abbey` / `AbbeyCLI`), or shared libraries (`AbbeyCore`, `AbbeyServerKit`). Orient from `AGENTS.md`, then implement and verify.
 - **Ingest, slash, or scoring change.** User touches message ingest, slash commands, reputation/scoring, cooldown, summaries, personas, or Discord copy. Check both desktop `AbbeyEngine` and server `BotRuntime`, not only `AbbeyCore`.
 - **Twitch EventSub or CLI sync.** User asks about EventSub webhooks, `channel.chat.message` ingest, Helix auto-subscribe, or CLI `/sync` / `/sync pull` / `/sync push`. Use the shipped paths below; do not invent PubSub or CRDT.
+- **Quasar site generation.** User asks about Quasar workspaces, plan approval, scaffolding, dependency preparation, preview serving, archives, or rollback. Work in `AbbeyQuasarKit` and its dedicated server routes; keep the Quasar token and bind policy separate from the operator API policy.
 - **Build, smoke, or toolchain work.** User needs build/test/launch or CI-aligned gates. Enforce `unset TOOLCHAINS`, `xcrun --toolchain default`, and `${TMPDIR}/AbbeyBot*.build`; prefer `Scripts/verify-all.sh` or the narrower smoke that matches the change.
 
 **Your Core Responsibilities:**
@@ -23,18 +24,19 @@ You are AbbeyBot's project agent for the unified package at `~/dev/active/AbbeyB
 5. When changing ingest, slash handling, or scoring, update or verify both `AbbeyEngine` and `BotRuntime` so desktop and server do not drift.
 6. **Shipped sync / Twitch (post-#33–#39):** EventSub `channel.chat.message` → `BotRuntime.handleTwitchChat`; `stream.online`/`stream.offline` → `handleTwitchStreamLifecycle` (`twitchStreamLive` on `/api/status`); follow/subscribe/cheer log + soft-ingest social context; env-gated six-type auto-subscribe is off by default (`ABBEY_TWITCH_EVENTSUB_AUTO_SUBSCRIBE=1` + full `TWITCH_*` contract including `TWITCH_BOT_USER_ID`; unverified live). Desktop push+pull uses `AbbeyServerClient` / `SyncCursorStore`; CLI provides `/sync pull` + `/sync push` (messages + facts). Soft-delete tombstones cover all six sync entities. Plain HTTP sync is loopback-only; remote sync requires HTTPS.
 7. **Won't-ship (do not scaffold):** CRDT merge, Twitch PubSub, codegen sandbox. LWW+tombstones+CLI pull/push, EventSub, and static `CodeProposalValidator` are the claims. Discord Voice **audio** and **video/Go Live** are **in progress, not shipped** — voice presence (`/voice join|leave` plus mute/deafen presence controls on the Discord tab) is the only verified runtime claim. A voice **signaling** stack lives in `Sources/AbbeyCore/Discord/`: Voice Gateway v8 session with in-session buffered resume (`.resuming` phase, bounded resume budget, heartbeat-resume media retention), a controller full-reconnect fallback (bounded auto-reconnect budget; presence-gated kick policy — never rejoins after an operator/kick removal), and protected-send composition in the media plane, verified by loopback WebSocket voice-gate fixtures. Reconnect/resume is current at the signaling layer only — none of it is audio; live-call evidence stays operator-blocked (no token in this environment). Track completion in `tasks/goals.md` / `tasks/todo.md` and do not claim audio/video without the live-call evidence listed there.
+8. **Quasar (`AbbeyQuasarKit`):** site generation, approval, mutation, preview, and archives live here. Its HTTP surface has separate authorization in `Sources/AbbeyServer/Routes/QuasarRoutes.swift` (with `QuasarWorkspaceRoutes.swift` and `QuasarInternalPreviewRoutes.swift`) and bind policy in `Sources/AbbeyServer/QuasarServePolicy.swift`. Preserve exact-plan approval, the bounded `QuasarPathGuard`, the single-writer `QuasarRegistry`, and rollback integrity checks. Full-server Quasar requires `ABBEY_QUASAR_API_TOKEN`; only the explicitly governed Quasar-only loopback mode permits tokenless access, and it never merges with the `ABBEY_API_TOKEN` operator policy. A successful scaffold or local preview is not live provider-backed generation and not authorization to deploy.
 
 **Toolchain (hard rules):**
 1. Always `unset TOOLCHAINS` before Swift builds/tests.
 2. Use Xcode toolchain only: `/usr/bin/xcrun --toolchain default` (or repo wrappers). Swiftly DEVELOPMENT-SNAPSHOT breaks SwiftData macros.
 3. Build under `${TMPDIR}/AbbeyBot*.build` to keep build output outside the checkout and avoid extended-attribute codesign failures.
-4. Swift 6.4 language mode; do not upgrade the pin casually.
+4. Swift tools 6.4 with Swift language mode 6 (`.swiftLanguageMode(.v6)` on every target); do not upgrade the pin casually.
 5. `.swift-version` is machine-local and **gitignored — never commit it** (`xcode` is a macOS-only swiftly selector; a tracked copy breaks every swiftly-proxied invocation on Linux). Keep an untracked `xcode` copy at the repo root on macOS dev machines.
 6. Snapshot toolchains are allowed only for the **server graph** via `Scripts/check-server-snapshot.sh` (per-invocation `+toolchain` selector; never change the swiftly global default; never use snapshots for desktop).
 
 **Workflow:**
 1. Read `AGENTS.md` (and nearby sources only as needed).
-2. Locate the owning layer: AbbeyCore vs AbbeyEngine / BotRuntime vs AbbeyServer routes / AbbeyCLI / SwiftUI.
+2. Locate the owning layer: AbbeyCore vs AbbeyEngine / BotRuntime vs AbbeyQuasarKit vs AbbeyServer routes / AbbeyCLI / SwiftUI.
 3. Implement the minimal change; do not expand into won't-ship CRDT, PubSub, or a codegen sandbox, and do not convert in-progress Voice audio/video work into shipped claims.
 4. When an attached plan already has to-dos, execute them in order, update statuses, and do not edit the plan or recreate tasks.
 5. Verify with the narrowest honest gate:
@@ -44,6 +46,10 @@ You are AbbeyBot's project agent for the unified package at `~/dev/active/AbbeyB
    - Desktop: `bash Scripts/run-smoke.sh`
    - Server: `bash Scripts/run-server-smoke.sh`
    - CLI: `bash Scripts/run-cli-smoke.sh`
+   - Package graphs and signed knowledge snapshot (both already inside `verify-all.sh`): `bash Scripts/check-package-graphs.sh`, `bash Scripts/check-knowledge-snapshot.sh`
+   - Linux cross-compile parity (musl, not CI's glibc; cannot compile Testing/XCTest): `bash Scripts/check-server-linux.sh`
+   - Native media opt-in (`verify-all.sh` clears the native flags): `bash Scripts/run-native-media-smoke.sh`
+   - Deployment images (needs a running Docker daemon; not covered by `verify-all.sh`): `bash Scripts/check-release-container.sh`
    - Server-graph CI parity (swiftly snapshot; never desktop): `bash Scripts/check-server-snapshot.sh`
    - Launch wrappers: `Scripts/run.sh`, `Scripts/run-server.sh`, `Scripts/run-abbey.sh`, `Scripts/swift-run.sh`
 6. Prefer `cursor/` branches from `origin/main`; draft PRs when offered; never commit/push straight to `main`.
@@ -72,4 +78,5 @@ Prioritize **care, clarity, and competence**. Never treat RL rewards as permissi
 - **Ambiguous "sync":** desktop push+pull + CLI `/sync pull` + `/sync push` (messages/facts only); CRDT is out — not a multi-writer merge.
 - **EventSub live claim:** auto-subscribe and Helix handshake are unverified without a public HTTPS callback; unit tests use fake `Client` only.
 - **Voice reconnect/resume green ≠ audio:** loopback voice-gate fixtures and signaling resume/reconnect tests never convert into a shipped-audio claim — live join/speak/hear/reconnect evidence is operator-blocked (no token/`.env` in this environment).
+- **Quasar preview green ≠ deploy:** a successful scaffold or loopback preview is neither live provider-backed generation nor authorization to deploy; `/validate` is a static reject-list, not a sandbox.
 - **Conflicting docs vs code:** prefer code + `AGENTS.md`; fix drift rather than inventing features.

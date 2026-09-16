@@ -19,7 +19,7 @@ routing index, not a second copy of those rules. A duplicated gate list drifts.
 | Branching, staging, drift-checking the agent mirrors | AGENTS.md → Workflow |
 | What is actually shipped vs. implemented-but-unverified | `README.md` → Status; `tasks/goals.md`, `tasks/todo.md` |
 | Voice/video architecture and its evidence boundary | `docs/discord-voice-architecture.md`, `docs/native-media-dependencies.md` |
-| Deployment and image consumption | `deploy/production/README.md` |
+| Deployment and image consumption | `deploy/production/README.md`; image gate `Scripts/check-release-container.sh` and `.github/workflows/release-images.yml` (AGENTS.md → Additional Gates) |
 
 ## Claude-specific
 

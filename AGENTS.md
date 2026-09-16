@@ -66,6 +66,8 @@ ABBEY_PACKAGE_ROLE=server /usr/bin/xcrun --toolchain default swift test \
 - `bash Scripts/check-server-linux.sh`: matching pinned snapshot/Static Linux SDK, product-only cross-compile plus glibc-divergence lint. Read its header for setup. It targets musl, not CI's glibc, and cannot compile Testing/XCTest; it complements rather than replaces snapshot tests. Avoid C stdio globals in portable Swift; use `FileHandle.standardError`/`.standardOutput`.
 - `bash Scripts/run-native-media-smoke.sh`: bootstraps isolated native dependencies and tests native debug/release paths. Ordinary `verify-all` clears native flags and does not cover this.
 - `.github/workflows/abbey-ci.yml` builds web assets before the server graph in `swiftlang/swift:nightly-6.4.x-bookworm`. There is no desktop job. CI is commit-specific secondary evidence, not signed-app, native-media, Dockerfile deployment, or live-service proof.
+- `bash Scripts/check-release-container.sh`: builds the deployment images and exercises server, preview, and provider containers. It requires a running Docker daemon and fails immediately without one; `ABBEY_RELEASE_SKIP_BUILD=1` reuses already-built local images, and `ABBEY_RELEASE_IMAGE`/`ABBEY_CADDY_RELEASE_IMAGE` name the tags. `verify-all.sh` does not cover it.
+- `.github/workflows/release-images.yml` is a second workflow, not a variant of `abbey-ci.yml`: on pull requests and on `main` it runs `deploy/production/tests/run.sh` and the container gate above, and only the `main` run publishes digest-pinned images to GHCR. Image evidence therefore comes from this workflow, never from `abbey-ci.yml` or a local smoke. `quasar-process-diagnostic.yml` fires only on one named review branch and is a reproduction aid, not a gate.
 
 ## Behavioral Boundaries
 

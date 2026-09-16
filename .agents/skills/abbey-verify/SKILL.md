@@ -12,7 +12,7 @@ Use this workflow after completing a coherent AbbeyBot implementation slice.
 3. Confirm changes are on a review branch (`codex/*` or `cursor/*`), never a direct commit on `main`.
 4. Run `bash Scripts/check-static-security.sh`.
 5. During iteration, run the narrowest relevant smoke or filtered Swift test. Before declaring the slice shippable, run `bash Scripts/verify-all.sh`.
-6. Inspect `git diff --check`, `git diff --stat`, and the complete diff. Correct claim drift in `AGENTS.md`, `AGENTS.md`, README, and `tasks/` only when executable evidence supports it.
+6. Inspect `git diff --check`, `git diff --stat`, and the complete diff. Correct claim drift in `AGENTS.md`, `CLAUDE.md`, README, and `tasks/` only when executable evidence supports it.
 7. Stage explicit paths; do not stage `.env`, tokens, build products, hooks, or unrelated dirty files.
 8. Commit with a focused action-oriented message under 72 characters and push the review branch without force.
 9. Create or update a pull request into `main`. Report local gate results separately from GitHub Actions, which may be unavailable because of account billing/quota.

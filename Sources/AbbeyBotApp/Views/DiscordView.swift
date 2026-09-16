@@ -138,9 +138,31 @@ struct DiscordView: View {
                 }
             }
             .disabled(engine.discordState != .connected || isBusy)
-            Text("Commands: ask, rep, remember, forget, context, persona, voice")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // Read from CommandSpec.all, which is what the button actually
+            // publishes. The literal this replaced named seven of nineteen, so
+            // the panel understated by twelve what pressing the button sends to
+            // the guild, and nothing would have caught it drifting further.
+            DisclosureGroup("Registers \(CommandSpec.all.count) commands") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(CommandSpec.all, id: \.name) { spec in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("/\(spec.name)")
+                                .font(.caption.monospaced())
+                            Text(spec.description)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if !spec.audienceNotes.isEmpty {
+                                Text(spec.audienceNotes.joined(separator: " · "))
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .font(.caption)
         }
     }
 
