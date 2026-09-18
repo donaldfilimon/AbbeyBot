@@ -1,3 +1,4 @@
+import AbbeyCore
 import AbbeyServerKit
 import Foundation
 import Testing
@@ -80,6 +81,29 @@ struct AbbeyServerKitTests {
             try await MemoryRepository.appendFact(userId: "u1", guildId: "g1", fact: "   ", on: db)
             facts = try await MemoryRepository.facts(userId: "u1", guildId: "g1", on: db)
             #expect(facts == ["lives in nyc"])
+        }
+    }
+
+    @Test func memoryRepositoryBoundsFactsPerUser() async throws {
+        try await withRuntime { app, _ in
+            let db = app.db
+            for i in 1...MemoryFactPolicy.maxFacts {
+                try await MemoryRepository.appendFact(userId: "u9", guildId: "g1", fact: "fact \(i)", on: db)
+            }
+            let long = String(repeating: "y", count: MemoryFactPolicy.maxFactLength + 5)
+            let outcome = try await MemoryRepository.appendFact(userId: "u9", guildId: "g1", fact: long, on: db)
+            #expect(outcome.changed)
+            #expect(outcome.truncated)
+            #expect(outcome.evicted == 1)
+
+            let facts = try await MemoryRepository.facts(userId: "u9", guildId: "g1", on: db)
+            #expect(facts.count == MemoryFactPolicy.maxFacts)
+            #expect(facts.first == "fact 2")
+            #expect(facts.last?.count == MemoryFactPolicy.maxFactLength)
+
+            let duplicate = try await MemoryRepository.appendFact(userId: "u9", guildId: "g1", fact: long, on: db)
+            #expect(!duplicate.changed)
+            #expect(try await MemoryRepository.facts(userId: "u9", guildId: "g1", on: db) == facts)
         }
     }
 

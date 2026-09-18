@@ -45,8 +45,15 @@ public enum DiscordCopy: Sendable {
         "Reputation for \(userId): \(String(format: "%.3f", value))"
     }
 
-    public static func remembered(userId: String) -> String {
-        "Remembered for \(userId)."
+    public static func remembered(userId: String, truncated: Bool = false, evicted: Int = 0) -> String {
+        var text = "Remembered for \(userId)."
+        if truncated {
+            text += " Cut to \(MemoryFactPolicy.maxFactLength) characters."
+        }
+        if evicted > 0 {
+            text += " Dropped \(evicted == 1 ? "the oldest fact" : "the \(evicted) oldest facts") to stay at \(MemoryFactPolicy.maxFacts)."
+        }
+        return text
     }
 
     public static func forgot(index: Int) -> String {

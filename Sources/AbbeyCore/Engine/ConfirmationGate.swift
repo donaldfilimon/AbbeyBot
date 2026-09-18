@@ -2,9 +2,10 @@ import Foundation
 
 /// Human-in-the-loop gate for purge/kick/ban. Nothing in this app executes a
 /// destructive action directly — every call site routes through
-/// `request(kind:targetUserId:guildId:reason:)`, which either approves immediately (when
-/// `AppConfig.confirmationRequiredForDestructiveActions` is false) or suspends until a UI
-/// confirmation sheet resolves the pending request.
+/// `request(kind:targetUserId:guildId:reason:)`, which suspends until a UI confirmation
+/// sheet resolves the pending request. Only a purge may skip the sheet, and only when
+/// `AppConfig.confirmationRequiredForDestructiveActions` is false; a kick or ban always
+/// waits for a human (decided 2026-09-16).
 ///
 /// Every approved request publishes `.destructiveActionConfirmed`, including an immediate
 /// approval: the action goes ahead either way, and subscribers (metrics, the moderation reward)
@@ -36,7 +37,7 @@ public actor ConfirmationGate {
     /// The queue is updated *before* the event is published so UI subscribers that
     /// react to `.destructiveActionRequested` always see a non-empty `queue`.
     public func request(kind: DestructiveAction, targetUserId: String, guildId: String, reason: String) async -> Bool {
-        guard requireConfirmation() else {
+        guard requireConfirmation() || kind.alwaysRequiresConfirmation else {
             await eventBus.publish(.destructiveActionRequested(kind: kind, targetUserId: targetUserId, guildId: guildId))
             await eventBus.publish(.destructiveActionConfirmed(kind: kind, targetUserId: targetUserId, guildId: guildId))
             return true

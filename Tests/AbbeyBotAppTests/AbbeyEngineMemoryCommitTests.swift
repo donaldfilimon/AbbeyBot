@@ -74,6 +74,35 @@ struct AbbeyEngineMemoryCommitTests {
         await engine.shutdown()
     }
 
+    @Test func rememberBoundsFactsAndReportsWhatItDropped() async throws {
+        let container = try makeContainer()
+        var pushed: [String] = []
+        let engine = AbbeyEngine(
+            modelContainer: container,
+            scheduleRememberPush: { _, _, fact in pushed.append(fact) },
+            scheduleForgetPush: { _, _, _ in }
+        )
+        for i in 1...MemoryFactPolicy.maxFacts {
+            _ = await engine.rememberFact(userId: "u1", guildId: "g1", fact: "fact \(i)")
+        }
+        let long = String(repeating: "z", count: MemoryFactPolicy.maxFactLength + 5)
+
+        let response = await engine.rememberFact(userId: "u1", guildId: "g1", fact: long)
+
+        #expect(response == DiscordCopy.remembered(userId: "u1", truncated: true, evicted: 1))
+        #expect(pushed.last?.count == MemoryFactPolicy.maxFactLength)
+        let verify = ModelContext(container)
+        let key = ReputationMath.cacheKey(userId: "u1", guildId: "g1")
+        let stored = try verify.fetch(
+            FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
+        ).first
+        #expect(stored?.facts.count == MemoryFactPolicy.maxFacts)
+        #expect(stored?.facts.first == "fact 2")
+        #expect(stored?.facts.last == String(long.prefix(MemoryFactPolicy.maxFactLength)))
+
+        await engine.shutdown()
+    }
+
     @Test func rememberFailureRollsBackAndDoesNotAcknowledgeOrPush() async throws {
         let container = try makeContainer()
         let recorder = PushRecorder()

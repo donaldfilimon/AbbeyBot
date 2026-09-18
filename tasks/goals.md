@@ -965,6 +965,19 @@ status: in_progress
   "UserDefaults key:", pinned by `AppConfigEnvironmentScopeTests`. Making any of them honour the
   environment was deliberately not done: for `ABBEY_CONFIRMATION_REQUIRED` it would widen the
   bypass, which is the open decision above.
+- Decisions taken 2026-09-16 13:4x EDT (Donald, via the four-question prompt), all landed
+  in one slice: (1) kick and ban always wait for the confirmation sheet; only purge honours
+  the confirmation-off setting (`DestructiveAction.alwaysRequiresConfirmation`, checked in
+  `ConfirmationGate.request`; Settings caption rewritten). (2) Remembered facts are bounded by
+  a shared `MemoryFactPolicy`: 50 per user, 280 characters, oldest evicted, applied by both
+  `MemoryRepository.appendFact` and `AbbeyEngine.appendMemoryFact`; `/remember` reports a cut
+  or a drop; sync still copies rows verbatim and a legacy oversize row trims on its next append.
+  (3) `/ask`'s "Ask Abbey" names the product; a comment on `CommandSpec` records it and the
+  copy is unchanged. (4) The REST remember/forget routes keep operator trust: the shared token
+  is the authorization, now stated in `routes.swift` and AGENTS.md. Tests: `MemoryFactPolicyTests`
+  (5), gate parameterised kick/ban test, server and desktop cap tests. Mutation-checked:
+  dropping the kick/ban clause and dropping the eviction each fail their tests. This closes the
+  four open bullets above; the goal's remaining scope is the macOS UI half of its sibling.
 ## Merge the open review branches into main and finish their worktrees
 status: done
 - Captured 2026-09-16 12:28 EDT from "merge all branches into main and delete the branches not

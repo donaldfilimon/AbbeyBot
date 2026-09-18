@@ -32,21 +32,46 @@ struct ConfirmationGateTests {
         return seen
     }
 
-    /// With confirmation off the action goes ahead, so it must be reported as confirmed. Without
+    /// With confirmation off a purge goes ahead, so it must be reported as confirmed. Without
     /// that event the desktop engine neither counts the action in its metrics nor applies the
-    /// moderation reward, even though the kick really happened.
-    @Test func bypassApprovesAndReportsTheActionAsConfirmed() async {
+    /// moderation reward, even though the purge really happened.
+    @Test func bypassApprovesAPurgeAndReportsItAsConfirmed() async {
         let bus = EventBus()
         let gate = ConfirmationGate(eventBus: bus, requireConfirmation: { false })
         var approved = false
 
         let events = await destructiveEvents(on: bus) {
-            approved = await gate.request(kind: .ban, targetUserId: "u1", guildId: "g1", reason: "spam")
+            approved = await gate.request(kind: .purge, targetUserId: "u1", guildId: "g1", reason: "spam")
         }
 
         #expect(approved)
         #expect(await gate.queue.isEmpty)
-        #expect(events == ["requested ban u1 g1", "confirmed ban u1 g1"])
+        #expect(events == ["requested purge u1 g1", "confirmed purge u1 g1"])
+    }
+
+    /// Kick and ban ignore the setting: they always queue for a human.
+    @Test(arguments: [DestructiveAction.kick, .ban])
+    func memberRemovalAlwaysWaitsForTheSheet(kind: DestructiveAction) async {
+        let bus = EventBus()
+        let gate = ConfirmationGate(eventBus: bus, requireConfirmation: { false })
+        var approved = true
+
+        let events = await destructiveEvents(on: bus) {
+            let request = Task {
+                await gate.request(kind: kind, targetUserId: "u3", guildId: "g3", reason: "test")
+            }
+            var pending: UUID?
+            for _ in 0..<200 where pending == nil {
+                pending = await gate.queue.first?.id
+                if pending == nil { try? await Task.sleep(for: .milliseconds(5)) }
+            }
+            #expect(pending != nil, "\(kind.rawValue) must queue even with confirmation off")
+            if let pending { await gate.cancel(pending) }
+            approved = await request.value
+        }
+
+        #expect(!approved)
+        #expect(events == ["requested \(kind.rawValue) u3 g3", "cancelled \(kind.rawValue) u3"])
     }
 
     @Test func requiredConfirmationReportsRequestThenConfirmation() async {

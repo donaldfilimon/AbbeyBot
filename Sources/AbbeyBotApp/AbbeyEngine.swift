@@ -588,21 +588,29 @@ final class AbbeyEngine {
         }
     }
 
+    /// Appends under `MemoryFactPolicy`, the same bound the server applies. Returns the
+    /// stored fact text (trimmed, possibly truncated) or nil when nothing was stored.
     private func appendMemoryFact(in context: ModelContext, authorId: String, guildId: String, content: String) -> String? {
         let key = ReputationMath.cacheKey(userId: authorId, guildId: guildId)
-        let fact = MemoryFactText.extract(from: content)
-        guard !fact.isEmpty else { return nil }
         let descriptor = FetchDescriptor<UserMemory>(predicate: #Predicate { $0.compositeKey == key })
-        if let existing = try? context.fetch(descriptor).first {
-            if !existing.facts.contains(fact) {
-                existing.facts.append(fact)
+        let existing = try? context.fetch(descriptor).first
+        let outcome = MemoryFactPolicy.appending(MemoryFactText.extract(from: content), to: existing?.facts ?? [])
+        lastMemoryFactOutcome = outcome
+        guard !outcome.fact.isEmpty else { return nil }
+        if let existing {
+            if outcome.changed {
+                existing.facts = outcome.facts
                 existing.updatedAt = .now
             }
         } else {
-            context.insert(UserMemory(discordUserId: authorId, guildId: guildId, facts: [fact]))
+            context.insert(UserMemory(discordUserId: authorId, guildId: guildId, facts: outcome.facts))
         }
-        return fact
+        return outcome.fact
     }
+
+    /// Set by `appendMemoryFact` during ingest. `rememberFact` reads it straight after
+    /// `ingestMessage` returns, with no suspension in between, so it belongs to that ingest.
+    private var lastMemoryFactOutcome: MemoryFactPolicy.Outcome?
 
     func rememberFact(userId: String, guildId: String, fact: String) async -> String {
         let outcome = await ingestMessage(
@@ -614,7 +622,10 @@ final class AbbeyEngine {
         guard case .inserted = outcome else {
             return DiscordCopy.rememberFailed(MemoryCommitError.notCommitted)
         }
-        return DiscordCopy.remembered(userId: userId)
+        let applied = lastMemoryFactOutcome
+        return DiscordCopy.remembered(
+            userId: userId, truncated: applied?.truncated ?? false, evicted: applied?.evicted ?? 0
+        )
     }
 
     func forgetFact(userId: String, guildId: String, index: Int) -> String {

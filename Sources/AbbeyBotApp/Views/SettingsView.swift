@@ -93,7 +93,7 @@ struct SettingsView: View {
 
             Section("Safety") {
                 Toggle("Require confirmation for destructive actions", isOn: $config.confirmationRequiredForDestructiveActions)
-                Text("Gates purge/kick/ban behind an explicit confirmation sheet. UserDefaults key: ABBEY_CONFIRMATION_REQUIRED")
+                Text("Off lets purges run without the confirmation sheet. Kick and ban always ask. UserDefaults key: ABBEY_CONFIRMATION_REQUIRED")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

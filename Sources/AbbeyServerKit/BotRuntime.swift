@@ -601,7 +601,8 @@ public actor BotRuntime {
 
     /// Direct remember, outside the "remember ..." intent-classification round-trip —
     /// used by the desktop app's sync client and anything else with a fact in hand already.
-    public func remember(userId: String, guildId: String, fact: String) async throws {
+    @discardableResult
+    public func remember(userId: String, guildId: String, fact: String) async throws -> MemoryFactPolicy.Outcome {
         try await MemoryRepository.appendFact(userId: userId, guildId: guildId, fact: fact, on: app.db)
     }
 
@@ -730,8 +731,12 @@ public actor BotRuntime {
             remember: { [weak self] userId, guildId, fact in
                 guard let self else { return DiscordCopy.engineUnavailable }
                 do {
-                    try await MemoryRepository.appendFact(userId: userId, guildId: guildId, fact: fact, on: self.app.db)
-                    return DiscordCopy.remembered(userId: userId)
+                    let outcome = try await MemoryRepository.appendFact(
+                        userId: userId, guildId: guildId, fact: fact, on: self.app.db
+                    )
+                    return DiscordCopy.remembered(
+                        userId: userId, truncated: outcome.truncated, evicted: outcome.evicted
+                    )
                 } catch {
                     return DiscordCopy.rememberFailed(error)
                 }
